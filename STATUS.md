@@ -187,3 +187,6 @@ from: CMS-23
 
 ### CMS-25
 from: CMS-23
+
+**Notes**
+- 22 Nov: Closes with the adoption plan's steps: LYX-05 in step 3, LYX-04 in step 11, LYX-03 in step 29, LYX-01 and LYX-02 in step 38 (decision D18 of the plan). LYX-01 is a Medium player defect; it can be fixed alone with its unit test if it should not wait for step 38.
