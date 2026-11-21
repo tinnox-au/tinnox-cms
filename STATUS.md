@@ -3,7 +3,7 @@ contract: status/v2
 repo: tinnox-au/tinnox-cms
 initiative: TINNOX CMS
 key: CMS
-next_id: 24
+next_id: 25
 phase: Not written yet: one sentence on what this project is and where it stands
 gate: -
 seeded: 17 Nov 2026 by status init
@@ -43,6 +43,7 @@ None.
 | Id | Card | Agreed | PR | Since |
 |---|---|---|---|---|
 | CMS-23 | Poteto pyramid adoption plan: rule and finding inventory, enforcement design per layer, ordered PR-sized steps (plan only, no code) | Michael 22 Nov | - | 22 Nov |
+| CMS-24 | Poteto pyramid refactor, group A: guardrails that land with their fixes (document, test, migration, import and lint checks) | Michael 22 Nov | - | 22 Nov |
 
 ## In review
 
@@ -179,3 +180,6 @@ from: CMS-15
 
 **Evidence**
 Invite cancel focus fixed in PR 34 with a component test
+
+### CMS-24
+from: CMS-23
