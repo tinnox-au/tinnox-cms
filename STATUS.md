@@ -3,7 +3,7 @@ contract: status/v2
 repo: tinnox-au/tinnox-cms
 initiative: TINNOX CMS
 key: CMS
-next_id: 25
+next_id: 26
 phase: Not written yet: one sentence on what this project is and where it stands
 gate: -
 seeded: 17 Nov 2026 by status init
@@ -33,6 +33,7 @@ None.
 | CMS-17 | Audio and PDF media (stage C): the Planned Audio and Documents entries in Media | proposed | - | 19 Nov |
 | CMS-18 | Web pages on screens (stage C): sandboxed, off by default per organisation; needs the P2-06 threat review first, like CMS-3 | proposed | - | 19 Nov |
 | CMS-20 | Self-service sign-up with payment (like Yodeck): new customers sign up and pay, invites complete without TINNOX | proposed | - | 19 Nov |
+| CMS-25 | Fix the open layouts review findings LYX-01 to LYX-05 (round 4); each closes with its poteto plan step | proposed | - | 22 Nov |
 
 ## To do
 
@@ -182,4 +183,7 @@ from: CMS-15
 Invite cancel focus fixed in PR 34 with a component test
 
 ### CMS-24
+from: CMS-23
+
+### CMS-25
 from: CMS-23
