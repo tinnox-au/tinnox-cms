@@ -110,5 +110,16 @@ The run uses its own database, `tinnox_e2e_test`, rebuilt from the migrations an
 at the start (created once as the PostgreSQL superuser), so the development database gets
 no test rows. It still restarts the shared PostgreSQL container once (E2E 13).
 
+The E2E API's environment is an allow-list (`e2eApiEnvironment` in `e2e/support/stack.ts`):
+its addresses, database, media directory and the local Mailpit are set there, the secrets and
+the Keycloak client come from the root `.env`, and every other name the API reads is passed
+empty, so nothing exported in the shell reaches it. Before anything else, global set-up refuses
+to run unless every host and URL of the run (those settings, the database set-up's connection,
+the previews, Mailpit and the API origin, which `playwright.config.ts` also gives the player
+build as `VITE_API_BASE_URL`) is `localhost`, 127.0.0.0/8 or `::1`, including any `host` or
+`hostaddr` parameter of a database URL (EAX-09; the rules are in
+`scripts/lib/loopback-targets.ts`). The previews are started by
+Playwright just before global set-up; they listen on 127.0.0.1 only.
+
 Keycloak accepts each one-time code once, so a run that starts within the same 30 seconds
 as the previous sign-in of that user waits for the next code.

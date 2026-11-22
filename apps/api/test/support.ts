@@ -48,8 +48,10 @@ import type { MailMessage, Mailer } from '../src/mail.ts';
 import { MediaPipeline } from '../src/media/pipeline.ts';
 
 // Tests outside apps/api reach the harness only as '@tinnox/api/test-support' (the package's
-// one export), so the types they need are re-exported here.
+// one export), so the types they need are re-exported here. The e2e stack builds the API's
+// environment from RUNTIME_ENV_NAMES (EAX-09).
 export type { IdentityProvider };
+export { RUNTIME_ENV_NAMES };
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const envFile = join(repoRoot, '.env');

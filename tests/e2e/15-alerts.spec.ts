@@ -15,7 +15,7 @@ import { operatorSession, type OperatorSession } from './support/contexts.ts';
 import { e2eUrls } from './support/database.ts';
 import { expectPhase, openPlayer, pairingCode } from './support/player.ts';
 import { notifications, openScreenPage, pageHeading } from './support/portal.ts';
-import { PORTAL_URL } from './support/stack.ts';
+import { MAILPIT_URL, PORTAL_URL } from './support/stack.ts';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -23,7 +23,7 @@ const runId = randomUUID().slice(0, 8);
 // Mailpit is shared by every run on this machine: mail is found by this run's address.
 const ADDRESS = `zz-alerts-${runId}@example.com`;
 const SCREEN = `ZZ alerts player ${runId}`;
-const MAILPIT_API = 'http://127.0.0.1:8025/api/v1';
+const MAILPIT_API = `${MAILPIT_URL}/api/v1`;
 
 let operator: OperatorSession;
 let playerContext: BrowserContext;
