@@ -12,8 +12,7 @@
   },
   "dependencies": {
     "@tinnox/contracts": "*",
-    "@tinnox/domain": "*",
-    "zod": "4.6.7"
+    "@tinnox/domain": "*"
   },
   "devDependencies": {}
 }

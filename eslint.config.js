@@ -132,8 +132,10 @@ const both = (outer, inner) => outer.flatMap((o) => inner.map((i) => [o, i]));
 
 // Import boundaries (adoption plan section 3.1, step 7). One row per workspace of the root
 // package.json, plus scripts: the @tinnox packages its files may import. It records the real
-// graph; scripts/lib/import-boundaries-lint.test.ts fails when a workspace has no row.
-// No package imports an app, and no app imports another app.
+// graph; scripts/lib/import-boundaries-lint.test.ts fails when a workspace has no row, and
+// scripts/lib/workspace-deps.test.ts when an import is not declared in the workspace's
+// package.json (the root package.json for scripts). No package imports an app, and no app
+// imports another app.
 export const IMPORT_LAYERS = {
   'packages/contracts': [],
   'packages/storage': [],
@@ -143,7 +145,6 @@ export const IMPORT_LAYERS = {
   'packages/app-render': ['contracts'],
   'packages/delivery': ['contracts', 'domain'],
   'apps/api': ['contracts', 'db', 'storage', 'domain', 'delivery'],
-  // Not declared in its package.json yet; the manifest check of step 9 adds it.
   'apps/media-worker': ['contracts'],
   'apps/portal': ['contracts', 'domain', 'app-render'],
   'apps/player-web': ['contracts', 'domain', 'app-render'],

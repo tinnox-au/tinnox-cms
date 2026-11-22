@@ -44,6 +44,9 @@
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
+    "@tinnox/contracts": "*",
+    "@tinnox/db": "*",
+    "@tinnox/domain": "*",
     "@types/node": "22.20.5",
     "@vitest/browser-playwright": "5.1.0",
     "concurrently": "10.0.7",

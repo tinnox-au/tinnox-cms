@@ -15,13 +15,10 @@
     "@tinnox/contracts": "*",
     "@tinnox/db": "*",
     "@tinnox/domain": "*",
-    "@tinnox/storage": "*",
     "@types/pg": "8.23.1",
     "axe-core": "4.14.0",
     "esbuild": "0.28.2",
     "otplib": "13.6.0",
-    "pg": "8.23.1",
-    "undici": "8.12.4",
-    "zod": "4.6.7"
+    "pg": "8.23.1"
   }
 }
