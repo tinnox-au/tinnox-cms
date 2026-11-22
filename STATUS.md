@@ -3,7 +3,7 @@ contract: status/v2
 repo: tinnox-au/tinnox-cms
 initiative: TINNOX CMS
 key: CMS
-next_id: 26
+next_id: 27
 phase: Not written yet: one sentence on what this project is and where it stands
 gate: -
 seeded: 17 Nov 2026 by status init
@@ -34,6 +34,7 @@ None.
 | CMS-18 | Web pages on screens (stage C): sandboxed, off by default per organisation; needs the P2-06 threat review first, like CMS-3 | proposed | - | 19 Nov |
 | CMS-20 | Self-service sign-up with payment (like Yodeck): new customers sign up and pay, invites complete without TINNOX | proposed | - | 19 Nov |
 | CMS-25 | Fix the open layouts review findings LYX-01 to LYX-05 (round 4); each closes with its poteto plan step | proposed | - | 22 Nov |
+| CMS-26 | Ruleset on main: no force push or deletion, merge or squash only, pull requests and the three CI jobs required (poteto D12, D14); Michael creates it | proposed | - | 22 Nov |
 
 ## To do
 
@@ -193,3 +194,6 @@ from: CMS-23
 
 **Notes**
 - 22 Nov: Closes with the adoption plan's steps: LYX-05 in step 3, LYX-04 in step 11, LYX-03 in step 29, LYX-01 and LYX-02 in step 38 (decision D18 of the plan). LYX-01 is a Medium player defect; it can be fixed alone with its unit test if it should not wait for step 38.
+
+### CMS-26
+from: CMS-24
