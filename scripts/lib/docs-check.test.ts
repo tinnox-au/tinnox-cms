@@ -16,6 +16,7 @@ import {
   decisionRegister,
   liveLines,
   pinSources,
+  splitAtLinks,
 } from './docs-check.ts';
 
 const AGENTS = [
@@ -182,6 +183,37 @@ describe('paths', () => {
     expect(
       check('README.md', '```', '`gone/file.ts`', '```', '## Old (2026-11-14)', '`gone/file.ts`'),
     ).toEqual([]);
+  });
+});
+
+describe('paths beyond a symbolic link', () => {
+  // A worktree links these two from the main checkout while the browser suite runs.
+  const isLink = (path: string) => path === 'infra/.generated' || path === 'data/jobs';
+
+  it('keeps a path at or beyond a link away from git, which would refuse the whole batch', () => {
+    expect(
+      splitAtLinks(
+        [
+          'infra/.generated/',
+          'infra/.generated/dev-credentials.json',
+          'data/jobs',
+          'infra/docker-compose.yml',
+          'data/',
+          '.env',
+        ],
+        isLink,
+      ),
+    ).toEqual({
+      plain: ['infra/docker-compose.yml', 'data/', '.env'],
+      linked: ['infra/.generated/', 'infra/.generated/dev-credentials.json', 'data/jobs'],
+    });
+  });
+
+  it('sends every path to git when nothing is a link', () => {
+    expect(splitAtLinks(['infra/.generated/', 'data/jobs/x'], () => false)).toEqual({
+      plain: ['infra/.generated/', 'data/jobs/x'],
+      linked: [],
+    });
   });
 });
 

@@ -27,6 +27,7 @@ import {
   decisionRegister,
   pinSources,
   referencedPaths,
+  splitAtLinks,
 } from './lib/docs-check.ts';
 import { repoRoot } from './lib/env.ts';
 
@@ -78,11 +79,18 @@ const candidates = [
 ];
 // A folder such as `data/` matches its ignore rule only when asked for with the slash.
 const asked = candidates.flatMap((c) => (c.endsWith('/') || /\.\w+$/.test(c) ? [c] : [c, `${c}/`]));
-const ignored = new Set(
-  git(['check-ignore', '--stdin'], asked.join('\n'))
+// Git refuses the whole batch when one path lies beyond a symbolic link, as in a worktree that
+// links infra/.generated or data/jobs from the main checkout for the browser suite. The link
+// stands in for the ignored folder there, so such a path passes when it is really there.
+const isLink = (path: string): boolean =>
+  lstatSync(join(repoRoot, path), { throwIfNoEntry: false })?.isSymbolicLink() ?? false;
+const { plain, linked } = splitAtLinks(asked, isLink);
+const ignored = new Set([
+  ...git(['check-ignore', '--stdin'], plain.join('\n'))
     .split('\n')
     .filter((p) => p !== ''),
-);
+  ...linked.filter((p) => existsSync(join(repoRoot, p))),
+]);
 
 const findings = [
   ...checkListedDocs((path) => read(path) !== undefined),

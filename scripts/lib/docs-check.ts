@@ -260,6 +260,26 @@ export function referencedPaths(doc: Doc, files: ReadonlySet<string>): PathRefer
   return references;
 }
 
+/**
+ * Sorts path candidates into those `git check-ignore` can judge and those that sit at or beyond
+ * a symbolic link. Git refuses the whole batch when one path is "beyond a symbolic link", which
+ * happens in a worktree that links `infra/.generated` or `data/jobs` from the main checkout to
+ * run the browser suite. The command judges a linked path by whether it is there.
+ */
+export function splitAtLinks(
+  candidates: readonly string[],
+  isLink: (path: string) => boolean,
+): { plain: string[]; linked: string[] } {
+  const plain: string[] = [];
+  const linked: string[] = [];
+  for (const candidate of candidates) {
+    const parts = candidate.replace(/\/$/, '').split('/');
+    const crossesLink = parts.some((_, index) => isLink(parts.slice(0, index + 1).join('/')));
+    (crossesLink ? linked : plain).push(candidate);
+  }
+  return { plain, linked };
+}
+
 function exists(candidate: string, repo: Repo): boolean {
   if (repo.ignored.has(candidate) || repo.ignored.has(`${candidate}/`)) return true;
   const folder = candidate.endsWith('/') ? candidate : `${candidate}/`;
