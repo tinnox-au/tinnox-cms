@@ -260,3 +260,69 @@ describe('casts to an inline object type (section 3.2, D25)', () => {
     expect(await flagged(path, code, [SYNTAX])).toEqual([]);
   });
 });
+
+describe('casts to MigratorPool (SEC-1, D4)', () => {
+  const MIGRATOR_CAST = /^Do not cast to MigratorPool: .*Call connectMigrator\(connectionString/;
+
+  it.each([
+    ['a plain cast', 'export const p = pool as MigratorPool;'],
+    ['a double cast', 'export const p = pool as unknown as MigratorPool;'],
+    ['an angle-bracket assertion', 'export const p = <MigratorPool>pool;'],
+    ['a union', 'export const p = pool as MigratorPool | undefined;'],
+    ['a generic argument', 'export const p = connect() as Promise<MigratorPool>;'],
+    ['a qualified name', 'export const p = pool as db.MigratorPool;'],
+  ])('flags %s', async (_name, code) => {
+    const messages = await flagged('apps/api/src/routes/fixture.ts', code, [SYNTAX]);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatch(MIGRATOR_CAST);
+  });
+
+  it.each([
+    'apps/api/src/fixture.ts',
+    'apps/api/src/main.ts',
+    'apps/api/src/mail.ts',
+    'apps/media-worker/src/fixture.ts',
+    'packages/db/src/fixture.ts',
+    'packages/delivery/src/fixture.ts',
+    'apps/portal/src/features/fixture.tsx',
+    'apps/portal/vite.config.ts',
+    'apps/player-web/sw/sw.ts',
+    'scripts/provision-member.ts',
+    'scripts/seed.ts',
+    'scripts/lib/provision.ts',
+    'vitest.config.ts',
+    // Tests too: they connect through connectMigrator, so no test needs to mint one.
+    'tests/integration/fixture.test.ts',
+    'packages/db/test/fixture.integration.test.ts',
+    'apps/api/src/fixture.test.ts',
+    'apps/portal/src/fixture.test.tsx',
+    'apps/portal/src/testFrame.test-support.ts',
+  ])('flags it in %s', async (path) => {
+    const messages = await flagged(path, 'export const p = pool as MigratorPool;', [SYNTAX]);
+    expect(messages).toEqual([expect.stringMatching(MIGRATOR_CAST)]);
+  });
+
+  it('leaves the type in annotations and other casts alone', async () => {
+    const code = [
+      'export async function run(pool: MigratorPool): Promise<void> {}',
+      'export let held: MigratorPool | undefined;',
+      'export const p = pool as Pool;',
+    ].join('\n');
+    expect(await flagged('scripts/lib/fixture.ts', code, [SYNTAX])).toEqual([]);
+  });
+
+  it('lets packages/db/src/migrate.ts mint it, and keeps that file the rest of its list', async () => {
+    const path = 'packages/db/src/migrate.ts';
+    expect(await flagged(path, 'export const p = pool as MigratorPool;', [SYNTAX])).toEqual([]);
+    const messages = await flagged(
+      path,
+      "export const v = a!; export const c = (e as { a: 1 }).a; export const m = await import('node:https');",
+      [SYNTAX],
+    );
+    expect(messages).toEqual([
+      expect.stringMatching(/^Do not assert a value is not null/),
+      expect.stringMatching(/^Do not cast to an inline object type/),
+      expect.stringMatching(/Outbound calls need a data-location review/),
+    ]);
+  });
+});

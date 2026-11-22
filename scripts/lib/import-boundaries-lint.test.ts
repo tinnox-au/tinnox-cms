@@ -2,6 +2,7 @@
 // fixture text. Each case takes the no-restricted-imports options that eslint.config.js resolves
 // for a real path, so the generated blocks are tested with their globs: a block that took the
 // rule away from a file group would fail here.
+import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -9,6 +10,7 @@ import { ESLint, type Linter } from 'eslint';
 import tseslint from 'typescript-eslint';
 import { describe, expect, it } from 'vitest';
 import { repoRoot } from './env.ts';
+import { loadSpecifiers } from './load-specifiers.ts';
 
 const RULE = 'no-restricted-imports';
 const repository = new ESLint({ cwd: repoRoot });
@@ -22,8 +24,11 @@ async function flagged(path: string, code: string): Promise<string[]> {
     overrideConfigFile: true,
     overrideConfig: [
       {
-        files: ['**/*.ts', '**/*.tsx', '**/*.mjs'],
+        // Every extension trackedCodeFiles lists, so the repository test of import() and require()
+        // also lints .js and .cjs files; module syntax, so the synthetic static import parses.
+        files: ['**/*.ts', '**/*.tsx', '**/*.mjs', '**/*.js', '**/*.cjs'],
         languageOptions: {
+          sourceType: 'module',
           parser: tseslint.parser,
           parserOptions: { ecmaFeatures: { jsx: true } },
         },
@@ -85,7 +90,18 @@ const APP = /^'.*' import is restricted from being used by a pattern\. Apps are 
 const RELATIVE = /Do not reach into another workspace by relative path\. Import '@tinnox\/<name>'/;
 const DEEP = /Do not import a file inside another package\. Import its entry/;
 const TEST_CODE = /Product code does not import test code\. Move what both need into a module/;
+// LINT-3: the pg message names only what the file group may use instead.
 const PG = /Only packages\/db talks to PostgreSQL\. Use createPool and withOrg from @tinnox\/db/;
+// The browser apps' sentence is true for their Node build files too (vite.config.ts, build/).
+const PG_BROWSER =
+  /^(?!.*@tinnox\/db).*Only packages\/db talks to PostgreSQL, and apps\/(portal|player-web) has no database connection\. Its browser code calls the API through apps\/(portal\/src\/api|player-web\/src\/platform\/api\.ts); its build files .* run in Node/;
+const BROWSER_LAYER =
+  /may import only .* Its browser code calls the API through .*; its build files/;
+const PG_WORKER =
+  /^(?!.*@tinnox\/db).*Only packages\/db talks to PostgreSQL\. The media worker has no database: .*job directory/;
+const PG_PACKAGE =
+  /Only packages\/db talks to PostgreSQL\. packages\/[a-z-]+ may not import @tinnox\/db: take the data you need as a parameter/;
+const SCRIPTS_LIB = /scripts\/lib holds the offline tools .*Move what both need into a package/;
 const FASTIFY = /Only apps\/api serves HTTP\. Add the route under apps\/api\/src\/routes/;
 const BROWSER =
   /This file is bundled for the browser, where Node modules do not exist\. Call the API/;
@@ -115,13 +131,17 @@ const ROWS: readonly {
     path: 'packages/storage/src/fixture.ts',
     forbidden: [
       ['@tinnox/contracts', /packages\/storage is a bottom layer/],
-      ['pg', PG],
+      ['pg', PG_PACKAGE],
+      ['../../../scripts/lib/env.ts', SCRIPTS_LIB],
     ],
     allowed: ['node:fs/promises', './local.ts'],
   },
   {
     path: 'packages/db/src/fixture.ts',
-    forbidden: [['@tinnox/contracts', /packages\/db is a bottom layer/]],
+    forbidden: [
+      ['@tinnox/contracts', /packages\/db is a bottom layer/],
+      ['../../../scripts/lib/env.ts', SCRIPTS_LIB],
+    ],
     allowed: ['pg', 'node:crypto', './tx.ts'],
   },
   {
@@ -165,6 +185,7 @@ const ROWS: readonly {
       ['pg', PG],
       ['@tinnox/db/src/pool.ts', DEEP],
       ['../../../packages/db/src/pool.ts', RELATIVE],
+      ['../../../scripts/lib/provision.ts', SCRIPTS_LIB],
     ],
     allowed: [
       '@tinnox/db',
@@ -180,7 +201,7 @@ const ROWS: readonly {
     forbidden: [
       ['@tinnox/db', /apps\/media-worker may import only @tinnox\/contracts/],
       ['@tinnox/api/test-support', APP],
-      ['pg', PG],
+      ['pg', PG_WORKER],
       ['fastify', FASTIFY],
     ],
     allowed: ['@tinnox/contracts', 'sharp', 'node:child_process'],
@@ -188,16 +209,20 @@ const ROWS: readonly {
   {
     path: 'apps/portal/src/features/fixture.tsx',
     forbidden: [
-      ['@tinnox/db', /apps\/portal may import only .*bundled for the browser: call the API/],
+      [
+        '@tinnox/db',
+        /apps\/portal may import only .* Its browser code calls the API through apps\/portal\/src\/api/,
+      ],
       ['@tinnox/delivery', /apps\/portal may import only @tinnox\/contracts, @tinnox\/domain/],
       ['@tinnox/player-web', APP],
       ['node:fs', BROWSER],
       ['fs', BROWSER],
       ['fs/promises', BROWSER],
       ['child_process', BROWSER],
-      ['pg', PG],
+      ['pg', PG_BROWSER],
       ['fastify', FASTIFY],
       ['../../../api/src/app.ts', RELATIVE],
+      ['../../../../scripts/lib/env.ts', SCRIPTS_LIB],
     ],
     allowed: [
       '@tinnox/contracts',
@@ -216,8 +241,12 @@ const ROWS: readonly {
   {
     path: 'apps/player-web/src/platform/fixture.ts',
     forbidden: [
-      ['@tinnox/storage', /apps\/player-web may import only .*bundled for the browser/],
+      [
+        '@tinnox/storage',
+        /apps\/player-web may import only .* Its browser code calls the API through apps\/player-web\/src\/platform\/api\.ts/,
+      ],
       ['node:crypto', BROWSER],
+      ['pg', PG_BROWSER],
     ],
     allowed: ['@tinnox/domain', '@tinnox/app-render', 'idb', '../core/machine.ts'],
   },
@@ -310,14 +339,32 @@ describe('import boundaries, one row per workspace (section 3.1)', { timeout: 30
 
 describe('pg outside packages/db (rule (g), D25)', () => {
   it.each([
-    'apps/api/src/fixture.ts',
-    'apps/api/scripts/fixture.mjs',
-    'apps/media-worker/src/fixture.ts',
-    'scripts/seed.ts',
-    'scripts/lib/provision.ts',
-    'packages/storage/src/fixture.ts',
-  ])('flags pg in the non-test file %s', async (path) => {
-    expect(await flagged(path, "import pg from 'pg';")).toEqual([expect.stringMatching(PG)]);
+    ['apps/api/src/fixture.ts', PG],
+    ['apps/api/scripts/fixture.mjs', PG],
+    ['scripts/seed.ts', PG],
+    ['scripts/lib/provision.ts', PG],
+    ['apps/media-worker/src/fixture.ts', PG_WORKER],
+    ['packages/storage/src/fixture.ts', PG_PACKAGE],
+    ['packages/delivery/src/fixture.ts', PG_PACKAGE],
+    // A package may not import an app, so app-render is not told to call the apps' API clients.
+    ['packages/app-render/src/fixture.ts', PG_PACKAGE],
+    ['apps/player-web/sw/sw.ts', PG_BROWSER],
+    // The Vite configuration and the player's build plugin run in Node, not in the browser: the
+    // message must not tell them they are bundled.
+    ['apps/portal/vite.config.ts', PG_BROWSER],
+    ['apps/player-web/vite.config.ts', PG_BROWSER],
+    ['apps/player-web/build/shell-plugin.mjs', PG_BROWSER],
+  ])(
+    'flags pg in the non-test file %s, naming what it may use instead (LINT-3)',
+    async (path, message) => {
+      expect(await flagged(path, "import pg from 'pg';")).toEqual([expect.stringMatching(message)]);
+    },
+  );
+
+  it('names the build files in the layer message of the Vite configuration, which is not bundled', async () => {
+    expect(
+      await flagged('apps/portal/vite.config.ts', "import { createPool } from '@tinnox/db';"),
+    ).toEqual([expect.stringMatching(BROWSER_LAYER)]);
   });
 
   it.each([
@@ -389,5 +436,104 @@ describe('route files (rule (i), D6)', () => {
 
   it('lets apps/api/src/app.ts register the routes', async () => {
     expect(await flagged('apps/api/src/app.ts', importOf('./routes/media.ts'))).toEqual([]);
+  });
+});
+
+describe('the root scripts/lib (LINT-12)', () => {
+  it('leaves a workspace its own scripts folder, and lets scripts and tests import scripts/lib', async () => {
+    expect(
+      await flagged('apps/api/test/fixture.ts', importOf('../scripts/live-check.mjs')),
+    ).toEqual([]);
+    expect(
+      await flagged('apps/api/src/routes/fixture.ts', importOf('../../scripts/live-check.mjs')),
+    ).toEqual([]);
+    expect(await flagged('scripts/fixture.ts', importOf('./lib/provision.ts'))).toEqual([]);
+    expect(await flagged('scripts/lib/fixture.ts', importOf('../lib/env.ts'))).toEqual([]);
+  });
+});
+
+/**
+ * The no-restricted-imports messages for each import() and require() in `code`, each linted as
+ * the static import `import '<specifier>';` at `path` (LINT-1): the rule sees only static
+ * imports, and a dynamic one is held to the same layer rules.
+ */
+async function loadsFlagged(path: string, code: string): Promise<string[]> {
+  const messages: string[] = [];
+  for (const specifier of loadSpecifiers(path, code)) {
+    messages.push(...(await flagged(path, `import ${JSON.stringify(specifier)};`)));
+  }
+  return messages;
+}
+
+/** Every tracked file ESLint parses as code. */
+function trackedCodeFiles(): string[] {
+  const listed = spawnSync('git', ['-C', repoRoot, 'ls-files', '-z'], { encoding: 'utf8' });
+  if (listed.status !== 0) throw new Error(`git ls-files failed: ${listed.stderr}`);
+  return listed.stdout
+    .split('\0')
+    .filter((path) => /\.(ts|tsx|js|mjs|cjs)$/.test(path))
+    .filter((path) => existsSync(join(repoRoot, path)));
+}
+
+describe('import() and require() (LINT-1)', { timeout: 30_000 }, () => {
+  it.each([
+    ['apps/api/src/publishing.ts', "export const m = await import('pg');", PG],
+    [
+      'apps/api/src/publishing.ts',
+      "export const m = await import('./routes/media.ts');",
+      OUTSIDE_ROUTES,
+    ],
+    [
+      'apps/api/src/publishing.ts',
+      "export const m = await import('../test/support.ts');",
+      TEST_CODE,
+    ],
+    ['apps/api/src/routes/displays.ts', "export const m = await import('./media.ts');", ROUTE],
+    [
+      'apps/portal/src/features/displays/DisplaysPage.tsx',
+      "export const m = await import('@tinnox/db');",
+      /apps\/portal may import only .* Its browser code calls the API/,
+    ],
+    [
+      'apps/portal/src/features/displays/DisplaysPage.tsx',
+      'export const m = await import(`@tinnox/db`);',
+      /apps\/portal may import only .* Its browser code calls the API/,
+    ],
+    ['apps/player-web/src/app.ts', "export const m = await import('node:fs');", BROWSER],
+    ['packages/delivery/src/index.ts', "export const m = await import('@tinnox/api');", APP],
+    ['apps/media-worker/src/video.ts', "export const m = await import('fastify');", FASTIFY],
+    ['scripts/lib/fixture.ts', "const pg = require('pg');", PG],
+    // .js and .cjs files are linted too, not only the extensions the fixtures above use.
+    ['apps/api/scripts/fixture.cjs', "const pg = require('pg');", PG],
+    ['apps/api/scripts/fixture.js', "export const m = await import('pg');", PG],
+  ])('flags the load in %s: %s', async (path, code, message) => {
+    expect(await loadsFlagged(path, code)).toEqual([expect.stringMatching(message)]);
+  });
+
+  it("allows the portal's lazy routes and a load the layer rules allow", async () => {
+    expect(
+      await loadsFlagged(
+        'apps/portal/src/App.tsx',
+        "const page = () => import('./features/dashboard/DashboardPage.tsx');",
+      ),
+    ).toEqual([]);
+    expect(
+      await loadsFlagged('apps/api/src/config.test.ts', "const f = await import('fastify');"),
+    ).toEqual([]);
+  });
+
+  it('holds every import() and require() in the repository to the rules of a static import', async () => {
+    const problems: string[] = [];
+    for (const path of trackedCodeFiles()) {
+      if (await repository.isPathIgnored(path)) continue;
+      const text = readFileSync(join(repoRoot, path), 'utf8');
+      // Cheap filter first: parse only files that can hold a load.
+      if (!/\b(import|require)\s*\(/.test(text)) continue;
+      for (const message of await loadsFlagged(path, text)) problems.push(`${path}: ${message}`);
+    }
+    expect(
+      problems,
+      'an import() or require() must pass the rule its static form would: follow the message, as for a static import',
+    ).toEqual([]);
   });
 });

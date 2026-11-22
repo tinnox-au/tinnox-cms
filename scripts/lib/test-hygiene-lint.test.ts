@@ -182,6 +182,19 @@ describe('module mocks in integration and e2e tests (OTH-13)', () => {
     for (const message of messages) expect(message).toMatch(MOCKED);
   });
 
+  // LINT-3: packages/db may not import the API's harness, so its tests are pointed at their own.
+  it('names the helpers each group may import', async () => {
+    expect(await flagged('apps/api/test/fixture.integration.test.ts', "vi.mock('pg');")).toEqual([
+      expect.stringMatching(/startTestApp\(\.\.\., \{ wrapPool \}\).*apps\/api\/test\/support\.ts/),
+    ]);
+    const db = await flagged('packages/db/test/rls.integration.test.ts', "vi.mock('pg');");
+    expect(db).toEqual([
+      expect.stringMatching(
+        /^(?!.*apps\/api).*Wrap or replace the pool .*packages\/db\/test\/support\.ts/,
+      ),
+    ]);
+  });
+
   it('leaves unit and component tests free to replace a module', async () => {
     expect(await flagged('apps/api/src/fixture.test.ts', "vi.mock('nodemailer');")).toEqual([]);
     expect(

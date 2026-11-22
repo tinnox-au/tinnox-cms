@@ -78,6 +78,12 @@ describe('web storage and HTML sinks in browser code', { timeout: 30_000 }, () =
       'const { sessionStorage } = globalThis;',
       "const { 'localStorage': ls } = self;",
       'let ls; ({ localStorage: ls } = window);',
+      // LINT-8: an alias, a cast, defaultView and a destructured parameter reach it too.
+      "const w = window; w.localStorage.setItem('a', 'b');",
+      'const { localStorage: ls } = window as Window;',
+      "(window as Window).sessionStorage.setItem('a', 'b');",
+      'const s = document.defaultView?.localStorage;',
+      'function f({ localStorage: ls }: Window) { return ls; }',
     ])(`${path}: flags %s`, async (code) => {
       await expectOne(path, code, STORAGE);
     });
@@ -87,6 +93,23 @@ describe('web storage and HTML sinks in browser code', { timeout: 30_000 }, () =
       ['range.createContextualFragment(s);', /Do not parse strings as HTML: .*textContent/],
       ['el.style.cssText = s;', /Do not write a style as one string: .*setProperty/],
       ['el.innerHTML = s;', /Do not assign HTML strings; build DOM nodes or use textContent/],
+      // LINT-7: the other parsers and sinks.
+      ['document.writeln(s);', /'document\.writeln' is restricted/],
+      ['el.setHTMLUnsafe(s);', /Do not parse strings as HTML: .*textContent/],
+      ['const d = Document.parseHTMLUnsafe(s);', /Do not parse strings as HTML: .*textContent/],
+      [
+        "const d = new DOMParser().parseFromString(s, 'text/html');",
+        /Do not parse strings as HTML: .*textContent/,
+      ],
+      ['frame.srcdoc = s;', /Do not give a frame its document as a string: .*served/],
+      ["el.setAttribute('style', s);", /as an attribute string: .*setProperty.*addEventListener/],
+      ["el.setAttribute('onclick', s);", /as an attribute string: .*setProperty.*addEventListener/],
+      [
+        "frame.setAttribute('srcdoc', s);",
+        /as an attribute string: .*setProperty.*addEventListener.*point src at a page/,
+      ],
+      ['Object.assign(el, { innerHTML: s });', /Do not parse strings as HTML: .*textContent/],
+      ['Object.assign(el.style, { cssText: s });', /For a style, set each property/],
     ])(`${path}: flags %s`, async (code, message) => {
       await expectOne(path, code, message);
     });
@@ -99,17 +122,48 @@ describe('web storage and HTML sinks in browser code', { timeout: 30_000 }, () =
     await expectOne(path, 'const { localStorage: ls } = window;', STORAGE);
   });
 
-  it('leaves a local name, text insertion and single style properties alone', async () => {
+  it.each([
+    'apps/portal/src/features/fixture.test.tsx',
+    'apps/player-web/src/core/fixture.test.ts',
+  ])('flags a style set as an attribute in browser tests too, in %s', async (path) => {
+    await expectOne(path, "el.setAttribute('style', s);", /as an attribute string/);
+  });
+
+  it('leaves a local name, text insertion, plain attributes and single style properties alone', async () => {
     const code = [
       'const localStorage = new Map(); localStorage.get("a");',
       'const { location, document: doc } = window;',
-      'const { localStorage: ls } = options;',
       "el.insertAdjacentText('beforeend', s);",
       "el.style.setProperty('color', c);",
       'el.textContent = s;',
+      "el.setAttribute('data-testid', 'canvas');",
+      "el.setAttribute('aria-hidden', 'true');",
+      'el.setAttribute(name, value);',
+      'Object.assign(el.dataset, { id });',
     ].join('\n');
     for (const path of BROWSER_PATHS) expect(await flagged(path, code)).toEqual([]);
   });
+
+  // LINT-8: the property ban cannot tell window from any other object, so a local object with a
+  // storage-named property is reported too; it is renamed instead.
+  it('flags a storage-named property on any object', async () => {
+    await expectOne(BROWSER_PATHS[0], 'const { localStorage: ls } = options;', STORAGE);
+  });
+
+  // React's srcDoc prop is the same sink as the srcdoc property.
+  it.each(['apps/portal/src/App.tsx', 'apps/portal/src/features/fixture.test.tsx'])(
+    'flags a frame document given as the srcDoc prop in %s',
+    async (path) => {
+      await expectOne(
+        path,
+        'export const f = <iframe srcDoc={s} />;',
+        /^Do not give a frame its document as a string: .*served/,
+      );
+      expect(await flagged(path, 'export const f = <iframe src={url} title="Preview" />;')).toEqual(
+        [],
+      );
+    },
+  );
 });
 
 describe('status wording in portal text (P2-04, DEC-33, SCR-17)', () => {
@@ -128,6 +182,15 @@ describe('status wording in portal text (P2-04, DEC-33, SCR-17)', () => {
     ['<p>{`Set by the operator`}</p>', OPERATOR],
     ['<Field hint={`Ask an operator ${name}`} />', OPERATOR],
     ['<img alt="Operator photo" />', OPERATOR],
+    // LINT-2: a Tooltip's content, a Field's error, a row's meta, a fragment, nested branches.
+    ['<Tooltip content="This screen is offline" />', ONLINE],
+    ['<Field label="Name" error="Display not found." />', DISPLAY],
+    ['<Row meta="Offline since 9:00" />', ONLINE],
+    ["<>{'Offline'}</>", ONLINE],
+    ["<p>{a ? 'Ready' : b ? 'Offline' : 'Unknown'}</p>", ONLINE],
+    ["<p>{a ? 'Ready' : b ? 'Busy' : c ? 'Offline' : 'Unknown'}</p>", ONLINE],
+    ["<p>{a ? 'Ready' : (b && 'Offline')}</p>", ONLINE],
+    ["<Field hint={a ? 'Ready' : b ? 'Ask an operator' : ''} />", OPERATOR],
   ])('flags %s', async (jsx, message) => {
     await expectOne(PATH, `export const x = ${jsx};`, message);
   });
@@ -149,6 +212,10 @@ describe('status wording in portal text (P2-04, DEC-33, SCR-17)', () => {
       ');',
       "export const b = displayName(display, 'online');",
       "const operator = operatorOf(request); const mode = 'offline';",
+      // A string compared in a test, or in a class name inside a nested element, is not text.
+      "export const c = <p>{status === 'offline' ? 'Not reporting' : 'Reporting'}</p>;",
+      "export const d = <p>{a ? (status === 'offline' && 'A') : 'B'}</p>;",
+      "export const e = <div>{a && <p className={b ? 'display-grid' : ''} />}</div>;",
     ].join('\n');
     expect(await flagged(PATH, code)).toEqual([]);
   });
@@ -237,6 +304,9 @@ describe('outbound calls in server source (DEC-13, DEC-15)', () => {
       "export const m = await import('socket.io-client');",
       "export const m = await import('nodemailer');",
       "const require = createRequire(import.meta.url); export const m = require('undici');",
+      // LINT-4: a require made and called at once, and a builtin fetched by name.
+      "export const m = createRequire(import.meta.url)('undici');",
+      "export const m = process.getBuiltinModule('node:https');",
     ]) {
       await expectOne(path, code, OUTBOUND);
     }
@@ -376,9 +446,19 @@ describe('outbound calls in server source (DEC-13, DEC-15)', () => {
       'new WebSocket(url);',
       'new EventSource(url);',
       'new XMLHttpRequest();',
+      // LINT-4: the same globals taken apart from the global object, also through a cast.
+      'const { fetch: f } = globalThis; await f(url);',
+      'const { WebSocket } = globalThis as typeof globalThis;',
+      "let f; ({ 'fetch': f } = globalThis);",
     ]) {
       await expectOne(path, code, OUTBOUND);
     }
+  });
+
+  it('leaves a fetch option taken from a parameter alone', async () => {
+    expect(
+      await flagged('apps/api/src/fixture.ts', 'const { fetch: f } = options; await f(url);'),
+    ).toEqual([]);
   });
 
   it.each([
@@ -393,6 +473,8 @@ describe('outbound calls in server source (DEC-13, DEC-15)', () => {
 describe('process.env outside the entry points and config modules', () => {
   const ENV =
     /^'process\.env' is restricted from being used\. Read configuration at an entry point/;
+  const GLOBAL_ENV =
+    /^Write process\.env, not globalThis\.process\.env: .*read configuration at an entry point/;
 
   it.each([
     'apps/api/src/fixture.ts',
@@ -404,6 +486,55 @@ describe('process.env outside the entry points and config modules', () => {
   ])('flags it in %s', async (path) => {
     await expectOne(path, "const v = process.env['A'];", ENV);
     await expectOne(path, 'const { env } = process;', /process\.env' is restricted/);
+    // LINT-5: through the global object.
+    await expectOne(path, 'const v = globalThis.process.env.A;', GLOBAL_ENV);
+    await expectOne(path, "const v = globalThis['process']['env'];", GLOBAL_ENV);
+    await expectOne(path, 'const { env } = globalThis.process;', GLOBAL_ENV);
+  });
+
+  it.each([
+    'packages/contracts/src/index.ts',
+    'apps/portal/src/App.tsx',
+    'apps/player-web/src/app.ts',
+    'apps/api/src/fixture.ts',
+    'scripts/lib/provision.ts',
+  ])('leaves runtime detection through globalThis.process alone in %s (LINT-5)', async (path) => {
+    expect(
+      await flagged(path, "export const isNode = typeof globalThis.process !== 'undefined';"),
+    ).toEqual([]);
+  });
+
+  const ENV_IMPORT =
+    /^'env' import from '(node:)?process' is restricted from being used by a pattern\. Read configuration at an entry point/;
+
+  it.each([
+    'apps/api/src/fixture.ts',
+    'apps/media-worker/src/inspect.ts',
+    'packages/db/src/fixture.ts',
+    'scripts/lib/provision.ts',
+  ])('flags env imported from node:process in %s (LINT-5)', async (path) => {
+    await expectOne(path, "import { env } from 'node:process';", ENV_IMPORT);
+    await expectOne(path, "import { env as e } from 'process';", ENV_IMPORT);
+  });
+
+  it('flags the env import in browser code beside the Node-module rule', async () => {
+    const messages = await flagged(
+      'apps/player-web/src/platform/fixture.ts',
+      "import { env } from 'process';",
+    );
+    expect(messages).toEqual([expect.stringMatching(ENV_IMPORT)]);
+  });
+
+  it('leaves the rest of node:process, and the env import of an entry point, alone', async () => {
+    expect(
+      await flagged(
+        'apps/api/src/fixture.ts',
+        "import process, { exitCode } from 'node:process'; process.exitCode = exitCode;",
+      ),
+    ).toEqual([]);
+    for (const path of ['apps/api/src/main.ts', 'scripts/lib/env.ts', 'apps/api/test/support.ts']) {
+      expect(await flagged(path, "import { env } from 'node:process';")).toEqual([]);
+    }
   });
 
   it('keeps the browser restricted properties beside it', async () => {
@@ -605,14 +736,16 @@ describe('the organisation id from the request (AG-2.3)', () => {
   });
 });
 
-describe('warning comments', () => {
+describe('warning comments (LINT-10, PLAN-6)', () => {
   it.each([
     ['apps/api/src/fixture.ts', '// TODO: later'],
     ['apps/portal/src/features/fixture.tsx', '/* FIXME */'],
-    ['packages/db/src/fixture.ts', '// a HACK around the pool'],
+    ['packages/db/src/fixture.ts', '// HACK: around the pool'],
     ['scripts/fixture.mjs', '// XXX'],
     ['tests/integration/fixture.test.ts', '// todo'],
-  ])('flags %s: %s', async (path, comment) => {
+    ['apps/api/src/fixture.ts', '/**\n * XXX: decide the limit\n */'],
+    ['apps/api/src/fixture.ts', '//TODO later'],
+  ])('flags a marker that opens a comment in %s: %s', async (path, comment) => {
     await expectOne(
       path,
       `${comment}\nexport const a = 1;`,
@@ -620,12 +753,13 @@ describe('warning comments', () => {
     );
   });
 
-  it('leaves words that only contain a term alone', async () => {
-    expect(
-      await flagged(
-        'apps/api/src/fixture.ts',
-        '// Todos are hacky to fix; see xxxx.\nexport const a = 1;',
-      ),
-    ).toEqual([]);
+  it.each([
+    '// Todos are hacky to fix; see xxxx.',
+    '// a HACK around the pool',
+    '// An attacker could hack the session cookie; SameSite stops it.',
+    "// Vitest's it.todo and Playwright's test.fixme are banned by lint.",
+    '// Phone numbers are shown as +61 4xx xxx xxx.',
+  ])('leaves prose that mentions a term alone: %s', async (comment) => {
+    expect(await flagged('apps/api/src/fixture.ts', `${comment}\nexport const a = 1;`)).toEqual([]);
   });
 });

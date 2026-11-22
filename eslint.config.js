@@ -10,11 +10,15 @@ import tseslint from 'typescript-eslint';
 // The *-lint.test.ts files in scripts/lib run each list against fixture text (the step 10 bans:
 // banned-patterns-lint.test.ts).
 
+const SRCDOC_MESSAGE =
+  'Do not give a frame its document as a string: it is parsed as HTML. Point src at a page that is served, or build the nodes.';
 const NO_RAW_HTML = [
   {
     selector: "JSXAttribute[name.name='dangerouslySetInnerHTML']",
     message: 'dangerouslySetInnerHTML is not allowed.',
   },
+  // React's srcDoc prop is the srcdoc property below, written as JSX.
+  { selector: 'JSXAttribute[name.name=/^srcdoc$/i]', message: SRCDOC_MESSAGE },
 ];
 
 // Code that runs in a browser (portal, player, shared app renderer).
@@ -24,34 +28,12 @@ const BROWSER_FILES = [
   // The shared app renderer runs in both of them.
   'packages/app-render/src/**/*.ts',
 ];
-const BROWSER_RESTRICTED_PROPERTIES = [
-  {
-    property: 'innerHTML',
-    message: 'Do not assign HTML strings; build DOM nodes or use textContent.',
-  },
-  { property: 'outerHTML', message: 'Do not assign HTML strings.' },
-  { object: 'document', property: 'write', message: 'Do not use document.write.' },
-  // Step 10: the other ways to parse a string as HTML or CSS.
-  {
-    property: 'insertAdjacentHTML',
-    message:
-      'Do not parse strings as HTML: text from an operator or the API would run as markup. Build the nodes (document.createElement, append, textContent) or render with React.',
-  },
-  {
-    property: 'createContextualFragment',
-    message:
-      'Do not parse strings as HTML: text from an operator or the API would run as markup. Build the nodes (document.createElement, append, textContent) or render with React.',
-  },
-  {
-    property: 'cssText',
-    message:
-      'Do not write a style as one string: a value from an operator or the API could add declarations. Set each property (element.style.setProperty(name, value)) or use the style prop in React.',
-  },
-];
-
 // Web storage is readable by any script on the page and outlives the session (docs/dev-handoff.md,
-// security rules). checkGlobalObject also reports window.localStorage, self.localStorage and
-// globalThis.localStorage, so dropping or adding `window.` does not dodge the rule.
+// security rules). The bare globals are no-restricted-globals; every other way in is a property
+// named localStorage or sessionStorage on any object (BROWSER_RESTRICTED_PROPERTIES), which
+// no-restricted-properties reports for a member access (window., self., globalThis., an alias, a
+// cast, document.defaultView?.) and for destructuring, a parameter included. So a local object
+// with such a property is reported too: name it something else.
 const WEB_STORAGE_MESSAGE =
   'Keep nothing in web storage: any script on the page can read it, and it outlives the session (docs/dev-handoff.md). The portal needs none, since its session is the HttpOnly cookie the API sets; the player keeps its state in IndexedDB through apps/player-web/src/platform/idb-store.ts.';
 const NO_WEB_STORAGE = {
@@ -59,20 +41,51 @@ const NO_WEB_STORAGE = {
     { name: 'localStorage', message: WEB_STORAGE_MESSAGE },
     { name: 'sessionStorage', message: WEB_STORAGE_MESSAGE },
   ],
-  checkGlobalObject: true,
 };
-// The same storage taken apart from the global object (const { localStorage: ls } = window),
-// which no-restricted-globals does not see. A selector list, so it joins the no-restricted-syntax
-// list of each file group that holds browser code.
-const STORAGE_KEY = '/^(local|session)Storage$/';
-const GLOBAL_OBJECT = '/^(window|self|globalThis)$/';
-const NO_WEB_STORAGE_DESTRUCTURING = [
+
+const HTML_PARSE_MESSAGE =
+  'Do not parse strings as HTML: text from an operator or the API would run as markup. Build the nodes (document.createElement, append, textContent) or render with React.';
+const STYLE_STRING_MESSAGE =
+  'Do not write a style as one string: a value from an operator or the API could add declarations. Set each property (element.style.setProperty(name, value)) or use the style prop in React.';
+// The ways to turn a string into markup, a style or a handler that lint can see. Not complete: a
+// computed property name (el[name] = s), Reflect.set and a setAttribute whose name is not a
+// literal are not seen, and are left to review.
+const BROWSER_RESTRICTED_PROPERTIES = [
   {
-    selector: [
-      `VariableDeclarator[init.name=${GLOBAL_OBJECT}] > ObjectPattern > Property:matches([key.name=${STORAGE_KEY}], [key.value=${STORAGE_KEY}])`,
-      `AssignmentExpression[right.name=${GLOBAL_OBJECT}] > ObjectPattern > Property:matches([key.name=${STORAGE_KEY}], [key.value=${STORAGE_KEY}])`,
-    ].join(', '),
-    message: WEB_STORAGE_MESSAGE,
+    property: 'innerHTML',
+    message: 'Do not assign HTML strings; build DOM nodes or use textContent.',
+  },
+  { property: 'outerHTML', message: 'Do not assign HTML strings.' },
+  { object: 'document', property: 'write', message: 'Do not use document.write.' },
+  { object: 'document', property: 'writeln', message: 'Do not use document.writeln.' },
+  ...[
+    'insertAdjacentHTML',
+    'createContextualFragment',
+    'setHTMLUnsafe',
+    'parseHTMLUnsafe',
+    // DOMParser: inline handlers in the parsed nodes run once they are inserted.
+    'parseFromString',
+  ].map((property) => ({ property, message: HTML_PARSE_MESSAGE })),
+  { property: 'srcdoc', message: SRCDOC_MESSAGE },
+  { property: 'cssText', message: STYLE_STRING_MESSAGE },
+  { property: 'localStorage', message: WEB_STORAGE_MESSAGE },
+  { property: 'sessionStorage', message: WEB_STORAGE_MESSAGE },
+];
+// The same sinks reached through a call, which no-restricted-properties does not see: a style, a
+// frame document or an event handler set as an attribute, and Object.assign onto an element. A
+// selector list, so it joins the no-restricted-syntax list of each file group that holds browser
+// code.
+const NO_HTML_SINK_CALLS = [
+  {
+    selector:
+      "CallExpression[callee.property.name='setAttribute']:matches([arguments.0.value=/^(style|srcdoc)$/i], [arguments.0.value=/^on[a-z]+$/i])",
+    message:
+      "Do not set a style, a frame document or an event handler as an attribute string: a value from an operator or the API could add declarations, markup or code. For a style use element.style.setProperty(name, value) or React's style prop, for a handler addEventListener or React's on... prop, and for a frame point src at a page that is served.",
+  },
+  {
+    selector:
+      "CallExpression[callee.object.name='Object'][callee.property.name='assign'] > ObjectExpression > Property:matches([key.name=/^(innerHTML|outerHTML|srcdoc|cssText)$/], [key.value=/^(innerHTML|outerHTML|srcdoc|cssText)$/])",
+    message: `${HTML_PARSE_MESSAGE} For a style, set each property with element.style.setProperty(name, value).`,
   },
 ];
 
@@ -82,13 +95,25 @@ const NO_WEB_STORAGE_DESTRUCTURING = [
 // API, the media worker and the server packages the API bundles (OUTBOUND_SOURCES).
 const OUTBOUND_MESSAGE =
   'Outbound calls need a data-location review (DEC-13, DEC-15). The approved clients are auth/oidc.ts (identity provider, through IdentityProvider) and mail.ts (SMTP through createMailer, DEC-37); a new destination is reviewed first and then gets its own override in eslint.config.js.';
+const OUTBOUND_GLOBAL_NAMES = ['fetch', 'WebSocket', 'EventSource', 'XMLHttpRequest'];
 const NO_OUTBOUND_GLOBALS = {
-  globals: ['fetch', 'WebSocket', 'EventSource', 'XMLHttpRequest'].map((name) => ({
-    name,
-    message: OUTBOUND_MESSAGE,
-  })),
+  globals: OUTBOUND_GLOBAL_NAMES.map((name) => ({ name, message: OUTBOUND_MESSAGE })),
   checkGlobalObject: true,
 };
+// The same globals taken apart from the global object (const { fetch: f } = globalThis), also
+// through a cast, which no-restricted-globals does not see. An alias of the global object
+// (const g = globalThis; g.fetch(...)) is not seen either, and is left to review.
+const OUTBOUND_KEY = `/^(${OUTBOUND_GLOBAL_NAMES.join('|')})$/`;
+const GLOBAL_OBJECT = '/^(window|self|globalThis)$/';
+const NO_OUTBOUND_GLOBAL_DESTRUCTURING = [
+  {
+    selector: [
+      `VariableDeclarator:matches([init.name=${GLOBAL_OBJECT}], [init.expression.name=${GLOBAL_OBJECT}]) > ObjectPattern > Property:matches([key.name=${OUTBOUND_KEY}], [key.value=${OUTBOUND_KEY}])`,
+      `AssignmentExpression:matches([right.name=${GLOBAL_OBJECT}], [right.expression.name=${GLOBAL_OBJECT}]) > ObjectPattern > Property:matches([key.name=${OUTBOUND_KEY}], [key.value=${OUTBOUND_KEY}])`,
+    ].join(', '),
+    message: OUTBOUND_MESSAGE,
+  },
+];
 
 // Configuration is read once, at an entry point, and passed down (apps/api/src/config.ts), so a
 // test can give any module its own values. The entry points and config modules named here are
@@ -107,12 +132,27 @@ const ENV_READERS = [
   'apps/media-worker/src/main.ts',
   'scripts/lib/env.ts',
 ];
-const NO_PROCESS_ENV = [
+const PROCESS_ENV_MESSAGE =
+  'Read configuration at an entry point and pass it down: in apps/api take it from AppConfig (loadConfig in config.ts, called by main.ts and alerts-once.ts), in scripts/lib call requireEnv from scripts/lib/env.ts, and otherwise add a parameter. Only the files in ENV_READERS of eslint.config.js read process.env.';
+// The import half (import { env } from 'node:process') is the `env` facet of the import-boundary
+// generator below. A default import of node:process (proc.env) is not seen: it is also how a file
+// sets exitCode.
+const NO_PROCESS_ENV = [{ object: 'process', property: 'env', message: PROCESS_ENV_MESSAGE }];
+// LINT-5: process.env reached through the global object, which no-restricted-properties cannot
+// match two levels deep. A selector list, so `typeof globalThis.process` (runtime detection) stays
+// allowed. It joins the product, API, portal and scripts lists, which cover ENV_FILES; in an entry
+// point it only asks for the plain spelling. A cast or an alias of the global object
+// ((globalThis as G).process.env, const g = globalThis) is not seen.
+const GLOBAL_PROCESS = `[object.name=${GLOBAL_OBJECT}]:matches([computed=false][property.name='process'], [property.value='process'])`;
+const ENV_KEY = ":matches([computed=false][property.name='env'], [property.value='env'])";
+const NO_GLOBAL_PROCESS_ENV = [
   {
-    object: 'process',
-    property: 'env',
+    selector: [
+      `MemberExpression${ENV_KEY} > MemberExpression.object${GLOBAL_PROCESS}`,
+      `VariableDeclarator[init.object.name=${GLOBAL_OBJECT}]:matches([init.computed=false][init.property.name='process'], [init.property.value='process']) > ObjectPattern > Property:matches([key.name='env'], [key.value='env'])`,
+    ].join(', '),
     message:
-      'Read configuration at an entry point and pass it down: in apps/api take it from AppConfig (loadConfig in config.ts, called by main.ts and alerts-once.ts), in scripts/lib call requireEnv from scripts/lib/env.ts, and otherwise add a parameter. Only the files in ENV_READERS of eslint.config.js read process.env.',
+      'Write process.env, not globalThis.process.env: the process.env rule of eslint.config.js (ENV_READERS) must see every read. Where it applies, read configuration at an entry point and pass it down: AppConfig in apps/api, requireEnv from scripts/lib/env.ts in scripts/lib, and otherwise a parameter.',
   },
 ];
 
@@ -204,6 +244,27 @@ const NO_INLINE_CAST = [
   },
 ];
 
+// SEC-1, D4: the MigratorPool brand is the proof that connectMigrator checked the role, and the
+// provisioning commands rely on it alone, so nothing but connectMigrator may mint one. Matched
+// anywhere in the cast's type (`as MigratorPool | undefined`, `as Promise<MigratorPool>`), in
+// every file, tests included (no test needs one: they connect through connectMigrator too).
+// packages/db/src/migrate.ts, where connectMigrator makes it, has its own block below. Not seen,
+// and left to review: a value typed `any` assigned to a MigratorPool variable (not a cast), a cast
+// to an alias of the type (`import { type MigratorPool as MP }`, then `as MP`), and `as never`,
+// which this repository's tests use every day and which fits any parameter.
+const MIGRATOR_POOL =
+  ":matches([typeName.name='MigratorPool'], [typeName.right.name='MigratorPool'])";
+const NO_MIGRATOR_POOL_CAST = [
+  {
+    selector: [
+      `:matches(TSAsExpression, TSTypeAssertion) > TSTypeReference.typeAnnotation${MIGRATOR_POOL}`,
+      `:matches(TSAsExpression, TSTypeAssertion) > .typeAnnotation TSTypeReference${MIGRATOR_POOL}`,
+    ].join(', '),
+    message:
+      'Do not cast to MigratorPool: the brand says connectMigrator checked that the connection logs in and acts as tinnox_migrator. Call connectMigrator(connectionString, { applicationName }) from @tinnox/db and pass the pool it returns.',
+  },
+];
+
 // Adoption plan section 3.2: the API reads the time from one injected clock, so tests can set it.
 // main.ts and alerts-once.ts create that clock and are outside this rule. `new Date(value)` is a
 // conversion, not a clock read, and stays allowed.
@@ -283,30 +344,42 @@ const NO_ORG_FROM_REQUEST = [
   },
 ];
 
-// P2-04, DEC-33, SCR-17: words a person reads in the portal. Matched in JSX text, in a string or
-// template written straight into JSX (`{'...'}`, `{a ? '...' : '...'}`), and in the attributes
-// that are read out or shown (the aria attributes that hold text, title, alt, placeholder, and
-// the text props of the portal's own components: label, description, hint, note, lead, caption,
-// legend and the like, and any prop named ...Label, ...Title, ...Hint, ...Text, ...Message or
-// ...Description). Not seen: text built in a plain .ts module (the lib/*.test.ts suites check those
-// strings), text passed through a variable or a function, and any other attribute (ids in
-// aria-labelledby, class names, test ids), so `display` stays free as a CSS property and a domain
-// name in code. A component prop outside the list that the component reads out is not seen
-// either: Avatar's `name` becomes its aria-label when `labelled` is set.
+// P2-04, DEC-33, SCR-17: words a person reads in the portal. Matched in JSX text; in a string or
+// template written straight into an element or a fragment (`{'...'}`, <>{'...'}</>); in a string
+// that is a branch of a conditional or the right side of && or || written there, up to three
+// conditionals deep (`{a ? '...' : b ? '...' : '...'}`), never a string in a comparison such as
+// `{status === 'offline' ? ... : ...}`; and in the same forms in the attributes that are read out
+// or shown: the aria attributes that hold text, title, alt, placeholder, the text props of the
+// portal's own components named in SHOWN_ATTRIBUTE (label, description, heading, hint, summary,
+// message, note, lead, caption, legend, a Tooltip's content, a Field's error, a row's meta), and
+// any prop named ...Label, ...Title, ...Hint, ...Text, ...Message or ...Description. Not seen: text
+// built in a plain .ts module (the lib/*.test.ts suites check those strings), a template inside a
+// conditional, text passed through a variable or a function (a .map callback included), and any
+// other attribute (ids in aria-labelledby, class names, test ids), so `display` stays free as a
+// CSS property and a domain name in code. A component prop outside the list that the component
+// reads out is not seen either: Avatar's `name` becomes its aria-label when `labelled` is set.
 const SHOWN_ATTRIBUTE =
-  '/^(aria-(label|description|roledescription|valuetext|placeholder)|title|alt|placeholder|label|description|heading|hint|summary|message|note|lead|caption|legend|[a-z]+(Label|Title|Hint|Text|Message|Description))$/';
+  '/^(aria-(label|description|roledescription|valuetext|placeholder)|title|alt|placeholder|label|description|heading|hint|summary|message|note|lead|caption|legend|content|error|meta|[a-z]+(Label|Title|Hint|Text|Message|Description))$/';
+// A conditional or logical expression, and the positions in one that hold a value a person reads.
+const BRANCHING = ':matches(ConditionalExpression, LogicalExpression)';
+const BRANCH = ':matches(.consequent, .alternate, .right)';
 /** Selectors for portal text a person reads that matches `regex`. */
-const shownText = (regex) =>
-  [
+const shownText = (regex) => {
+  // Child combinators only, so a string inside a nested call, element or comparison is not taken.
+  const inContainer = (container) => [
+    `${container} > Literal[value=${regex}]`,
+    `${container} > TemplateLiteral > TemplateElement[value.raw=${regex}]`,
+    `${container} > ${BRANCHING} > Literal[value=${regex}]`,
+    `${container} > ${BRANCHING} > ${BRANCHING}${BRANCH} > Literal${BRANCH}[value=${regex}]`,
+    `${container} > ${BRANCHING} > ${BRANCHING}${BRANCH} > ${BRANCHING}${BRANCH} > Literal${BRANCH}[value=${regex}]`,
+  ];
+  return [
     `JSXText[value=${regex}]`,
-    `JSXElement > JSXExpressionContainer > Literal[value=${regex}]`,
-    `JSXElement > JSXExpressionContainer > TemplateLiteral > TemplateElement[value.raw=${regex}]`,
-    `JSXElement > JSXExpressionContainer > :matches(ConditionalExpression, LogicalExpression) > Literal[value=${regex}]`,
+    ...inContainer(':matches(JSXElement, JSXFragment) > JSXExpressionContainer'),
     `JSXAttribute[name.name=${SHOWN_ATTRIBUTE}] > Literal[value=${regex}]`,
-    `JSXAttribute[name.name=${SHOWN_ATTRIBUTE}] > JSXExpressionContainer > Literal[value=${regex}]`,
-    `JSXAttribute[name.name=${SHOWN_ATTRIBUTE}] > JSXExpressionContainer > TemplateLiteral > TemplateElement[value.raw=${regex}]`,
-    `JSXAttribute[name.name=${SHOWN_ATTRIBUTE}] > JSXExpressionContainer > :matches(ConditionalExpression, LogicalExpression) > Literal[value=${regex}]`,
+    ...inContainer(`JSXAttribute[name.name=${SHOWN_ATTRIBUTE}] > JSXExpressionContainer`),
   ].join(', ');
+};
 const STATUS_WORDING = [
   {
     selector: shownText('/\\b(online|offline)\\b/i'),
@@ -335,12 +408,21 @@ const NO_BARE_KEYBOARD = [
   },
 ];
 
-const NO_MODULE_MOCK = ['mock', 'doMock', 'importMock', 'stubGlobal'].map((property) => ({
-  object: 'vi',
-  property,
-  message:
-    'Integration and e2e tests use real services (OTH-13, tests/README.md). Inject a fault through startTestApp(..., { wrapPool }) with losingCommitAnswers or statementHolds, or the mail option, in apps/api/test/support.ts, instead of replacing a module or a global.',
-}));
+/** The integration mock ban, with `instead` saying how the file group injects a fault. */
+const noModuleMock = (instead) =>
+  ['mock', 'doMock', 'importMock', 'stubGlobal'].map((property) => ({
+    object: 'vi',
+    property,
+    message: `Integration and e2e tests use real services (OTH-13, tests/README.md). ${instead}`,
+  }));
+const NO_MODULE_MOCK = noModuleMock(
+  'Inject a fault through startTestApp(..., { wrapPool }) with losingCommitAnswers or statementHolds, or the mail option, in apps/api/test/support.ts, instead of replacing a module or a global.',
+);
+// packages/db may not import the API's harness (the layer table), so its tests are pointed at
+// their own helpers.
+const NO_MODULE_MOCK_DB = noModuleMock(
+  'Wrap or replace the pool you pass to the function under test, or hold a lock with the helpers in packages/db/test/support.ts (stillWaiting, twoTransactions, asSuperuser), instead of replacing a module or a global.',
+);
 
 /** Files that match a glob of `outer` and a glob of `inner` (an inner array means "all of"). */
 const both = (outer, inner) => outer.flatMap((o) => inner.map((i) => [o, i]));
@@ -395,6 +477,17 @@ const WORKSPACE_LEAVES = Object.keys(IMPORT_LAYERS)
 // ('../../api/client.ts', '../../apps/AppPreview.tsx') is not a workspace.
 const WORKSPACE_CODE = '/(src|test|sw|build)(/|$)';
 
+/**
+ * What a file of the browser app `dir` uses instead of a server module. The workspace also holds
+ * build files that run in Node and are never bundled (vite.config.ts, player-web's build/), so the
+ * sentence must be true for them as well.
+ */
+function browserAppAlternative(dir) {
+  const client =
+    dir === 'apps/portal' ? 'apps/portal/src/api' : 'apps/player-web/src/platform/api.ts';
+  return `Its browser code calls the API through ${client}; its build files (vite.config.ts${dir === 'apps/player-web' ? ', build/' : ''}) run in Node at build time and take what they need from the environment Vite gives (loadEnv from vite).`;
+}
+
 /** The patterns every file of the workspace `dir` gets. */
 function layerPatterns(dir) {
   const allowed = IMPORT_LAYERS[dir];
@@ -410,7 +503,7 @@ function layerPatterns(dir) {
           ? `${dir} is a bottom layer and imports no @tinnox package. Take what you need as a parameter, or move the code into this package.`
           : `${dir} may import only ${packages.map((name) => `@tinnox/${name}`).join(', ')} from @tinnox/* (adoption plan section 3.1). ${
               browser
-                ? 'This file is bundled for the browser: call the API through apps/portal/src/api or apps/player-web/src/platform/api.ts.'
+                ? browserAppAlternative(dir)
                 : 'Take what you need as a parameter, or move the shared code into a package both may import.'
             }`,
     },
@@ -432,6 +525,17 @@ function layerPatterns(dir) {
       message:
         "Do not reach into another workspace by relative path. Import '@tinnox/<name>' and export what you need from its src/index.ts (or its package.json exports).",
     },
+    // LINT-12: the root scripts/ is not a workspace, so the entry above does not see it. Only the
+    // root scripts has a lib/ folder; apps/api/scripts (live-check.mjs) stays reachable.
+    ...(dir === 'tests' || dir === 'scripts'
+      ? []
+      : [
+          {
+            regex: '^(\\.\\./)+scripts/lib/',
+            message:
+              'scripts/lib holds the offline tools (the migrator connection, the seed, provisioning); only scripts/ and tests/ import it. Move what both need into a package under packages/ and import it from both.',
+          },
+        ]),
     // Rule (g): only apps/api serves HTTP, tests included.
     ...(dir === 'apps/api'
       ? []
@@ -533,10 +637,14 @@ function outboundPatterns(dir, allowed) {
 }
 
 /**
- * The same patterns as no-restricted-syntax selectors for import() and require(), which
- * no-restricted-imports does not see (adoption plan section 3.3). A literal or a template with no
- * expression is checked; a computed specifier (import(name)) cannot be read by lint and is left to
- * review. Every load is reported, as a dynamic import cannot be type-only or name its imports.
+ * The same patterns as no-restricted-syntax selectors for import(), require(), a require made by
+ * createRequire and called at once, and process.getBuiltinModule, which no-restricted-imports does
+ * not see (adoption plan section 3.1). A literal or a template with no expression is checked; a
+ * computed specifier (import(name)) cannot be read by lint, and neither can a require that
+ * createRequire made under another name (const load = createRequire(...); load('undici')); both
+ * are left to review. Every load is reported, as a dynamic import cannot be type-only or name its
+ * imports. The layer rules hold import() and require() through a unit test over the files
+ * instead (scripts/lib/import-boundaries-lint.test.ts).
  */
 function outboundLoadSelectors(dir, allowed) {
   return outboundPatterns(dir, allowed).map(({ regex, message }) => {
@@ -547,16 +655,47 @@ function outboundLoadSelectors(dir, allowed) {
         `ImportExpression[source.value=${specifier}]`,
         `ImportExpression[source.quasis.length=1][source.quasis.0.value.cooked=${specifier}]`,
         `CallExpression[callee.name='require'][arguments.0.value=${specifier}]`,
+        `CallExpression[callee.type='CallExpression'][callee.callee.name='createRequire'][arguments.0.value=${specifier}]`,
+        `CallExpression[callee.property.name='getBuiltinModule'][arguments.0.value=${specifier}]`,
       ].join(', '),
       message: `${message} import() and require() are held to the same rule as a static import.`,
     };
   });
 }
 
+/**
+ * The message for pg in the workspace `dir`, naming only what that workspace may use (LINT-3):
+ * @tinnox/db where the layer table allows it, and otherwise the workspace's own way.
+ */
+function pgMessage(dir) {
+  const why =
+    'a direct pg client skips the tinnox_app role check and the row_security and timeout start-up parameters.';
+  if (IMPORT_LAYERS[dir].includes('db')) {
+    return `Only packages/db talks to PostgreSQL. Use createPool and withOrg from @tinnox/db (connectMigrator for an offline tool); ${why}`;
+  }
+  // packages/app-render is bundled for the browser too, but a package may not import an app, so
+  // it gets the package sentence below.
+  if (dir === 'apps/portal' || dir === 'apps/player-web') {
+    return `Only packages/db talks to PostgreSQL, and ${dir} has no database connection. ${browserAppAlternative(dir)}`;
+  }
+  if (dir === 'apps/media-worker') {
+    return 'Only packages/db talks to PostgreSQL. The media worker has no database: it takes jobs from the API and reports verdicts through the job directory (inbox and outbox, described in apps/media-worker/src/main.ts).';
+  }
+  return `Only packages/db talks to PostgreSQL. ${dir} may not import @tinnox/db: take the data you need as a parameter from the caller, which reads it with withOrg.`;
+}
+
+/** The whole outbound half of a no-restricted-syntax list: loads and destructured globals. */
+const outboundSyntax = (dir, allowed) => [
+  ...outboundLoadSelectors(dir, allowed),
+  ...NO_OUTBOUND_GLOBAL_DESTRUCTURING,
+];
+
 // Extra patterns for a subset of the files: each facet adds its patterns (or the patterns it
 // gives for the workspace) to the workspace's own.
 // `only` and `except` name the workspaces a facet can touch, and facets of one `group` match
-// disjoint files, so the generator makes no block that can match nothing.
+// disjoint files and are never combined. Facets of different groups are combined whether or not
+// their files can meet, so a few generated blocks match nothing (the route-file facet with a
+// client file); they are harmless.
 const IMPORT_FACETS = [
   {
     // Non-test files. Rule (h): they import no test code. Rule (g), D25: outside packages/db they
@@ -570,16 +709,15 @@ const IMPORT_FACETS = [
         message:
           'Product code does not import test code. Move what both need into a module that is not a test file, and import it from the test.',
       },
-      ...(dir === 'packages/db'
-        ? []
-        : [
-            {
-              regex: '^pg(/|$)',
-              message:
-                'Only packages/db talks to PostgreSQL. Use createPool and withOrg from @tinnox/db (connectMigrator for an offline tool); a direct pg client skips the tinnox_app role check and the row_security and timeout start-up parameters.',
-            },
-          ]),
+      ...(dir === 'packages/db' ? [] : [{ regex: '^pg(/|$)', message: pgMessage(dir) }]),
     ],
+  },
+  {
+    // process.env read through an import (see NO_PROCESS_ENV).
+    except: ['tests'],
+    files: ENV_FILES,
+    ignores: [...TEST_FILES, ...ENV_READERS],
+    patterns: [{ regex: '^(node:)?process$', importNames: ['env'], message: PROCESS_ENV_MESSAGE }],
   },
   {
     // Rule (f): browser source, without its tests and the Vite configuration (both run in Node).
@@ -715,15 +853,19 @@ function importBoundaryBlocks() {
 const PRODUCT_SYNTAX = [
   ...NO_NON_NULL,
   ...NO_INLINE_CAST,
+  ...NO_MIGRATOR_POOL_CAST,
   ...NO_CREDENTIAL_NAMES,
-  ...NO_WEB_STORAGE_DESTRUCTURING,
+  ...NO_HTML_SINK_CALLS,
+  ...NO_GLOBAL_PROCESS_ENV,
 ];
 const API_SYNTAX = [
   ...NO_NON_NULL,
   ...NO_INLINE_CAST,
+  ...NO_MIGRATOR_POOL_CAST,
   ...NO_CREDENTIAL_NAMES,
   ...NO_CLOCK,
   ...NO_ORG_FROM_REQUEST,
+  ...NO_GLOBAL_PROCESS_ENV,
 ];
 
 export default tseslint.config(
@@ -845,7 +987,7 @@ export default tseslint.config(
     files: ['**/*.ts', '**/*.tsx'],
     ignores: TEST_FILES,
     rules: {
-      'no-restricted-syntax': ['error', ...NO_NON_NULL],
+      'no-restricted-syntax': ['error', ...NO_NON_NULL, ...NO_MIGRATOR_POOL_CAST],
     },
   },
   {
@@ -859,7 +1001,8 @@ export default tseslint.config(
         'error',
         ...NO_RAW_HTML,
         ...NO_NON_NULL,
-        ...NO_WEB_STORAGE_DESTRUCTURING,
+        ...NO_MIGRATOR_POOL_CAST,
+        ...NO_HTML_SINK_CALLS,
       ],
     },
   },
@@ -867,7 +1010,12 @@ export default tseslint.config(
     files: INLINE_CAST_FILES,
     ignores: TEST_FILES,
     rules: {
-      'no-restricted-syntax': ['error', ...NO_NON_NULL, ...NO_INLINE_CAST],
+      'no-restricted-syntax': [
+        'error',
+        ...NO_NON_NULL,
+        ...NO_INLINE_CAST,
+        ...NO_MIGRATOR_POOL_CAST,
+      ],
     },
   },
   {
@@ -882,16 +1030,29 @@ export default tseslint.config(
       'no-restricted-syntax': ['error', ...PRODUCT_SYNTAX],
     },
   },
-  // DEC-13, DEC-15: the import() and require() half of the outbound rule, one block per
-  // workspace as the patterns differ. In apps/api this block is the last for the two entry points
-  // only; the API source blocks below carry the same selectors for the rest.
+  // DEC-13, DEC-15: the import() and require() half of the outbound rule, and the destructured
+  // globals, one block per workspace as the patterns differ. In apps/api this block is the last
+  // for the two entry points only; the API source blocks below carry the same selectors for the
+  // rest.
   ...OUTBOUND_SOURCES.map((dir) => ({
     files: [`${dir}/src/**/*.ts`],
     ignores: TEST_FILES,
     rules: {
-      'no-restricted-syntax': ['error', ...PRODUCT_SYNTAX, ...outboundLoadSelectors(dir, null)],
+      'no-restricted-syntax': ['error', ...PRODUCT_SYNTAX, ...outboundSyntax(dir, null)],
     },
   })),
+  {
+    // SEC-1: connectMigrator mints the MigratorPool brand here, after checking the role; the
+    // rest of packages/db's list is unchanged.
+    files: ['packages/db/src/migrate.ts'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...PRODUCT_SYNTAX.filter((entry) => !NO_MIGRATOR_POOL_CAST.includes(entry)),
+        ...outboundSyntax('packages/db', null),
+      ],
+    },
+  },
   {
     // API source but its two entry points, which create the clock, and the two reviewed clients.
     files: ['apps/api/src/**/*.ts'],
@@ -902,14 +1063,14 @@ export default tseslint.config(
       ...Object.values(OUTBOUND_CLIENTS),
     ],
     rules: {
-      'no-restricted-syntax': ['error', ...API_SYNTAX, ...outboundLoadSelectors('apps/api', null)],
+      'no-restricted-syntax': ['error', ...API_SYNTAX, ...outboundSyntax('apps/api', null)],
     },
   },
   ...Object.entries(OUTBOUND_CLIENTS).map(([name, file]) => ({
     // Each reviewed client may load its own package.
     files: [file],
     rules: {
-      'no-restricted-syntax': ['error', ...API_SYNTAX, ...outboundLoadSelectors('apps/api', name)],
+      'no-restricted-syntax': ['error', ...API_SYNTAX, ...outboundSyntax('apps/api', name)],
     },
   })),
   {
@@ -918,7 +1079,14 @@ export default tseslint.config(
     files: ['scripts/**/*.{ts,mjs}'],
     ignores: [...TEST_FILES, ...MIGRATOR_URL_READERS],
     rules: {
-      'no-restricted-syntax': ['error', ...NO_NON_NULL, ...NO_INLINE_CAST, ...NO_MIGRATOR_URL],
+      'no-restricted-syntax': [
+        'error',
+        ...NO_NON_NULL,
+        ...NO_INLINE_CAST,
+        ...NO_MIGRATOR_POOL_CAST,
+        ...NO_MIGRATOR_URL,
+        ...NO_GLOBAL_PROCESS_ENV,
+      ],
     },
   },
   {
@@ -931,9 +1099,11 @@ export default tseslint.config(
         ...NO_RAW_HTML,
         ...NO_NON_NULL,
         ...NO_INLINE_CAST,
+        ...NO_MIGRATOR_POOL_CAST,
         ...NO_CREDENTIAL_NAMES,
         ...STATUS_WORDING,
-        ...NO_WEB_STORAGE_DESTRUCTURING,
+        ...NO_HTML_SINK_CALLS,
+        ...NO_GLOBAL_PROCESS_ENV,
       ],
     },
   },
@@ -946,7 +1116,8 @@ export default tseslint.config(
         'error',
         ...NO_SKIPPED_TESTS,
         ...NO_RANDOM_IN_TESTS,
-        ...NO_WEB_STORAGE_DESTRUCTURING,
+        ...NO_MIGRATOR_POOL_CAST,
+        ...NO_HTML_SINK_CALLS,
       ],
     },
   },
@@ -960,7 +1131,8 @@ export default tseslint.config(
         ...NO_SKIPPED_TESTS,
         ...NO_RANDOM_IN_TESTS,
         ...NO_BARE_KEYBOARD,
-        ...NO_WEB_STORAGE_DESTRUCTURING,
+        ...NO_MIGRATOR_POOL_CAST,
+        ...NO_HTML_SINK_CALLS,
       ],
     },
   },
@@ -975,7 +1147,8 @@ export default tseslint.config(
         ...NO_RAW_HTML,
         ...NO_SKIPPED_TESTS,
         ...NO_RANDOM_IN_TESTS,
-        ...NO_WEB_STORAGE_DESTRUCTURING,
+        ...NO_MIGRATOR_POOL_CAST,
+        ...NO_HTML_SINK_CALLS,
       ],
     },
   },
@@ -983,6 +1156,13 @@ export default tseslint.config(
     files: REAL_SERVICE_TEST_FILES,
     rules: {
       'no-restricted-properties': ['error', ...NO_MODULE_MOCK],
+    },
+  },
+  {
+    // packages/db's tests are pointed at their own helpers (LINT-3).
+    files: ['packages/db/test/**/*.ts'],
+    rules: {
+      'no-restricted-properties': ['error', ...NO_MODULE_MOCK_DB],
     },
   },
   {
@@ -994,12 +1174,17 @@ export default tseslint.config(
   },
   {
     // A marker of unfinished work is a decision nobody recorded. ESLint's message for this rule is
-    // fixed; the step 48 shortcut ledger is where an accepted shortcut is written down instead.
+    // fixed; the shortcut ledger of adoption plan step 48 (not yet written) is where an accepted
+    // shortcut goes instead. Only a marker that opens a comment is reported, after any spaces,
+    // stars and slashes (`// TODO: ...`, `/* FIXME */`, a JSDoc comment whose first line is
+    // ` * XXX`), so prose that mentions the word (to hack a cookie, Vitest's it.todo, a
+    // 4xx xxx xxx placeholder) stays allowed. ESLint reads a block comment as one text, so a
+    // marker that opens a later line of it is not seen.
     files: [CODE_FILES],
     rules: {
       'no-warning-comments': [
         'error',
-        { terms: ['todo', 'fixme', 'xxx', 'hack'], location: 'anywhere' },
+        { terms: ['todo', 'fixme', 'xxx', 'hack'], location: 'start', decoration: ['*', '/'] },
       ],
     },
   },
