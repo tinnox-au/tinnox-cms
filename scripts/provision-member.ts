@@ -5,8 +5,7 @@
 // Environment (controlled host only): DATABASE_MIGRATOR_URL; PROVISION_IDP_ISSUER (default
 // OIDC_ISSUER), PROVISION_IDP_CLIENT_ID and PROVISION_IDP_CLIENT_SECRET, the identity-provider
 // client that can only read accounts. Exit 0 done, 1 refused or failed, 2 usage error.
-import { CommitOutcomeUnknownError } from '@tinnox/db';
-import pg from 'pg';
+import { CommitOutcomeUnknownError, connectMigrator, type MigratorPool } from '@tinnox/db';
 import { loadEnv, requireEnv } from './lib/env.ts';
 import { keycloakDirectory, type IdpDirectory } from './lib/idp.ts';
 import {
@@ -24,7 +23,7 @@ import {
   type Result,
 } from './lib/provision.ts';
 
-function run(pool: pg.Pool, idp: IdpDirectory, call: Invocation): Promise<Result> {
+function run(pool: MigratorPool, idp: IdpDirectory, call: Invocation): Promise<Result> {
   switch (call.command) {
     case 'org-create':
       return orgCreate(pool, idp, call.args);
@@ -66,15 +65,13 @@ async function main(argv: readonly string[]): Promise<number> {
         clientSecret: requireEnv('PROVISION_IDP_CLIENT_SECRET'),
       }).findByUsername(username),
   };
-  let pool: pg.Pool | undefined;
+  let pool: MigratorPool | undefined;
   try {
     // One connection, not createPool: the commands run one transaction each, as the migrator.
-    pool = new pg.Pool({
-      connectionString: requireEnv('DATABASE_MIGRATOR_URL'),
-      application_name: 'tinnox-provision',
-      max: 1,
+    // connectMigrator refuses any other login before a command reads the identity provider.
+    pool = await connectMigrator(requireEnv('DATABASE_MIGRATOR_URL'), {
+      applicationName: 'tinnox-provision',
     });
-    pool.on('error', () => undefined);
     const result = await run(pool, idp, invocation);
     for (const line of result.lines) console.log(line);
     return 0;

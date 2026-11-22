@@ -325,6 +325,7 @@ export function pairingHelp(errorCode: string | null, ttlMinutes: number): strin
     case 'pairing_locked':
     case 'rate_limited':
       return 'Too many wrong codes were entered. Wait a few minutes before trying again.';
+    case null:
     default:
       return null;
   }

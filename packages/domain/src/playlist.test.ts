@@ -37,6 +37,9 @@ const image = (mediaId: string, durationMs: number | null = 5000) => ({
   fit: null,
 });
 const video = (mediaId: string) => ({ mediaId, durationMs: null, fit: null });
+// UTF-8 size without TextEncoder: this package type-checks with no platform globals
+// ("types": []), and each %XX escape of encodeURIComponent is one byte.
+const utf8Bytes = (text: string) => encodeURIComponent(text).replace(/%[0-9A-F]{2}/g, '_').length;
 const app = (appId: string, durationMs = 10_000) => ({ appId, durationMs });
 
 describe('validatePlaylist', () => {
@@ -342,7 +345,7 @@ describe('manifest v3 (apps)', () => {
       { ...limits, maxPlaylistItems: 500 },
     );
     const manifest = buildManifest(draft, created);
-    expect(new TextEncoder().encode(JSON.stringify(manifest)).length).toBeLessThan(600 * 1024);
+    expect(utf8Bytes(JSON.stringify(manifest))).toBeLessThan(600 * 1024);
   });
 });
 
@@ -456,7 +459,7 @@ describe('manifest v4 (schedules)', () => {
     const manifest = buildManifest(plan.draft, created);
     expect(manifest).toMatchObject({ schemaVersion: 4 });
     expect(manifest.assets).toHaveLength(200);
-    expect(new TextEncoder().encode(JSON.stringify(manifest)).length).toBeLessThan(300 * 1024);
+    expect(utf8Bytes(JSON.stringify(manifest))).toBeLessThan(300 * 1024);
   });
 });
 

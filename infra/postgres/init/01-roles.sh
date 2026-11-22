@@ -5,7 +5,8 @@
 # PGPORT and PGPASSWORD select the server.
 #
 # Roles (prototype-m0.md D3, D4):
-#   tinnox_migrator  owns the schema and runs migrations. Not a superuser.
+#   tinnox_migrator  owns the schema; the migration runner, the seed and the
+#                    provisioning script connect as it. Not a superuser.
 #   tinnox_app       runtime role. No superuser, no BYPASSRLS, owns nothing.
 #   tinnox_definer   cannot log in. Owns the narrow SECURITY DEFINER lookup
 #                    functions that must read across organisations before the

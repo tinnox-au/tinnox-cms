@@ -95,7 +95,8 @@ export interface MediaPipelineOptions {
   readonly storage: ObjectStorage;
   readonly limits: Limits;
   readonly logger: PipelineLogger;
-  readonly now?: () => Date;
+  /** The clock (AppContext.now in the API), so tests can set the time. */
+  readonly now: () => Date;
   /** Extra time allowed per queued job on top of the inspection timeout. */
   readonly perJobGraceMs?: number;
   readonly baseGraceMs?: number;
@@ -169,7 +170,7 @@ export class MediaPipeline {
     this.#storage = options.storage;
     this.#limits = options.limits;
     this.#log = options.logger;
-    this.#now = options.now ?? (() => new Date());
+    this.#now = options.now;
     this.#perJobGraceMs = options.perJobGraceMs ?? 5_000;
     this.#baseGraceMs = options.baseGraceMs ?? 10_000;
   }

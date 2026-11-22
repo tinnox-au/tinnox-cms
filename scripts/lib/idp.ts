@@ -63,11 +63,15 @@ export function keycloakDirectory(options: {
         `the identity provider refused the provisioning client (HTTP ${response.status})`,
       );
     }
-    const body = (await response.json()) as { access_token?: unknown };
-    if (typeof body.access_token !== 'string' || body.access_token === '') {
+    const body: unknown = await response.json();
+    const accessToken =
+      typeof body === 'object' && body !== null && 'access_token' in body
+        ? body.access_token
+        : undefined;
+    if (typeof accessToken !== 'string' || accessToken === '') {
       throw new Error('the identity provider answered without an access token');
     }
-    return body.access_token;
+    return accessToken;
   }
 
   return {
@@ -84,11 +88,12 @@ export function keycloakDirectory(options: {
       if (!Array.isArray(list)) throw new Error('the identity-provider user search gave no list');
       const wanted = username.toLowerCase();
       const matches = list.filter(
-        (user): user is { id?: unknown; email?: unknown; enabled?: unknown } =>
+        (user: unknown): user is { id?: unknown; email?: unknown; enabled?: unknown } =>
           typeof user === 'object' &&
           user !== null &&
-          typeof (user as { username?: unknown }).username === 'string' &&
-          (user as { username: string }).username.toLowerCase() === wanted,
+          'username' in user &&
+          typeof user.username === 'string' &&
+          user.username.toLowerCase() === wanted,
       );
       const user = matches.length === 1 ? matches[0] : undefined;
       if (user === undefined || typeof user.id !== 'string' || user.id === '') return null;

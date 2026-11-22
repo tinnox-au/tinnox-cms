@@ -32,11 +32,13 @@ import {
 import { auditScoped, STAGE_A_CONSTRAINTS, violatedConstraint, withOrg, type Tx } from '@tinnox/db';
 import { isAppDraftItem, validatePlaylist } from '@tinnox/domain';
 import type { FastifyInstance } from 'fastify';
+import { APP_COLUMNS, toAppDto, type AppRow } from '../app-rows.ts';
 import { withOrgAllowed, withOrgDecisionAllowed } from '../auth/permissions.ts';
 import { operatorOf } from '../auth/session.ts';
 import { perMinute, type AppContext } from '../context.ts';
 import { accept, bigintToNumber, iso, refuse } from '../db-helpers.ts';
 import { HttpError, notFound, parseInput, pgErrorCode } from '../errors.ts';
+import { MEDIA_COLUMNS, toMediaDto, type MediaRow } from '../media/rows.ts';
 import {
   auditRejectedPublication,
   createPublication,
@@ -53,8 +55,6 @@ import {
   publicationRejected,
   type PublicationRow,
 } from '../publishing.ts';
-import { APP_COLUMNS, toAppDto, type AppRow } from './apps.ts';
-import { MEDIA_COLUMNS, toMediaDto, type MediaRow } from './media.ts';
 
 interface PlaylistRow {
   id: string;

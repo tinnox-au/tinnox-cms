@@ -2,9 +2,66 @@ import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import pg from 'pg';
+import type { Pool } from './pool.ts';
+
+const MIGRATOR_ROLE = 'tinnox_migrator';
+
+declare const migratorBrand: unique symbol;
+/**
+ * A pool that connectMigrator has checked: its session acts as tinnox_migrator. The brand
+ * stops a mistake at compile time, since tsc refuses the runtime pool or a plain superuser
+ * pool where a MigratorPool is wanted. It does not stop a deliberate cast by itself: lint
+ * refuses a cast to MigratorPool outside this file (NO_MIGRATOR_POOL_CAST in eslint.config.js),
+ * and what that rule cannot see is left to review.
+ */
+export type MigratorPool = Pool & { readonly [migratorBrand]: true };
+
+/**
+ * The one way the offline tools connect as tinnox_migrator: the runner, the test reset, the
+ * seed and provisioning all come through here (poteto adoption plan, decision D4). Test
+ * helpers that arrange data, and the administrator's psql session for the incident scripts,
+ * connect without it. Refuses unless current_user and session_user are both tinnox_migrator:
+ * the session then acts with the migrator's rights and under its identity, which the 0013
+ * exemptions test. So neither the runtime role nor the superuser (even after SET ROLE
+ * tinnox_migrator, whose writes the 0013 exemptions would not cover) can run them. A superuser
+ * cannot pass by setting session_authorization at startup either: PostgreSQL 17 keeps
+ * session_user as the login (checked on 2026-11-22). The check runs once, at connect, on the
+ * pool's one connection, which is kept while idle. If that connection drops, the pool opens
+ * another with the same connection string on the next use and does not check it again.
+ */
+export async function connectMigrator(
+  connectionString: string,
+  options: { readonly applicationName: string },
+): Promise<MigratorPool> {
+  const pool = new pg.Pool({
+    connectionString,
+    application_name: options.applicationName,
+    max: 1,
+    idleTimeoutMillis: 0,
+  });
+  // As createPool: a lost idle connection must not crash the tool.
+  pool.on('error', () => undefined);
+  try {
+    const { rows } = await pool.query<{ current_user: string; session_user: string }>(
+      'SELECT current_user, session_user',
+    );
+    const who = rows[0];
+    if (who?.current_user !== MIGRATOR_ROLE || who.session_user !== MIGRATOR_ROLE) {
+      throw new Error(
+        `this tool must log in and act as role ${MIGRATOR_ROLE}, but the connection logs in as ` +
+          `${who?.session_user ?? 'unknown'} and acts as ${who?.current_user ?? 'unknown'}; ` +
+          `use the ${MIGRATOR_ROLE} connection string without a role setting`,
+      );
+    }
+  } catch (error) {
+    await pool.end().catch(() => undefined);
+    throw error;
+  }
+  return pool as MigratorPool;
+}
 
 export interface MigrationOptions {
-  /** Connection string for role tinnox_migrator. */
+  /** Connection string for role tinnox_migrator; connectMigrator refuses any other. */
   readonly connectionString: string;
   /** Directory holding NNNN_name.sql files. */
   readonly directory: string;
@@ -16,9 +73,41 @@ export interface MigrationResult {
   readonly alreadyApplied: readonly string[];
 }
 
-const FILE_PATTERN = /^([0-9]{4})_[a-z0-9_]+\.sql$/;
+/** A migration file name; the first group is its four-digit number. */
+export const MIGRATION_FILE_PATTERN = /^([0-9]{4})_[a-z0-9_]+\.sql$/;
 /** Arbitrary constant; serialises concurrent migration runs on one database. */
 const ADVISORY_LOCK_KEY = 7_411_660_001;
+
+export type MigrationNameProblem =
+  | { readonly kind: 'pattern'; readonly name: string }
+  | { readonly kind: 'duplicate'; readonly name: string; readonly number: string };
+
+/**
+ * Checks migration file names in the order given (the runner passes them sorted): each looks
+ * like 0001_description.sql and no number repeats. Shared by the runner, which refuses the
+ * first problem before it connects, and by `npm run check:migrations`, which reports them all.
+ */
+export function validateMigrationNames(names: readonly string[]): MigrationNameProblem[] {
+  const problems: MigrationNameProblem[] = [];
+  const versions = new Set<string>();
+  for (const name of names) {
+    const match = MIGRATION_FILE_PATTERN.exec(name);
+    if (match === null || match[1] === undefined) {
+      problems.push({ kind: 'pattern', name });
+      continue;
+    }
+    if (versions.has(match[1])) problems.push({ kind: 'duplicate', name, number: match[1] });
+    versions.add(match[1]);
+  }
+  return problems;
+}
+
+/** The runner's error text for a name problem. */
+export function migrationNameMessage(problem: MigrationNameProblem): string {
+  return problem.kind === 'pattern'
+    ? `migration file name must look like 0001_description.sql: ${problem.name}`
+    : `duplicate migration number ${problem.number}`;
+}
 
 /**
  * Applies pending SQL migrations in file-name order. Each file runs in its own
@@ -30,28 +119,20 @@ const ADVISORY_LOCK_KEY = 7_411_660_001;
 export async function runMigrations(options: MigrationOptions): Promise<MigrationResult> {
   const log = options.log ?? (() => undefined);
   const names = (await readdir(options.directory)).filter((n) => n.endsWith('.sql')).sort();
-  const versions = new Set<string>();
-  for (const name of names) {
-    const match = FILE_PATTERN.exec(name);
-    if (match === null || match[1] === undefined) {
-      throw new Error(`migration file name must look like 0001_description.sql: ${name}`);
-    }
-    if (versions.has(match[1])) throw new Error(`duplicate migration number ${match[1]}`);
-    versions.add(match[1]);
-  }
+  const [problem] = validateMigrationNames(names);
+  if (problem !== undefined) throw new Error(migrationNameMessage(problem));
 
-  const client = new pg.Client({
-    connectionString: options.connectionString,
-    application_name: 'tinnox-migrate',
+  const pool = await connectMigrator(options.connectionString, {
+    applicationName: 'tinnox-migrate',
   });
-  await client.connect();
+  // One session for the whole run: the advisory lock below is held by it.
+  const client = await pool.connect().catch(async (error: unknown) => {
+    await pool.end().catch(() => undefined);
+    throw error;
+  });
   const applied: string[] = [];
   const alreadyApplied: string[] = [];
   try {
-    const who = await client.query<{ current_user: string }>('SELECT current_user');
-    if (who.rows[0]?.current_user !== 'tinnox_migrator') {
-      throw new Error('migrations must run as role tinnox_migrator');
-    }
     await client.query('SELECT pg_advisory_lock($1)', [ADVISORY_LOCK_KEY]);
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.schema_migrations (
@@ -111,7 +192,8 @@ export async function runMigrations(options: MigrationOptions): Promise<Migratio
     }
   } finally {
     await client.query('SELECT pg_advisory_unlock($1)', [ADVISORY_LOCK_KEY]).catch(() => undefined);
-    await client.end();
+    client.release();
+    await pool.end();
   }
   return { applied, alreadyApplied };
 }
@@ -122,18 +204,17 @@ export async function runMigrations(options: MigrationOptions): Promise<Migratio
  * not end in `_test`.
  */
 export async function resetTestDatabase(connectionString: string): Promise<void> {
-  const client = new pg.Client({ connectionString, application_name: 'tinnox-test-reset' });
-  await client.connect();
+  const pool = await connectMigrator(connectionString, { applicationName: 'tinnox-test-reset' });
   try {
-    const db = await client.query<{ name: string }>('SELECT current_database() AS name');
+    const db = await pool.query<{ name: string }>('SELECT current_database() AS name');
     const name = db.rows[0]?.name ?? '';
     if (!name.endsWith('_test')) {
       throw new Error(`refusing to reset database "${name}": only *_test databases may be reset`);
     }
-    await client.query('DROP SCHEMA IF EXISTS sec CASCADE');
-    await client.query('DROP SCHEMA public CASCADE');
-    await client.query('CREATE SCHEMA public');
+    await pool.query('DROP SCHEMA IF EXISTS sec CASCADE');
+    await pool.query('DROP SCHEMA public CASCADE');
+    await pool.query('CREATE SCHEMA public');
   } finally {
-    await client.end();
+    await pool.end();
   }
 }

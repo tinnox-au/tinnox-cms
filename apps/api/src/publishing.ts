@@ -15,6 +15,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import {
+  ABSOLUTE,
   AppContentSchema,
   HEADERS,
   IdempotencyKeySchema,
@@ -31,6 +32,7 @@ import {
   type Transition,
   type WorkingHours,
   isMediaItem,
+  isPushPending,
 } from '@tinnox/contracts';
 import { auditScoped, type Tx } from '@tinnox/db';
 import {
@@ -52,8 +54,8 @@ import type { FastifyRequest } from 'fastify';
 import type { AppContext } from './context.ts';
 import { bigintToNumber } from './db-helpers.ts';
 import { HttpError, parseInput } from './errors.ts';
-import { contentRectOf } from './routes/displays.ts';
-import { MEDIA_WINDOW_COLUMNS } from './routes/media.ts';
+import { contentRectOf } from './display-state.ts';
+import { MEDIA_WINDOW_COLUMNS } from './media/rows.ts';
 
 /** The columns of `display` that planning a publication needs. */
 export interface DisplayPlanRow {
@@ -769,6 +771,26 @@ export async function assessDisplays(
     for (const display of batch) assessments.push(assess(display, loaded.get(display.id) ?? null));
   }
   return assessments;
+}
+
+/**
+ * The push plan of the organisation: one assessment per display, in the order
+ * of the display list. At most `ABSOLUTE.maxListItems` displays are assessed.
+ */
+export async function loadPushPlan(tx: Tx, ctx: AppContext): Promise<DisplayAssessment[]> {
+  const { rows } = await tx.query<DisplayPlanRow>(
+    `SELECT ${DISPLAY_PLAN_COLUMNS} FROM display d
+     WHERE d.org_id = app_org_id()
+     ORDER BY d.created_at, d.id
+     LIMIT $1`,
+    [ABSOLUTE.maxListItems],
+  );
+  return assessDisplays(tx, ctx, rows, { lock: false, keepDraft: false });
+}
+
+/** How many displays a push would act on: the rows in `never_pushed` or `changes`. */
+export function pendingCount(assessments: readonly DisplayAssessment[]): number {
+  return assessments.filter((assessment) => isPushPending(assessment.state)).length;
 }
 
 export interface NewPublication {

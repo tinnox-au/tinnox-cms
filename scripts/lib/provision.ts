@@ -4,8 +4,9 @@
  * uses. TINNOX staff run it from a controlled host, never from the API's host or container.
  *
  * Every command:
- * - runs only as tinnox_migrator (assertMigrator checks current_user and session_user): the 0013
- *   exemptions test session_user, and the superuser, whose writes they would not cover, is refused;
+ * - runs only as tinnox_migrator: it takes the MigratorPool that connectMigrator (@tinnox/db)
+ *   returns after checking current_user and session_user. The 0013 exemptions test session_user,
+ *   and the superuser, whose writes they would not cover, is refused;
  * - reads the identity provider before BEGIN and checks the database facts again inside one
  *   transaction, which also holds its audit rows (actor 'system', no time passed);
  * - reads across organisations only between SET LOCAL ROLE tinnox_definer and RESET ROLE, and
@@ -35,7 +36,7 @@ import {
   withOrg,
   withResolvedOrg,
   withoutOrg,
-  type Pool,
+  type MigratorPool,
   type Tx,
 } from '@tinnox/db';
 import { ROLE_LABELS, grantableRoles } from '@tinnox/domain';
@@ -370,19 +371,6 @@ export interface Result {
   readonly lines: readonly string[];
 }
 
-/** Refuses unless the login and the current role are both tinnox_migrator (as migrate.ts). */
-async function assertMigrator(pool: Pool): Promise<void> {
-  const { rows } = await pool.query<{ current_user: string; session_user: string }>(
-    'SELECT current_user, session_user',
-  );
-  const who = rows[0];
-  if (who?.current_user !== 'tinnox_migrator' || who.session_user !== 'tinnox_migrator') {
-    throw new RefusedError(
-      'provisioning runs only as role tinnox_migrator (DATABASE_MIGRATOR_URL)',
-    );
-  }
-}
-
 /**
  * Runs `work` as tinnox_definer (BYPASSRLS, so it reads every organisation), then returns to the
  * migrator. A failure aborts the transaction, which undoes the SET LOCAL as well.
@@ -477,11 +465,10 @@ export interface OrgCreateResult extends Result {
 
 /** A new customer: the organisation, its site and one or two Owners. */
 export async function orgCreate(
-  pool: Pool,
+  pool: MigratorPool,
   idp: IdpDirectory,
   args: OrgCreateArgs,
 ): Promise<OrgCreateResult> {
-  await assertMigrator(pool);
   const subjects: string[] = [];
   for (const owner of args.owners)
     subjects.push((await enabledAccount(idp, owner.username)).subject);
@@ -562,11 +549,10 @@ export interface PendingResult extends Result {
  * address), then lists the pending invites of every organisation.
  */
 export async function pending(
-  pool: Pool,
+  pool: MigratorPool,
   _idp: IdpDirectory,
   args: PendingArgs,
 ): Promise<PendingResult> {
-  await assertMigrator(pool);
   return withoutOrg(pool, async (tx) => {
     // As the definer throughout: there is no organisation context, and the expiry and its audit
     // rows span every organisation (its 0013 UPDATE (status) on member_invite, its INSERT on
@@ -643,11 +629,10 @@ export interface FulfilResult extends Result {
  * role, the account belongs to another organisation, or it is already an active member here.
  */
 export async function fulfil(
-  pool: Pool,
+  pool: MigratorPool,
   idp: IdpDirectory,
   args: FulfilArgs,
 ): Promise<FulfilResult> {
-  await assertMigrator(pool);
   const account = await enabledAccount(idp, args.username);
   const accountEmail = account.email?.trim().toLowerCase() ?? '';
   if (accountEmail === '') {
@@ -798,11 +783,10 @@ export interface MembershipResult extends Result {
 
 /** Names an active member (once for every member from before 0013, D4 a). */
 export async function setName(
-  pool: Pool,
+  pool: MigratorPool,
   idp: IdpDirectory,
   args: SetNameArgs,
 ): Promise<MembershipResult> {
-  await assertMigrator(pool);
   const lookup =
     'username' in args.target
       ? {
@@ -874,11 +858,10 @@ export interface MfaResetResult extends MembershipResult {
  * the cut-off, so the next sign-in asks for the password and one-time code.
  */
 export async function mfaReset(
-  pool: Pool,
+  pool: MigratorPool,
   idp: IdpDirectory,
   args: MfaResetArgs,
 ): Promise<MfaResetResult> {
-  await assertMigrator(pool);
   const subject = await subjectOf(idp, args.username);
   return withResolvedOrg(pool, async (tx, enterOrg) => {
     const member = await asDefiner(
@@ -942,11 +925,10 @@ export interface RestoreOwnerResult extends Result {
  * active member who has signed in, or put a successor in place of the only active member.
  */
 export async function restoreOwner(
-  pool: Pool,
+  pool: MigratorPool,
   idp: IdpDirectory,
   args: RestoreOwnerArgs,
 ): Promise<RestoreOwnerResult> {
-  await assertMigrator(pool);
   const approval = {
     requestRef: args.requestRef,
     executedBy: args.executedBy,

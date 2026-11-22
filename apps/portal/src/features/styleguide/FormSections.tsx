@@ -623,9 +623,9 @@ export function ControlSection() {
           On accent <Badge count={5} variant="inverse" label="5 waiting" />
         </span>
         <span className="tx-code">unsupported_codec</span>
-        <Avatar name="Workshop Operator" size="sm" labelled />
-        <Avatar name="Workshop Operator" labelled />
-        <Avatar name="Operator" size="lg" labelled />
+        <Avatar name="Workshop Manager" size="sm" labelled />
+        <Avatar name="Workshop Manager" labelled />
+        <Avatar name="Manager" size="lg" labelled />
         <span>
           <Kbd>Esc</Kbd> <Kbd>Enter</Kbd> <Kbd>Shift</Kbd>
         </span>

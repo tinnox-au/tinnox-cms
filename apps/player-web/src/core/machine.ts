@@ -132,7 +132,12 @@ export function heartbeatStateFor(phase: PlayerPhase): PlayerState | null {
       return 'playing';
     case 'faulted':
       return 'error';
-    default:
+    case 'booting':
+    case 'standby':
+    case 'unpaired':
+    case 'pairing':
+    case 'revoked':
+    case 'resetting':
       return null;
   }
 }

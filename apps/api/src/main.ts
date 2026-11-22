@@ -50,12 +50,15 @@ async function main(): Promise<void> {
       maxVideoHeightPx: limits.maxVideoHeightPx,
     },
   });
+  // The one clock of the process: the media pipeline and the routes read the time from it.
+  const now = (): Date => new Date();
   const media = new MediaPipeline({
     jobsDir: config.mediaJobsDir,
     pool,
     storage,
     limits,
     logger: logger.child({ module: 'media-pipeline' }),
+    now,
   });
   const ctx: AppContext = {
     config,
@@ -65,7 +68,7 @@ async function main(): Promise<void> {
     idp: createIdentityProvider(config),
     media,
     mail: createMailer(config.mail),
-    now: () => new Date(),
+    now,
   };
 
   const app = await buildApp(ctx, { logger });

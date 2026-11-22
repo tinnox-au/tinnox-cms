@@ -4,7 +4,7 @@ TINNOX CMS: a digital signage CMS in an npm-workspaces TypeScript monorepo (Fast
 
 ## Code Review Rules
 
-These rules are shared, word for word, by `AGENTS.md` (Codex) and `.cursor/BUGBOT.md` (Cursor Bugbot). Change both together.
+`.cursor/BUGBOT.md` is generated from this section by `npm run check:docs -- --write`; `npm run check:docs` fails when they differ. Edit `AGENTS.md` only, and keep every rule in this one file: no nested or override rule files.
 
 Report findings as Critical, High, Medium, Low or Observation. Cite `path:line` for every finding. Say what you could not verify by reading alone and mark it "unverified pending runtime". Check `docs/decisions-2026-11.md`, `docs/security/control-matrix.md` and earlier rounds under `docs/reviews/` first: a known, documented residual is reported as such, not as a new finding.
 
@@ -13,7 +13,7 @@ Report findings as Critical, High, Medium, Low or Observation. Cite `path:line` 
 The roles are created in `infra/postgres/init/01-roles.sh`.
 
 - `tinnox_app` is the only runtime role. It has no superuser, no `BYPASSRLS` and owns nothing. Flag any runtime code that connects as another role, any grant that lets `tinnox_app` own, alter or bypass RLS on a table, and any widening of its grants beyond what a feature needs. `audit_event` stays `INSERT` and `SELECT` only.
-- `tinnox_migrator` owns the schema and only runs migrations (`packages/db/src/migrate.ts`) and TINNOX's provisioning script (`scripts/provision-member.ts`) from a controlled host; both refuse any other role. Its credentials, and the provisioning reader secret, never reach the API, the media worker or the player.
+- `tinnox_migrator` owns the schema. Only offline tools connect as it: the migration runner (`packages/db/src/migrate.ts`, also the test reset), the development seed (`scripts/seed.ts`) and TINNOX's provisioning script (`scripts/provision-member.ts`, from a controlled host); each connects through `connectMigrator`, which refuses any other role. Integration test helpers also connect as it, with plain clients, to arrange data (`TEST_DATABASE_MIGRATOR_URL`); that is test code, outside this rule. The e2e setup uses it only through the runner, the test reset and the seed. Its credentials, and the provisioning reader secret, never reach the API, the media worker or the player. The database administrator runs the incident scripts `scripts/revoke-all-sessions.sql` and `scripts/revoke-subject-sessions.sql`, as the superuser or `tinnox_migrator`; they work only under `SET LOCAL ROLE tinnox_definer`, which `tinnox_app` cannot take.
 - `tinnox_definer` cannot log in, has `BYPASSRLS`, and only owns the narrow `sec.*` `SECURITY DEFINER` functions that must read before the organisation is known (session, device token, pairing, e-mail alerts). Every new or changed `sec.*` function must pin `search_path`, take only what it needs, return the minimum, and be granted `EXECUTE` to `tinnox_app` only. Migration 0013 grants it `UPDATE (first_signed_in_at, sessions_valid_after)` on `membership`, which its `sec.*` functions write. It also grants a read of `member_invite` and `UPDATE (status)` on it. Only `provision-member` uses these, under `SET LOCAL ROLE tinnox_definer`; no `sec.*` function does. Migration 0014 adds `sec.display_alert_orgs()`, which returns organisation ids only, for the alert check that runs with no session, and `sec.alert_recipient_by_token_hash(bytea)`, which returns the organisation and recipient id of an unexpired, unconfirmed alert address for a confirmation link, never the address; it grants `tinnox_definer` `SELECT` on five `alert_recipient` columns, not `email`. A new cross-organisation read is High until justified.
 
 ### 2. Tenant isolation
@@ -31,9 +31,9 @@ The roles are created in `infra/postgres/init/01-roles.sh`.
 
 ### 4. Migration history
 
-- Migrations live in `db/migrations/NNNN_description.sql`, are applied in order, and each runs in one transaction with its `schema_migrations` row. A migration that has been merged to `main` is never edited, renamed or deleted: the runner rejects a changed checksum. Fixes go in a new migration with the next number.
-- Flag duplicate or skipped numbers, a migration that depends on data only present in development, and non-transactional statements (`CREATE INDEX CONCURRENTLY`, `VACUUM`) that cannot run inside the runner's transaction.
-- Ownership changes on `sec.*` functions use `SET LOCAL ROLE tinnox_definer` and `RESET ROLE`, as in migrations 0002 to 0004.
+- Migrations live in `db/migrations/NNNN_description.sql`, are applied in order, and each runs in one transaction with its `schema_migrations` row. A migration that has been merged to `main` is never edited, renamed or deleted: `npm run check:migrations` fails such a change in CI (against `origin/main` on a branch or pull request, against the first-parent history of `HEAD` on `main`), and the runner rejects a changed checksum on any database that applied it. Fixes go in a new migration with the next number.
+- Flag a migration that depends on data only present in development, and non-transactional statements (`CREATE INDEX CONCURRENTLY`, `VACUUM`) that cannot run inside the runner's transaction.
+- Ownership changes on `sec.*` functions use `SET LOCAL ROLE tinnox_definer` and `RESET ROLE`, as in migrations 0003, 0004, 0010, 0012, 0013 and 0014.
 - Locks: flag table rewrites or long `ACCESS EXCLUSIVE` locks on large tables. `tinnox_migrator` has `lock_timeout = '30s'`.
 - Each migration that changes tables, policies, grants or functions has an integration test like `packages/db/test/migration-0005.integration.test.ts` when it upgrades existing data.
 

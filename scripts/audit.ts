@@ -6,7 +6,7 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { type AuditException, evaluate } from './lib/audit-check.ts';
+import { evaluate, parseExceptions } from './lib/audit-check.ts';
 import { repoRoot } from './lib/env.ts';
 
 function npmAudit(extra: string[]): unknown {
@@ -24,14 +24,14 @@ function npmAudit(extra: string[]): unknown {
   }
 }
 
-const exceptions = JSON.parse(
-  readFileSync(join(repoRoot, 'scripts', 'audit-exceptions.json'), 'utf8'),
-) as { exceptions: AuditException[] };
+const exceptions = parseExceptions(
+  JSON.parse(readFileSync(join(repoRoot, 'scripts', 'audit-exceptions.json'), 'utf8')),
+);
 
 const verdict = evaluate(
   npmAudit([]),
   npmAudit(['--omit=dev']),
-  exceptions.exceptions,
+  exceptions,
   new Date().toISOString().slice(0, 10),
 );
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { type AuditException, advisories, evaluate } from './audit-check.ts';
+import { type AuditException, advisories, evaluate, parseExceptions } from './audit-check.ts';
 
 function advisory(name: string, ghsa: string, severity: string) {
   return {
@@ -111,5 +111,41 @@ describe('evaluate', () => {
       const { blocking } = evaluate(report(picomatch), empty, [bad], '2026-11-18');
       expect(blocking.length, JSON.stringify(bad)).toBeGreaterThanOrEqual(2);
     }
+  });
+});
+
+describe('parseExceptions', () => {
+  it('reads scripts/audit-exceptions.json as written', () => {
+    expect(parseExceptions({ exceptions: [] })).toEqual([]);
+    expect(parseExceptions(JSON.parse(JSON.stringify({ exceptions: [exception] })))).toEqual([
+      exception,
+    ]);
+  });
+
+  it.each([null, [], 'text', {}, { exceptions: {} }])('refuses %j, which has no list', (file) => {
+    expect(() => parseExceptions(file)).toThrow(/must be an object with an "exceptions" array/);
+  });
+
+  it('reads a missing or non-string field as empty, which evaluate blocks', () => {
+    const [partial, wrong] = parseExceptions({
+      exceptions: [
+        { id: exception.id, package: 'picomatch' },
+        { ...exception, owner: 7, reviewBy: null },
+      ],
+    });
+    expect(partial).toEqual({ ...exception, reason: '', owner: '', reviewBy: '' });
+    expect(wrong).toEqual({ ...exception, owner: '', reviewBy: '' });
+    for (const bad of [partial, wrong]) {
+      if (bad === undefined) throw new Error('an entry is missing');
+      const { blocking } = evaluate(report(picomatch), empty, [bad], '2026-11-18');
+      expect(blocking.length, JSON.stringify(bad)).toBeGreaterThanOrEqual(2);
+    }
+  });
+
+  it('reads an entry that is not an object as all empty', () => {
+    expect(parseExceptions({ exceptions: [null, 3] })).toEqual([
+      { id: '', package: '', reason: '', owner: '', reviewBy: '' },
+      { id: '', package: '', reason: '', owner: '', reviewBy: '' },
+    ]);
   });
 });

@@ -15,9 +15,9 @@ import type { FastifyInstance } from 'fastify';
 import { operatorOf } from '../auth/session.ts';
 import type { AppContext } from '../context.ts';
 import { bigintToNumber } from '../db-helpers.ts';
-import { loadStatusViews } from './displays.ts';
-import { usedBytes } from './media.ts';
-import { loadPushPlan, pendingCount } from './push.ts';
+import { loadStatusViews } from '../display-state.ts';
+import { usedBytes } from '../media/rows.ts';
+import { loadPushPlan, pendingCount } from '../publishing.ts';
 
 export function registerOverviewRoutes(app: FastifyInstance, ctx: AppContext): void {
   const { pool, config } = ctx;

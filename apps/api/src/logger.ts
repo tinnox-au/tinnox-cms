@@ -1,9 +1,10 @@
 /**
  * Logging rules (D16): no credentials, cookies, CSRF tokens, pairing codes,
- * signed URLs or file contents in logs. Requests are logged by path only - the
+ * signed URLs, e-mail addresses or file contents in logs. Requests are logged by path only - the
  * query string (which carries `sig`, `code` and `state`) is never written.
  */
 import { REDACTED_HEADERS, REDACTED_QUERY_PARAMS } from '@tinnox/contracts';
+import { errorField } from '@tinnox/db';
 import { pino, type DestinationStream, type Logger } from 'pino';
 
 const SECRET_FIELDS = [
@@ -20,6 +21,9 @@ const SECRET_FIELDS = [
   'password',
   'secret',
   'url',
+  // Alert addresses belong to people outside the organisation too (DEC-37); callers never log
+  // them, and a field of this name is redacted in case one does.
+  'email',
   ...REDACTED_QUERY_PARAMS,
 ] as const;
 
@@ -40,7 +44,7 @@ export function pathOnly(url: string | undefined): string {
 }
 
 function errorFields(error: Error): Record<string, unknown> {
-  const code = (error as { code?: unknown }).code;
+  const code = errorField(error, 'code');
   return {
     type: error.name,
     message: error.message.slice(0, 500),
@@ -56,7 +60,7 @@ function errorFields(error: Error): Record<string, unknown> {
  */
 export function serializeError(error: unknown): Record<string, unknown> {
   if (!(error instanceof Error)) return { message: 'non-error value thrown' };
-  const cause = (error as { cause?: unknown }).cause;
+  const cause = error.cause;
   return {
     ...errorFields(error),
     ...(cause instanceof Error ? { cause: errorFields(cause) } : {}),

@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { inviteReference } from '@tinnox/contracts';
-import { withOrg, withoutOrg } from '@tinnox/db';
+import { connectMigrator, withOrg, withoutOrg, type MigratorPool } from '@tinnox/db';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { IdpAccount, IdpDirectory } from '../../scripts/lib/idp.ts';
@@ -42,14 +42,12 @@ const APPROVAL = { requestRef: 'REQ-40', executedBy: STAFF, approvedBy: 'lee.sta
 
 let t: TestApp;
 /** The provisioning connection, as the CLI opens it. */
-let pool: pg.Pool;
+let pool: MigratorPool;
 
 beforeAll(async () => {
   t = await startTestApp();
-  pool = new pg.Pool({
-    connectionString: process.env['TEST_DATABASE_MIGRATOR_URL'],
-    application_name: 'tinnox-provision',
-    max: 1,
+  pool = await connectMigrator(process.env['TEST_DATABASE_MIGRATOR_URL'] ?? '', {
+    applicationName: 'tinnox-provision',
   });
 });
 afterAll(async () => {
@@ -225,10 +223,10 @@ async function removeMember(org: TestOrg, gone: TestOrg): Promise<void> {
 }
 
 /** The provisioning connection, with `before` awaited ahead of every statement; a rejection fails it. */
-function intercepted(
-  real: pg.Pool,
+function intercepted<P extends pg.Pool>(
+  real: P,
   before: (text: string, values: readonly unknown[] | undefined) => Promise<void>,
-): pg.Pool {
+): P {
   const bound = <T extends object>(target: T, key: string | symbol): unknown => {
     const value: unknown = Reflect.get(target, key);
     return typeof value === 'function'
@@ -259,7 +257,7 @@ function intercepted(
  * `action` (auditScoped's third parameter), so the audit rows before it are written first. The
  * statements before the failing insert run.
  */
-function failingAudit(real: pg.Pool, action?: string): pg.Pool {
+function failingAudit<P extends pg.Pool>(real: P, action?: string): P {
   return intercepted(real, (text, values) =>
     /INSERT INTO (public\.)?audit_event/.test(text) &&
     (action === undefined || values?.[2] === action)
@@ -1091,71 +1089,56 @@ describe('provision-member, every command', () => {
     expect(await organisationsNamed(orgName)).toBe(0);
   });
 
-  it('refuses the superuser and the runtime role before it reads the identity provider', async () => {
-    const org = await createOrg('Provision wrong login');
-    const superuserUrl = new URL(process.env['TEST_DATABASE_MIGRATOR_URL'] ?? '');
-    superuserUrl.username = 'postgres';
-    superuserUrl.password = encodeURIComponent(process.env['POSTGRES_SUPERUSER_PASSWORD'] ?? '');
+  it('refuses the superuser and the runtime role before it reads the identity provider (D4)', async () => {
+    const superuser = new URL(process.env['TEST_DATABASE_MIGRATOR_URL'] ?? '');
+    superuser.username = 'postgres';
+    superuser.password = encodeURIComponent(process.env['POSTGRES_SUPERUSER_PASSWORD'] ?? '');
+    // The superuser acting as the migrator: current_user passes, session_user does not.
+    const superuserAsMigrator = new URL(superuser);
+    superuserAsMigrator.searchParams.set('options', '-c role=tinnox_migrator');
     const logins = [
-      new pg.Pool({ connectionString: superuserUrl.toString(), max: 1 }),
-      new pg.Pool({ connectionString: process.env['TEST_DATABASE_URL'], max: 1 }),
+      superuser.toString(),
+      superuserAsMigrator.toString(),
+      process.env['TEST_DATABASE_URL'] ?? '',
     ];
-    const idp = directory({ anyone: account('anyone@example.com', org.oidcSub) });
-    try {
-      for (const wrong of logins) {
-        const commands = [
-          () =>
-            orgCreate(wrong, idp, {
-              orgName: 'Never made',
-              timezone: 'UTC',
-              siteName: 'Main site',
-              owners: [{ username: 'anyone', name: 'Anyone Example' }],
-              requestRef: 'REQ-15',
-              executedBy: STAFF,
-            }),
-          () => pending(wrong, idp, { executedBy: STAFF }),
-          () =>
-            fulfil(wrong, idp, {
-              inviteId: randomUUID(),
-              username: 'anyone',
-              confirmedWith: 'T-5',
-              executedBy: STAFF,
-            }),
-          () =>
-            setName(wrong, idp, {
-              target: { username: 'anyone' },
-              name: 'Anyone Example',
-              requestRef: 'REQ-15',
-              executedBy: STAFF,
-            }),
-          () =>
-            mfaReset(wrong, idp, {
-              username: 'anyone',
-              requestRef: 'REQ-15',
-              executedBy: STAFF,
-              confirmedWith: 'CALL-2',
-            }),
-          () =>
-            restoreOwner(wrong, idp, {
-              ...APPROVAL,
-              mode: 'promote',
-              membershipId: org.membershipId,
-            }),
-          () =>
-            restoreOwner(wrong, idp, {
-              ...APPROVAL,
-              mode: 'successor',
-              successor: { username: 'anyone', name: 'Anyone Example' },
-              replaces: org.membershipId,
-            }),
-        ];
-        for (const command of commands) {
-          expect(await refusal(command)).toMatch(/only as role tinnox_migrator/);
-        }
-      }
-    } finally {
-      await Promise.all(logins.map((login) => login.end()));
+    const orgName = `Never made ${randomUUID().slice(0, 8)}`;
+    for (const login of logins) {
+      const outcome = await promisify(execFile)(
+        join(repoRoot, 'node_modules', '.bin', 'tsx'),
+        [
+          'scripts/provision-member.ts',
+          'org-create',
+          '--org-name',
+          orgName,
+          '--timezone',
+          'UTC',
+          '--owner',
+          'anyone=Anyone Example',
+          '--request-ref',
+          'REQ-15',
+          '--executed-by',
+          STAFF,
+        ],
+        {
+          cwd: repoRoot,
+          // No reader settings: a run that reached the identity provider would fail on them.
+          env: {
+            ...process.env,
+            DATABASE_MIGRATOR_URL: login,
+            PROVISION_IDP_CLIENT_ID: '',
+            PROVISION_IDP_CLIENT_SECRET: '',
+          },
+        },
+      ).then(
+        () => ({ code: 0, stderr: '' }),
+        (error: { code?: number; stderr?: string }) => ({
+          code: error.code,
+          stderr: error.stderr ?? '',
+        }),
+      );
+      expect(outcome.code).toBe(1);
+      expect(outcome.stderr).toMatch(/must log in and act as role tinnox_migrator/);
     }
-    expect(idp.reads).toBe(0);
+    expect(await organisationsNamed(orgName)).toBe(0);
   });
 });

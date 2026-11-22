@@ -21,10 +21,11 @@ type ElectionMessage =
 
 function isElectionMessage(value: unknown): value is ElectionMessage {
   if (typeof value !== 'object' || value === null) return false;
-  const candidate = value as { type?: unknown; id?: unknown };
   return (
-    typeof candidate.id === 'string' &&
-    (candidate.type === 'claim' || candidate.type === 'leader' || candidate.type === 'released')
+    'id' in value &&
+    typeof value.id === 'string' &&
+    'type' in value &&
+    (value.type === 'claim' || value.type === 'leader' || value.type === 'released')
   );
 }
 

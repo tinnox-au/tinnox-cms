@@ -7,16 +7,14 @@
  * publication that would be built differs from the one the display already has.
  */
 import {
-  ABSOLUTE,
   PushRequestSchema,
   ROUTES,
-  isPushPending,
   type PushPlanResponse,
   type PushPlanRow,
   type PushResponse,
   type PushResult,
 } from '@tinnox/contracts';
-import { withOrg, type Tx } from '@tinnox/db';
+import { withOrg } from '@tinnox/db';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { withOrgAllowed } from '../auth/permissions.ts';
 import { operatorOf, type OperatorSession } from '../auth/session.ts';
@@ -27,14 +25,14 @@ import {
   assessDisplays,
   auditRejectedPublication,
   createPublication,
-  DISPLAY_PLAN_COLUMNS,
   findPublicationByKey,
   idempotencyKeyOf,
   issueDetails,
   lockDisplayForPublish,
+  loadPushPlan,
   lockPublishKey,
+  pendingCount,
   type DisplayAssessment,
-  type DisplayPlanRow,
 } from '../publishing.ts';
 
 function toPlanRow(assessment: DisplayAssessment): PushPlanRow {
@@ -47,26 +45,6 @@ function toPlanRow(assessment: DisplayAssessment): PushPlanRow {
     issues: issueDetails(assessment.issues),
     lastPushedAt: assessment.current === null ? null : iso(assessment.current.createdAt),
   };
-}
-
-/**
- * The push plan of the organisation: one assessment per display, in the order
- * of the display list. At most `ABSOLUTE.maxListItems` displays are assessed.
- */
-export async function loadPushPlan(tx: Tx, ctx: AppContext): Promise<DisplayAssessment[]> {
-  const { rows } = await tx.query<DisplayPlanRow>(
-    `SELECT ${DISPLAY_PLAN_COLUMNS} FROM display d
-     WHERE d.org_id = app_org_id()
-     ORDER BY d.created_at, d.id
-     LIMIT $1`,
-    [ABSOLUTE.maxListItems],
-  );
-  return assessDisplays(tx, ctx, rows, { lock: false, keepDraft: false });
-}
-
-/** How many displays a push would act on: the rows in `never_pushed` or `changes`. */
-export function pendingCount(assessments: readonly DisplayAssessment[]): number {
-  return assessments.filter((assessment) => isPushPending(assessment.state)).length;
 }
 
 export function registerPushRoutes(app: FastifyInstance, ctx: AppContext): void {

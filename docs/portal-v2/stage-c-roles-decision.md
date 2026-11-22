@@ -324,6 +324,7 @@ Each new route has its own entry in the route-to-key table.
 
 **How TINNOX's scripts reach the data:**
 - The scripts run as `tinnox_migrator` from a controlled host, as `scripts/revoke-subject-sessions.sql` does today. AGENTS.md §1 says the migrator only runs migrations, so C2 records provisioning there as a second permitted use, and in threat T14. The migrator can still delete audit rows and disable triggers. That is the documented administrator residual (T14), now used more often.
+  - Correction, 2026-11-22: AGENTS.md §1 no longer says the migrator only runs migrations. It names the migration runner, the seed and provisioning, each connecting through `connectMigrator` in `packages/db`, which replaced provisioning's own role check (DEC-38, D4).
 - `pending` and the first step of `fulfil` read `member_invite` across organisations, which `FORCE ROW LEVEL SECURITY` refuses to the table owner. They use `SET LOCAL ROLE tinnox_definer`, as `revoke-subject-sessions.sql` does. The definer gets a new grant: `SELECT (id, org_id, role, name, email, status, expires_at)` and `UPDATE (status, closed_at)` on `member_invite`.
   - Justification: TINNOX staff must see the queue of every customer to work it.
   - It is script-only, never a `sec.*` function the API can call, and `sec.integration.test.ts` checks that `tinnox_app` cannot read invites of another organisation.

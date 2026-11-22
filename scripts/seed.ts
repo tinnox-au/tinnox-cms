@@ -13,7 +13,7 @@
 // this script creates the matching membership rows. A subject without a membership cannot
 // sign in. Customers' members come from scripts/provision-member.ts instead.
 import type { Role } from '@tinnox/contracts';
-import pg from 'pg';
+import { connectMigrator, withOrg, type MigratorPool, type Tx } from '@tinnox/db';
 import { loadEnv, requireEnv } from './lib/env.ts';
 
 loadEnv();
@@ -70,70 +70,64 @@ export const SEED = {
  * `npm run setup -- --force` (new subjects, old rows kept) never fails.
  */
 async function seedMember(
-  client: pg.Client,
+  tx: Tx,
   orgId: string,
   member: SeedMember,
   subject: string,
 ): Promise<string> {
-  const taken = await client.query(
+  const taken = await tx.query(
     'SELECT 1 FROM membership WHERE org_id = $1 AND lower(display_name) = lower($2)',
     [orgId, member.name],
   );
   const name = taken.rows.length === 0 ? member.name : `${member.name} (${subject.slice(0, 8)})`;
-  const existing = await client.query<{ id: string }>(
+  const existing = await tx.query<{ id: string }>(
     'SELECT id FROM membership WHERE org_id = $1 AND oidc_sub = $2',
     [orgId, subject],
   );
   const row = existing.rows[0];
   if (row !== undefined) {
-    await client.query(
+    await tx.query(
       'UPDATE membership SET display_name = $2 WHERE id = $1 AND display_name IS NULL',
       [row.id, name],
     );
     return `${member.role} membership already present`;
   }
-  await client.query(
+  await tx.query(
     'INSERT INTO membership (org_id, oidc_sub, role, display_name) VALUES ($1, $2, $3, $4)',
     [orgId, subject, member.role, name],
   );
   return `${member.role} membership created`;
 }
 
-async function seedOrganisation(client: pg.Client, org: SeedOrg): Promise<string> {
+async function seedOrganisation(pool: MigratorPool, org: SeedOrg): Promise<string> {
   const subjects = org.members.map((member) => requireEnv(member.subjectEnv));
-  await client.query('BEGIN');
-  try {
-    // Row-level security is forced even for the table owner, so the seed sets the
-    // tenant context exactly like the application does.
-    await client.query("SELECT set_config('app.org_id', $1, true)", [org.orgId]);
-    await client.query(
+  // Row-level security is forced even for the table owner, so the seed sets the
+  // tenant context exactly like the application does: one withOrg transaction.
+  return withOrg(pool, org.orgId, async (tx) => {
+    await tx.query(
       'INSERT INTO organization (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING',
       [org.orgId, org.orgName],
     );
-    await client.query(
+    await tx.query(
       'INSERT INTO site (id, org_id, name, timezone) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING',
       [org.siteId, org.orgId, org.siteName, org.timezone],
     );
     const notes: string[] = [];
     for (const [index, member] of org.members.entries()) {
-      notes.push(await seedMember(client, org.orgId, member, subjects[index] ?? ''));
+      notes.push(await seedMember(tx, org.orgId, member, subjects[index] ?? ''));
     }
-    await client.query('COMMIT');
     return `${org.orgName}: site "${org.siteName}" (${org.timezone}); ${notes.join(', ')}`;
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  }
+  });
 }
 
-const client = new pg.Client({ connectionString, application_name: 'tinnox-seed' });
+let pool: MigratorPool | undefined;
 try {
-  await client.connect();
-  console.log(await seedOrganisation(client, SEED.primary));
-  if (withSecondOrg) console.log(await seedOrganisation(client, SEED.second));
+  pool = await connectMigrator(connectionString, { applicationName: 'tinnox-seed' });
+  console.log(await seedOrganisation(pool, SEED.primary));
+  if (withSecondOrg) console.log(await seedOrganisation(pool, SEED.second));
 } catch (error) {
   console.error(error instanceof Error ? error.message : error);
   process.exitCode = 1;
 } finally {
-  await client.end().catch(() => undefined);
+  await pool?.end().catch(() => undefined);
 }

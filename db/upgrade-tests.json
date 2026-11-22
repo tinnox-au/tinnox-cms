@@ -1,0 +1,66 @@
+{
+  "about": "One entry per file in db/migrations, sorted by file name: the integration test that upgrades a populated database through it, or the reason it has none. Sorted, so two branches that add the same number conflict here at merge. npm run check:migrations holds it (scripts/lib/migrations-check.ts, D12).",
+  "migrations": [
+    {
+      "file": "0001_schema.sql",
+      "reason": "Merged to main together with 0002 to 0004 in one commit (1c30f10), so no database was ever at an earlier level: every build applies it to an empty schema."
+    },
+    {
+      "file": "0002_security_functions.sql",
+      "reason": "Merged to main together with 0001, 0003 and 0004 in one commit (1c30f10), so no database was ever upgraded to it: every build applies it to an empty schema."
+    },
+    {
+      "file": "0003_api_lookups.sql",
+      "reason": "Merged to main together with 0001, 0002 and 0004 in one commit (1c30f10), so no database was ever upgraded to it: every build applies it to an empty schema."
+    },
+    {
+      "file": "0004_review_hardening.sql",
+      "reason": "Merged to main together with 0001 to 0003 in one commit (1c30f10), so no database was ever upgraded to it. It is the first level main stood at; migration-0005.integration.test.ts fills a database at 0004 before it upgrades."
+    },
+    {
+      "file": "0005_portal_v2_stage_a.sql",
+      "test": "packages/db/test/migration-0005.integration.test.ts"
+    },
+    {
+      "file": "0006_stage_b_slice1.sql",
+      "test": "packages/db/test/migration-0005.integration.test.ts",
+      "reason": "No test of its own: the populated database of the 0005 upgrade test goes on through 0006 to 0011 ('carries the existing rows through 0006 to 0011')."
+    },
+    {
+      "file": "0007_stage_b_apps.sql",
+      "test": "packages/db/test/migration-0005.integration.test.ts",
+      "reason": "No test of its own: the populated database of the 0005 upgrade test goes on through 0006 to 0011 ('carries the existing rows through 0006 to 0011')."
+    },
+    {
+      "file": "0008_null_safe_checks.sql",
+      "test": "packages/db/test/migration-0005.integration.test.ts",
+      "reason": "No test of its own: the populated database of the 0005 upgrade test goes on through 0006 to 0011 ('carries the existing rows through 0006 to 0011'), so its tightened checks meet existing rows."
+    },
+    {
+      "file": "0009_stage_b_schedules.sql",
+      "test": "packages/db/test/migration-0005.integration.test.ts",
+      "reason": "No test of its own: the populated database of the 0005 upgrade test goes on through 0006 to 0011 ('carries the existing rows through 0006 to 0011')."
+    },
+    {
+      "file": "0010_pairing_hardening.sql",
+      "reason": "Declared no data: only sec.* functions change. That missed claims accepted before 0010, which could still complete after the upgrade on a screen whose player was revoked (security review round 3, section 13); 0012 cancels them and has its own upgrade test."
+    },
+    {
+      "file": "0011_stage_b_layouts.sql",
+      "test": "packages/db/test/migration-0005.integration.test.ts",
+      "reason": "No test of its own: the populated database of the 0005 upgrade test goes on through 0006 to 0011 ('carries the existing rows through 0006 to 0011')."
+    },
+    {
+      "file": "0012_pairing_upgrade_cleanup.sql",
+      "test": "packages/db/test/migration-0012.integration.test.ts"
+    },
+    {
+      "file": "0013_roles_and_members.sql",
+      "test": "packages/db/test/migration-0013.integration.test.ts"
+    },
+    {
+      "file": "0014_display_alerts.sql",
+      "test": "packages/db/test/migration-0014.integration.test.ts"
+    }
+  ]
+}

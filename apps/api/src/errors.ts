@@ -3,6 +3,7 @@
  * carry stack traces, SQL text or internal messages.
  */
 import { apiError, HEADERS, type ApiErrorCode, type ApiErrorDetail } from '@tinnox/contracts';
+import { errorField } from '@tinnox/db';
 import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { z } from 'zod';
 
@@ -52,7 +53,7 @@ export function parseInput<S extends z.ZodType>(
 /** PostgreSQL error code of an unknown error, or null. */
 export function pgErrorCode(error: unknown): string | null {
   if (typeof error !== 'object' || error === null) return null;
-  const code = (error as { code?: unknown }).code;
+  const code = errorField(error, 'code');
   return typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) ? code : null;
 }
 
