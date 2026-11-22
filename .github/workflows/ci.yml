@@ -36,6 +36,9 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run format:check
+      # .cursor/BUGBOT.md generated from AGENTS.md, document paths, decision ranges, pinned
+      # actions and images, and no undated hand-typed counts in live text (scripts/check-docs.ts).
+      - run: npm run check:docs
       - run: npm run typecheck
       - run: npm test
       # Portal components render in real Chromium (the portal relies on the popover attribute).

@@ -123,7 +123,7 @@ You don't need to read all ~5,800 lines. Read the five documents below in order 
 
 | Step | Read | Why | Time |
 |---|---|---|---|
-| 1 | [`docs/decisions-2026-11.md`](docs/decisions-2026-11.md), all of it | **The one-page summary of the whole project.** It has 35 numbered decisions (DEC-01 to DEC-35), each marked *DECIDED by client* or *PROPOSED for TINNOX approval*, plus recommended answers on support access, hosting cost and player hardware. If you read only one document, read this one. | 30 min |
+| 1 | [`docs/decisions-2026-11.md`](docs/decisions-2026-11.md), all of it | **The one-page summary of the whole project.** It has 37 numbered decisions (DEC-01 to DEC-38; there is no DEC-36), each marked *DECIDED by client* or *PROPOSED for TINNOX approval*, plus recommended answers on support access, hosting cost and player hardware. If you read only one document, read this one. | 30 min |
 | 2 | [`docs/open-questions.md`](docs/open-questions.md), sections 2.1 and 6 | **What TINNOX still has to answer (Q13 to Q26), and what happens next.** Q13 (which vendor gave API access) and Q14 (which controller each product package uses) block the controller adapter work and the Huidu hardware order. Platform work can start without them. | 15 min |
 | 3 | [`docs/tinnox-mvp-spec.md`](docs/tinnox-mvp-spec.md), sections 1 to 4 | **What release 1 does and does not include**: purpose, the eight product principles, personas and scenarios, and the in-scope and out-of-scope tables. Sections 5 to 20 are detail you can skim. | 30 min |
 | 4 | [`docs/implementation-backlog.md`](docs/implementation-backlog.md), sections 0, 2 and 3 | **How it gets built, and in what order.** It covers the first milestone ("one display, one site, honest states"), a 5-phase plan of about 22 weeks for two to three engineers, and the main risks. Section 1 lists the epics (A to N) in detail. | 20 min |
@@ -159,7 +159,7 @@ flowchart LR
 
 | Document | What it is | Size |
 |---|---|---|
-| [`decisions-2026-11.md`](docs/decisions-2026-11.md) | The decision register (DEC-01 to DEC-35), the page TINNOX approves | 100 lines |
+| [`decisions-2026-11.md`](docs/decisions-2026-11.md) | The decision register (DEC-01 to DEC-38), the page TINNOX approves | 100 lines |
 | [`open-questions.md`](docs/open-questions.md) | Blockers, questions for TINNOX (Q1 to Q26 with answers so far), assumptions (A-numbers), things that need real hardware, and next actions | 142 lines |
 | [`gaps-and-first-steps.md`](docs/gaps-and-first-steps.md) | Review of 9 November 2026: first-two-weeks checklist, launch baseline for security and Australian compliance, what is deferred until a large buyer appears, hardware list, and inconsistencies in the pack | 184 lines |
 
@@ -197,7 +197,7 @@ flowchart LR
 | [R8-xibo-verify.md](docs/research/round2/R8-xibo-verify.md) | Fact-check of Xibo (open-source CMS) licensing, pricing and terms |
 | [AV1](docs/research/round2/AV1-accounts-admin.md) to [AV5](docs/research/round2/AV5-publish-monitor-offline.md) | Claim-by-claim checks of the Yodeck audit (accounts, registration and API, media and playlists, layouts and scheduling, publishing, monitoring and offline) |
 
-Some files mention a `scratchpad/` folder (for example the round-1 notes `A01` and `T01`). That folder was the research session's temporary workspace and is **not in this repository**.
+Some files mention a scratchpad folder (for example the round-1 notes `A01` and `T01`). That folder was the research session's temporary workspace and is **not in this repository**.
 
 ---
 
@@ -221,7 +221,7 @@ The docs use a few conventions throughout. Once you know them, the documents rea
 
 | ID | Meaning | Defined in |
 |---|---|---|
-| DEC-01 to DEC-35 | Decisions | `decisions-2026-11.md` |
+| DEC-01 to DEC-38 (no DEC-36) | Decisions | `decisions-2026-11.md` |
 | Q1 to Q12 | Questions TINNOX has already answered | `open-questions.md` section 2 |
 | Q13 to Q26 | Open questions for TINNOX. **The same questions are also called Q-T1 to Q-T14** (Q-T1 = Q13, Q-T2 = Q14, and so on). | `open-questions.md` section 2.1 |
 | A1, A2, … | Assumptions | `open-questions.md` section 4 |

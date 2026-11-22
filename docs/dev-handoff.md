@@ -20,7 +20,7 @@ Run everything from the repository root. You should not need `npm install`; `nod
 | `npm run typecheck` / `npm run lint` / `npm run format` / `npm run format:check` | Type check every workspace plus `scripts/`; ESLint (run with a 4 GB heap: it needs about 2.5 GB, more than Node's 2 GB default on machines with under about 15 GB of memory); Prettier. |
 | `npm test` | Unit tests (vitest project `unit`). |
 | `npm run test:integration` | Integration tests against PostgreSQL. Rebuilds database `tinnox_test` first. |
-| `npm run test:e2e` | Playwright suite in `tests/e2e` (25 tests; rebuilds database `tinnox_e2e_test`, builds and starts portal, player and API itself; evidence to `tests/.run/evidence` unless `E2E_EVIDENCE_DIR` is set). |
+| `npm run test:e2e` | Playwright suite in `tests/e2e` (rebuilds database `tinnox_e2e_test`, builds and starts portal, player and API itself; evidence to `tests/.run/evidence` unless `E2E_EVIDENCE_DIR` is set). |
 | `npm run build` | `vite build` for portal and player. The API and worker run from TypeScript source. |
 | `npm run audit` | `scripts/audit.ts`: `npm audit`, failing on high or critical advisories apart from the dated development-only exceptions in `scripts/audit-exceptions.json` (operations checklist section 6). |
 | `npm run scan:secrets` | gitleaks (container, no network) over git history and all non-ignored files. |
@@ -144,7 +144,7 @@ The device token is delivered in exactly one response. If that response is lost,
 
 Composite foreign keys `(id, org_id)` stop a row from referencing another organisation's row. A cross-organisation attempt surfaces as PostgreSQL error `42501` (policy) or `23503` (foreign key); map both to 404, never to a message that confirms the other row exists.
 
-Migration `0004_review_hardening.sql` (review fixes, 2026-11-14) adds the `publication_asset` insert guard, the audit time stamp trigger, `sec.heartbeat_log_purge` (wrapper `heartbeatLogPurge`) and a `sec.session_purge_expired` that also clears ended sessions' ID tokens; there are now 17 `sec` functions. New migrations: add `db/migrations/000N_name.sql`; never edit an applied file (the runner compares SHA-256 and refuses). To change a `sec` function use `SET LOCAL ROLE tinnox_definer; CREATE OR REPLACE FUNCTION ...; RESET ROLE;`. A new table needs `ENABLE` and `FORCE ROW LEVEL SECURITY`, a `tenant_isolation` policy and explicit grants; migration 0001 ends with a check that fails if a table lacks forced row-level security.
+Migration `0004_review_hardening.sql` (review fixes, 2026-11-14) adds the `publication_asset` insert guard, the audit time stamp trigger, `sec.heartbeat_log_purge` (wrapper `heartbeatLogPurge`) and a `sec.session_purge_expired` that also clears ended sessions' ID tokens, which made 17 `sec` functions; later migrations add more, and `packages/db/test/sec.integration.test.ts` pins how many there are. New migrations: add `db/migrations/000N_name.sql`; never edit an applied file (the runner compares SHA-256 and refuses). To change a `sec` function use `SET LOCAL ROLE tinnox_definer; CREATE OR REPLACE FUNCTION ...; RESET ROLE;`. A new table needs `ENABLE` and `FORCE ROW LEVEL SECURITY`, a `tenant_isolation` policy and explicit grants; migration 0001 ends with a check that fails if a table lacks forced row-level security.
 
 ## 6. Packages
 

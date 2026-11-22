@@ -4,6 +4,8 @@ Date: 2026-11-14. Companion to `docs/security/threat-model.md` and `docs/securit
 
 Status of this page: procedures written on 2026-11-14. **The backup and restore procedure (section 2) was executed on 2026-11-14 (twice) and on 2026-11-18** with `npm run backup:verify` (results in section 2.4). The incident runbook has not been rehearsed. The release-checklist statuses in section 5 were updated by the integration step. This page states no legal conclusion; where the law is mentioned, it is OAIC's published description, and whether it applies to TINNOX is for TINNOX and its advisers to determine (`docs/security/control-matrix.md` section 6).
 
+Dated snapshots: every section whose heading ends in a date in brackets is a record of that date, corrected only by a dated line or a later dated section, never rewritten; everything else on this page must be true now, and a hand-typed count of tests, cases, routes, tables or `sec` functions carries its own date or run link (`npm run check:docs` holds both; DEC-38, D17).
+
 Contents: 1 incident response; 2 backup and restore; 3 retention; 4 data locations; 5 pre-customer-release checklist; 6 dependency updates; 7 membership operations.
 
 ## 1. Incident-response runbook
@@ -206,6 +208,8 @@ $DC exec -T postgres dropdb -U postgres tinnox_restore
 rm -rf "$RESTORE_ROOT"
 ```
 
+#### Record: first runs (2026-11-14)
+
 | Field | Result of the run on 2026-11-14 (11:26 UTC) |
 |---|---|
 | Date and operator | 2026-11-14, integration step, local development machine (macOS 26.6.2, PostgreSQL 17.12 container). Data: the development database after a full end-to-end run (synthetic). |
@@ -221,6 +225,8 @@ rm -rf "$RESTORE_ROOT"
 | Deviations from this procedure | Restored into a new database in the same PostgreSQL cluster and a new directory, not onto a separate host or volume. The scratch database and directory were removed afterwards; the backup set was kept outside the repository. |
 
 Re-run on 2026-11-14 at 12:48 UTC by the review-fix step, after migration 0004, with the API stopped: `RESULT: restore verified`. 11 table counts matched (organization 2, membership 2, display 28, player_registration 18, media 42, playlist 30, playlist_item 21, publication 33, publication_asset 72, display_delivery 20, audit_event 1,461); 39 ready media rows and 72 publication assets of 33 publications matched by SHA-256 and size, with nothing missing; 17 of 17 tables with forced row-level security, 12 triggers (including the publication-asset guard and the audit time stamp from 0004) and 17 `sec` functions owned by `tinnox_definer`; a publication update was refused. The new insert triggers did not hinder the restore, because `pg_restore` creates triggers after loading data. The backup set was deleted afterwards.
+
+#### Record: runs on realistic data (2026-11-18)
 
 Runs on 2026-11-18 (local development machine, PostgreSQL 17.12 container, API stopped), on realistic synthetic data created through the portal API with real Keycloak sign-ins: two organisations, four screens, eight apps, and two paired browser players. Backend review round 1 (CU-01) was reproduced and its fix confirmed:
 
@@ -316,7 +322,7 @@ Status values: **implemented** (exists in the build), **tested** (verified, with
 
 ## 6. Dependency-update process
 
-Tooling facts (from `docs/dev-handoff.md`): exact versions, committed `package-lock.json`, `npm ci` for installs; the lockfile must be changed with npm 11 (`npx npm@11.21.2 install <pkg>@<exact version> -w <workspace>`) because the host's npm 10.9.2 fails on `npm install`; container images are pinned by tag in `infra/docker-compose.yml`.
+Tooling facts (from `docs/dev-handoff.md`): exact versions, committed `package-lock.json`, `npm ci` for installs; the lockfile must be changed with npm 11 (`npx npm@11.21.2 install <pkg>@<exact version> -w <workspace>`) because the host's npm 10.9.2 fails on `npm install`; container images are pinned by tag and digest in `infra/docker-compose.yml`.
 
 Routine, at least monthly, and whenever an advisory arrives:
 
@@ -326,7 +332,7 @@ Routine, at least monthly, and whenever an advisory arrives:
 3. Update one group at a time with exact versions. Read the changelog for anything touching authentication, sessions, parsing, multipart upload, image or video handling, the database driver or the web framework.
 4. Review the lockfile diff: new transitive packages, changed registries or integrity hashes, new install scripts.
 5. Run `npm ci`, `npm run typecheck`, `npm run lint`, `npm test`, `npm run test:integration`, `npm run build`, `npm run test:e2e`, `npm run audit`, `npm run scan:secrets`. All must pass; do not weaken a test to pass an upgrade.
-6. Container images (PostgreSQL, Keycloak, gitleaks, the media-worker base image including ffprobe): check for new patch releases on the same schedule; change the tag in one commit; re-run `npm run verify:oidc` after a Keycloak change (import format and token claims can change) and the integration tests after a PostgreSQL change. Consider pinning by digest.
+6. Container images (PostgreSQL, Keycloak, gitleaks, the media-worker base image including ffprobe): check for new patch releases on the same schedule; change the tag and its digest in one commit (`docker buildx imagetools inspect <image>:<tag>` prints the digest; `npm run check:docs` refuses an image pinned by tag only); re-run `npm run verify:oidc` after a Keycloak change (import format and token claims can change) and the integration tests after a PostgreSQL change.
 7. Node.js: stay on a supported release line within `engines`; CI uses Node 22.
 8. Merge through a reviewed pull request with CI green.
 

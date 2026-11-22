@@ -35,6 +35,7 @@
     "test:integration": "vitest run --project integration",
     "test:e2e": "npm run e2e -w @tinnox/tests",
     "audit": "tsx scripts/audit.ts",
+    "check:docs": "tsx scripts/check-docs.ts",
     "scan:secrets": "node scripts/scan-secrets.mjs",
     "reset": "node scripts/reset-dev.mjs",
     "backup:verify": "bash scripts/backup-restore-check.sh",
