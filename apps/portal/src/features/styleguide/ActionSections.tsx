@@ -230,12 +230,12 @@ export function MenuSection() {
           placement="bottom-end"
           trigger={(props) => (
             <Button {...props} variant="ghost" trailingIcon={ChevronDown}>
-              <Avatar name="Workshop Operator" size="sm" /> Account
+              <Avatar name="Workshop Manager" size="sm" /> Account
             </Button>
           )}
         >
           <MenuHeader>
-            <span className="tx-strong">Workshop Operator</span>
+            <span className="tx-strong">Workshop Manager</span>
             <br />
             <span className="tx-small tx-muted">TINNOX Internal</span>
           </MenuHeader>

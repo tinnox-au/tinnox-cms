@@ -545,6 +545,7 @@ describe('upload limits and validation results', () => {
       storage: await LocalObjectStorage.create({ root: t.mediaRoot }),
       limits: t.config.limits,
       logger: silent,
+      now: () => new Date(),
     });
     await pipeline.prepare();
     const inbox = join(t.jobsDir, 'inbox');
@@ -693,6 +694,7 @@ describe('upload limits and validation results', () => {
       storage: await LocalObjectStorage.create({ root: t.mediaRoot }),
       limits: t.config.limits,
       logger: silent,
+      now: () => new Date(),
     });
     await pipeline.prepare();
     await pipeline.tick();

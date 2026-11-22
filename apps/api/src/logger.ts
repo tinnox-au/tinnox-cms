@@ -1,6 +1,6 @@
 /**
  * Logging rules (D16): no credentials, cookies, CSRF tokens, pairing codes,
- * signed URLs or file contents in logs. Requests are logged by path only - the
+ * signed URLs, e-mail addresses or file contents in logs. Requests are logged by path only - the
  * query string (which carries `sig`, `code` and `state`) is never written.
  */
 import { REDACTED_HEADERS, REDACTED_QUERY_PARAMS } from '@tinnox/contracts';
@@ -21,6 +21,9 @@ const SECRET_FIELDS = [
   'password',
   'secret',
   'url',
+  // Alert addresses belong to people outside the organisation too (DEC-37); callers never log
+  // them, and a field of this name is redacted in case one does.
+  'email',
   ...REDACTED_QUERY_PARAMS,
 ] as const;
 

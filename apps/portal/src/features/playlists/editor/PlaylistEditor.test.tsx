@@ -131,7 +131,7 @@ describe('PlaylistEditor: as a Viewer', () => {
     const { screen, router } = await renderAsViewer();
     const name = screen.getByTestId('playlist-editor-name');
     await name.click();
-    await userEvent.keyboard('Winter');
+    await userEvent.type(name, 'Winter');
     await expect.element(name).toHaveValue('Foyer loop');
 
     await screen.getByRole('link', { name: 'All playlists' }).click();
