@@ -4,6 +4,7 @@ import { isApiRequestError } from '../../api/client.ts';
 import { api } from '../../api/index.ts';
 import { inUsePlaylistNames } from '../../lib/apps.ts';
 import { Banner, ConfirmDialog, ErrorNotice } from '../../ui/index.ts';
+import { InUseList } from '../shared/index.ts';
 
 export interface DeleteAppDialogProps {
   /** The app to delete; null keeps the dialog closed. */
@@ -69,13 +70,7 @@ export function DeleteAppDialog({ app, onClose, onDeleted }: DeleteAppDialogProp
           <p>
             {refusal.message} <span className="tx-code">{refusal.code}</span>
           </p>
-          {playlists.length > 0 && (
-            <ul data-testid="apps-delete-playlists">
-              {playlists.map((name) => (
-                <li key={name}>{name}</li>
-              ))}
-            </ul>
-          )}
+          <InUseList names={playlists} testId="apps-delete-playlists" />
         </Banner>
       ) : (
         error !== null && <ErrorNotice error={error} title="The app was not deleted" />

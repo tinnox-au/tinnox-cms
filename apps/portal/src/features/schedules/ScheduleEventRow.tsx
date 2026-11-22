@@ -92,7 +92,7 @@ export function ScheduleEventRow({
           <div className="tx-field-group__controls">
             {WEEKDAYS.map((name, day) => (
               <Checkbox
-                key={name}
+                key={day}
                 // The short form is what is seen; the full name is what is read out.
                 label={
                   <>

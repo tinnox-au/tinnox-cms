@@ -4,6 +4,7 @@
  * The reference is README.md in this folder.
  */
 export { FolderSelect, type FolderSelectProps } from './FolderSelect.tsx';
+export { InUseList, type InUseListProps } from './InUseList.tsx';
 export { LayoutPickerDialog, type LayoutPickerDialogProps } from './LayoutPickerDialog.tsx';
 export { MediaThumb, type MediaThumbProps } from './MediaThumb.tsx';
 export {

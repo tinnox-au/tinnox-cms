@@ -3,6 +3,7 @@ import { isApiRequestError } from '../../api/client.ts';
 import { api } from '../../api/index.ts';
 import { refusalNames, screenWording } from '../../lib/playlistsListActions.ts';
 import { Banner, ConfirmDialog, ErrorNotice } from '../../ui/index.ts';
+import { InUseList } from '../shared/index.ts';
 
 /** What the dialog needs of a schedule: a list row and the editor's schedule both fit. */
 export interface ScheduleToDelete {
@@ -80,13 +81,7 @@ export function DeleteScheduleDialog({ schedule, onClose, onDeleted }: DeleteSch
           <p>
             {screenWording(refusal.message)} <span className="tx-code">{refusal.code}</span>
           </p>
-          {screens.length > 0 && (
-            <ul data-testid="schedules-delete-screens">
-              {screens.map((name) => (
-                <li key={name}>{name}</li>
-              ))}
-            </ul>
-          )}
+          <InUseList names={screens} testId="schedules-delete-screens" />
         </Banner>
       ) : (
         error !== null && <ErrorNotice error={error} title="The schedule was not deleted" />

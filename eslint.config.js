@@ -8,7 +8,7 @@ import tseslint from 'typescript-eslint';
 // A later config block replaces an earlier block's options for the same rule, so a file group
 // that needs selectors from two lists composes one array from the named lists below.
 // The *-lint.test.ts files in scripts/lib run each list against fixture text (the step 10 bans:
-// banned-patterns-lint.test.ts).
+// banned-patterns-lint.test.ts, which also holds the step 11 text-key rule).
 
 const SRCDOC_MESSAGE =
   'Do not give a frame its document as a string: it is parsed as HTML. Point src at a page that is served, or build the nodes.';
@@ -395,6 +395,19 @@ const STATUS_WORDING = [
     selector: shownText('/\\boperators?\\b/i'),
     message:
       'Customer-facing text does not say operator (SCR-17): say what set it ("Set in TINNOX CMS") or name the person or role.',
+  },
+];
+
+// LYX-04: a list key taken from display text. Screen and playlist names are not unique; React
+// warns about siblings with equal keys and, when the list updates, can show a row twice or drop
+// one. Matched when the key is one of these names written bare (`key={name}`), as section 3.2 of
+// the adoption plan specifies; a member such as `key={row.name}` is not seen.
+const NO_TEXT_KEYS = [
+  {
+    selector:
+      "JSXAttribute[name.name='key'] > JSXExpressionContainer > Identifier[name=/^(name|line|label|title|message|text)$/]",
+    message:
+      'Key a list by the row id, or by index for plain strings from the API. Screen and playlist names are not unique and React drops rows with equal keys (LYX-04).',
   },
 ];
 
@@ -1102,6 +1115,7 @@ export default tseslint.config(
         ...NO_MIGRATOR_POOL_CAST,
         ...NO_CREDENTIAL_NAMES,
         ...STATUS_WORDING,
+        ...NO_TEXT_KEYS,
         ...NO_HTML_SINK_CALLS,
         ...NO_GLOBAL_PROCESS_ENV,
       ],

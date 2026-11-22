@@ -1,8 +1,8 @@
-// The step 10 bans of eslint.config.js (adoption plan section 3.2), run against fixture text.
-// Each case takes the rule entries and globals that eslint.config.js resolves for a real path, so
-// the file globs are tested with the selectors: a block that took a rule away from a file group,
-// or a missing exception, fails here. Every flagged case also checks that the message says what
-// to use instead (section 3.4).
+// The step 10 and step 11 bans of eslint.config.js (adoption plan section 3.2), run against
+// fixture text. Each case takes the rule entries and globals that eslint.config.js resolves for a
+// real path, so the file globs are tested with the selectors: a block that took a rule away from a
+// file group, or a missing exception, fails here. Every flagged case also checks that the message
+// says what to use instead (section 3.4).
 import { ESLint, type Linter } from 'eslint';
 import tseslint from 'typescript-eslint';
 import { describe, expect, it } from 'vitest';
@@ -699,6 +699,60 @@ describe('bare userEvent.keyboard in component tests (SCR-16)', () => {
     const path = 'apps/portal/src/testFrame.test-support.ts';
     expect(await flagged(path, "await userEvent.keyboard('{Shift}');")).toEqual([]);
     await expectOne(path, "it.skip('a', () => {});", /^A skipped, focused or expected-to-fail/);
+  });
+});
+
+describe('list keys taken from display text in the portal (LYX-04)', () => {
+  const TEXT_KEY =
+    /^Key a list by the row id, or by index for plain strings from the API\. .*\(LYX-04\)\.$/;
+
+  it.each(['name', 'line', 'label', 'title', 'message', 'text'])('flags key={%s}', async (name) => {
+    await expectOne(
+      'apps/portal/src/features/fixture.tsx',
+      `export const x = names.map((${name}) => <li key={${name}}>{${name}}</li>);`,
+      TEXT_KEY,
+    );
+  });
+
+  it.each([
+    'apps/portal/src/features/layouts/DeleteLayoutDialog.tsx',
+    'apps/portal/src/features/shared/InUseList.tsx',
+    'apps/portal/src/App.tsx',
+  ])('holds in %s', async (path) => {
+    await expectOne(path, 'export const x = <li key={name}>{name}</li>;', TEXT_KEY);
+  });
+
+  it('allows an id, an index and a key that only holds a name', async () => {
+    const code = [
+      'export const a = rows.map((row) => <li key={row.id}>{row.name}</li>);',
+      'export const b = names.map((name, index) => <li key={index}>{name}</li>);',
+      'export const c = WEEKDAYS.map((name, day) => <Checkbox key={day} label={name} />);',
+      'export const d = items.map((id) => <li key={id}>{label}</li>);',
+      // `name` as a prop, not a key, is not a list key.
+      'export const e = <Field name={name} label={label} />;',
+    ].join('\n');
+    expect(await flagged('apps/portal/src/features/fixture.tsx', code)).toEqual([]);
+  });
+
+  it('is for portal source only, not portal tests or the player', async () => {
+    const code = 'export const x = <li key={name}>{name}</li>;';
+    expect(await flagged('apps/portal/src/features/fixture.test.tsx', code)).toEqual([]);
+    expect(await flagged('packages/app-render/src/fixture.tsx', code)).toEqual([]);
+  });
+
+  it('keeps the portal selectors next to it', async () => {
+    const messages = await flagged(
+      'apps/portal/src/features/fixture.tsx',
+      'export const x = <li key={label}>Online</li>; const c = (e as { a: 1 }).a;',
+    );
+    expect(messages).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(TEXT_KEY),
+        expect.stringMatching(/^Status wording stays honest/),
+        expect.stringMatching(/^Do not cast to an inline object type/),
+      ]),
+    );
+    expect(messages).toHaveLength(3);
   });
 });
 

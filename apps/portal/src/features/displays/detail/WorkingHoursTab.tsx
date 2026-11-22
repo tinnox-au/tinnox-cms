@@ -136,7 +136,7 @@ export function WorkingHoursTab({
             const error = errors?.days[index] ?? null;
             const errorId = `screen-detail-hours-${String(index)}-error`;
             return (
-              <div key={name} className="tx-screen-detail-hours__day">
+              <div key={index} className="tx-screen-detail-hours__day">
                 <Checkbox
                   label={name}
                   checked={day.open}

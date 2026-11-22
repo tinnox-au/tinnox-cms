@@ -3,6 +3,7 @@ import { isApiRequestError } from '../../api/client.ts';
 import { api } from '../../api/index.ts';
 import { refusalNames, screenWording } from '../../lib/playlistsListActions.ts';
 import { Banner, ConfirmDialog, ErrorNotice } from '../../ui/index.ts';
+import { InUseList } from '../shared/index.ts';
 
 /** What the dialog needs of a layout: a list row and the editor's layout both fit. */
 export interface LayoutToDelete {
@@ -79,13 +80,7 @@ export function DeleteLayoutDialog({ layout, onClose, onDeleted }: DeleteLayoutD
           <p>
             {screenWording(refusal.message)} <span className="tx-code">{refusal.code}</span>
           </p>
-          {screens.length > 0 && (
-            <ul data-testid="layouts-delete-screens">
-              {screens.map((name) => (
-                <li key={name}>{name}</li>
-              ))}
-            </ul>
-          )}
+          <InUseList names={screens} testId="layouts-delete-screens" />
         </Banner>
       ) : (
         error !== null && <ErrorNotice error={error} title="The layout was not deleted" />
