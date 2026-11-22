@@ -1,10 +1,18 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { join, posix } from 'node:path';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createVitest } from 'vitest/node';
 import { repoRoot } from './env.ts';
-import { type Suite, TEST_FILE, inventoryProblems, playwrightSuite } from './test-inventory.ts';
+import { PLAYWRIGHT_CONFIG } from './playwright-configs.ts';
+import {
+  type PlaywrightConfig,
+  type Suite,
+  TEST_FILE,
+  inventoryProblems,
+  playwrightSuite,
+  playwrightSuites,
+} from './test-inventory.ts';
 
 const byPrefix = (name: string, prefix: string): Suite => ({
   name,
@@ -25,7 +33,7 @@ describe('inventoryProblems', () => {
 
   it('fails a test file that no suite runs (an orphan never runs and nothing says so, CHK-11)', () => {
     expect(inventoryProblems(['packages/db/src/x.integration.test.ts'], suites)).toEqual([
-      'packages/db/src/x.integration.test.ts is run by no suite: move it under an include glob of a project in vitest.config.ts or under tests/e2e (a Playwright config with another testDir needs its own suite in scripts/lib/test-inventory.test.ts), or rename it if it is not a test',
+      'packages/db/src/x.integration.test.ts is run by no suite: move it under an include glob of a project in vitest.config.ts or under the testDir of a Playwright config (tests/e2e), or rename it if it is not a test',
     ]);
   });
 
@@ -53,6 +61,34 @@ describe('inventoryProblems', () => {
     expect(e2e.runs('tests/integration/a.test.ts')).toBe(false);
     expect(() => playwrightSuite('e2e', 'tests/e2e', '*.spec.ts')).toThrow(/sets testMatch/);
   });
+
+  it('gives every Playwright test directory its own suite (CHK-11)', () => {
+    const suites = playwrightSuites([
+      { path: 'tests/playwright.config.ts', testDir: './e2e' },
+      { path: 'tests/playwright.layout.config.ts', testDir: './e2e', testMatch: 'a.spec.ts' },
+      { path: 'apps/player-web/playwright.config.ts', testDir: 'browser' },
+    ]);
+    expect(suites.map((suite) => suite.name)).toEqual([
+      'tests/playwright.config.ts',
+      'apps/player-web/playwright.config.ts',
+    ]);
+    expect(
+      inventoryProblems(
+        ['tests/e2e/a.spec.ts', 'tests/e2e/b.spec.ts', 'apps/player-web/browser/c.spec.ts'],
+        suites,
+      ),
+    ).toEqual([]);
+    // A spec under a second test directory is an orphan when only the first config is read.
+    expect(
+      inventoryProblems(['apps/player-web/browser/c.spec.ts'], suites.slice(0, 1)),
+    ).toHaveLength(1);
+  });
+
+  it('refuses a test directory that only configs with a testMatch run', () => {
+    expect(() =>
+      playwrightSuites([{ path: 'tests/a.config.ts', testDir: 'x', testMatch: 'a.spec.ts' }]),
+    ).toThrow(/tests\/a\.config\.ts sets testMatch/);
+  });
 });
 
 describe('the repository', () => {
@@ -68,15 +104,18 @@ describe('the repository', () => {
       .stdout.split('\0')
       .filter((path) => path !== '' && existsSync(join(repoRoot, path)));
 
-    // The full e2e suite. tests/playwright.layout.config.ts runs a subset of the same specs.
-    const e2e = (
-      (await import(join(repoRoot, 'tests/playwright.config.ts'))) as {
-        default: { testDir?: string; testMatch?: unknown };
-      }
-    ).default;
-    const suites: Suite[] = [
-      playwrightSuite('e2e', posix.join('tests', e2e.testDir ?? '.'), e2e.testMatch),
-    ];
+    // Every Playwright config, one suite per test directory (CHK-11).
+    const configs: PlaywrightConfig[] = [];
+    for (const path of files.filter((file) => PLAYWRIGHT_CONFIG.test(file))) {
+      const config = (
+        (await import(join(repoRoot, path))) as {
+          default: { testDir?: string; testMatch?: unknown };
+        }
+      ).default;
+      configs.push({ path, testDir: config.testDir, testMatch: config.testMatch });
+    }
+    expect(configs.map((config) => config.path)).toContain('tests/playwright.config.ts');
+    const suites: Suite[] = playwrightSuites(configs);
 
     // Vitest's own matcher, so the globs are read exactly as `vitest run` reads them.
     const vitest = await createVitest('test', {

@@ -56,6 +56,12 @@ jobs:
       # Portal components render in real Chromium (the portal relies on the popover attribute).
       - run: npx playwright install --with-deps chromium
       - run: npm run test:component
+      # The browser checks that need no running service (tests/playwright.layout.config.ts: the
+      # player's information screens and the app renderer, FCU-01 and FCU-02), in the Chromium
+      # installed above and before the build, which they do not need. The full e2e suite also
+      # runs them, but only in the manual job below. scripts/lib/playwright-configs.test.ts fails
+      # when no workflow step runs a Playwright config (the manual e2e job counts until step 36).
+      - run: npx playwright test -c tests/playwright.layout.config.ts
       - run: npm run build
       # Fails on high or critical advisories, apart from the dated development-only exceptions in
       # scripts/audit-exceptions.json. Lower-severity findings are tracked in the docs.
@@ -80,6 +86,13 @@ jobs:
       # real worker container against real sample files.
       - run: npm run setup -- --quiet
       - run: npm run infra:up
+      # The real Keycloak sign-in, against the realm infra:up imported and waited healthy for:
+      # PKCE, password and one-time code, auth_time and the forced re-sign-in after prompt=login
+      # (SCR-25), the MFA probe, and the provisioning reader holding view-users only (SCR-22).
+      # It reads .env and infra/.generated from npm run setup and prints no secret. It waits
+      # for the next 30-second one-time code once, so it takes up to about a minute.
+      - run: npm run verify:oidc
+        timeout-minutes: 3
       - run: npm run fixtures
       # The vitest global setup rebuilds tinnox_test from db/migrations before the tests run.
       - run: npm run test:integration
