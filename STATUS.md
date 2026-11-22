@@ -49,13 +49,13 @@ None.
 
 | Id | Card | Agreed | PR | Since |
 |---|---|---|---|---|
-| CMS-24 | Poteto pyramid refactor, group A: guardrails that land with their fixes (document, test, migration, import and lint checks) | Michael 22 Nov | #36 | 22 Nov |
 | CMS-23 | Poteto pyramid adoption plan: rule and finding inventory, enforcement design per layer, ordered PR-sized steps (plan only, no code) | Michael 22 Nov | #36 | 22 Nov |
 
 ## Done, last 14 days
 
 | Id | Date | Outcome | PR |
 |---|---|---|---|
+| CMS-24 | 22 Nov | Poteto pyramid refactor, group A: guardrails that land with their fixes (document, test, migration, import and lint checks) | #36 |
 | CMS-22 | 22 Nov | Keyboard focus after cancelling an invite lands on the first row; reuse useRowFocusReturn as the Alerts page does (EAX-14) | #34 |
 | CMS-21 | 22 Nov | Text app line fit fails on Linux fonts in e2e 07-apps-player (EAU-03): run it on ubuntu-24.04 and fix the fitter or the check | #34 |
 | CMS-15 | 22 Nov | E-mail alerts when a screen stops reporting (stage C) | #34 |
@@ -189,6 +189,9 @@ from: CMS-23
 
 **Notes**
 - 22 Nov: 22 Nov: steps 1, 2, 5, 5a, 7, 8, 9 and 10 are built on branch refactor/poteto-pyramid-guardrails and reviewed; every suite and the browser suite pass locally. Not pushed, no PR, no CI run. Left: steps 3, 4, 6, 6a, 11, 12, 12a to 12c.
+
+**Evidence**
+Merged; the quality, integration and secrets jobs passed on the pull request and the browser suite passed locally on 22 Nov
 
 ### CMS-25
 from: CMS-23
