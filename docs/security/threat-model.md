@@ -4,7 +4,7 @@ Date: 2026-11-14. Written against the design in `docs/prototype-m0.md` (decision
 
 **Status of the mitigations:** the "Design mitigation" column below is the design as first written. Section 8 records where the build differs and which mitigations are implemented and tested; the evidence for each control (test names, commands and results) is in `docs/security/control-matrix.md` and `docs/prototype-validation.md`. Where section 8 and the table disagree, section 8 describes the system as built.
 
-Dated snapshots: every section whose heading ends in a date in brackets is a record of that date, corrected only by a dated line or a later dated section, never rewritten; everything else on this page must be true now, and a hand-typed count of tests, cases, routes, tables or `sec` functions carries its own date or run link (`npm run check:docs` holds both; DEC-38, D17).
+Dated snapshots: every section whose heading ends in a date in brackets is a record of that date, corrected only by a dated line or a later dated section, never rewritten; everything else on this page must be true now, and a hand-typed count of tests, cases, routes, tables or `sec` functions carries a date or run link in its own sentence (`npm run check:docs` finds dated sections and holds the count rule; that a dated section is not rewritten is a review rule; DEC-38, D17).
 
 This is an internal engineering prototype with synthetic data. It is not certified, not assessed, and not a statement of legal compliance.
 

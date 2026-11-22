@@ -33,7 +33,7 @@ Run everything from the repository root. You should not need `npm install`; `nod
 
 Fresh machine: `npm ci && npm run setup && npm run infra:up && npm run db:migrate && npm run db:seed`.
 
-To add or change a dependency use `npx npm@11.21.2 install <pkg>@<exact version> -w <workspace>`. The host's npm 10.9.2 crashes on `npm install` (a resolver bug triggered by vitest's optional peers); `npm ci` is fine with npm 10.
+To add or change a dependency use `npx npm@11.21.2 install <pkg>@<exact version> -w <workspace>`. The host's npm 10.9.2 crashes on `npm install` (a resolver bug triggered by vitest's optional peers); `npm ci` is fine with npm 10. A refresh of `package-lock.json` that only follows edited manifests may be written with the host's npm 10.9.2 (`npm install --package-lock-only`), as was done on 2026-11-22; the committed lockfile carries 32 `"peer": true` flags that npm 11.21.2 drops (found on 2026-11-22), so the first lockfile write with npm 11 should drop them in a commit of its own.
 
 ## 2. Current state of this machine
 
@@ -49,7 +49,7 @@ To add or change a dependency use `npx npm@11.21.2 install <pkg>@<exact version>
 - Server-side workspaces extend `tsconfig.base.json` (NodeNext). Portal and player extend `tsconfig.web.json` (Bundler resolution, DOM libs).
 - ESLint uses type-aware rules. Floating promises are errors. In portal and player, `localStorage`, `sessionStorage`, `innerHTML`, `document.write` and `dangerouslySetInnerHTML` are errors. `packages/domain` may import only `@tinnox/contracts`.
 - Unit tests: `apps/*/src/**/*.test.ts`, `packages/*/src/**/*.test.ts`, `packages/*/test/**/*.test.ts`. Integration tests: `tests/integration/**/*.test.ts` and `packages/*/test/**/*.integration.test.ts`; they run one file at a time.
-- Node: engines `>=22.13` (raised from 22.12 on 2026-11-14: ESLint 10 needs `^22.13.0`). The host has Node 23.10, which eslint 10 and vitest 5 do not list as supported (they warn at install); both were run on it without problems. CI uses Node 22 but has never run. The root entry of `package-lock.json` still shows `>=22.12.0`; refresh it with npm 11 at the next dependency change.
+- Node: engines `>=22.13` (raised from 22.12 on 2026-11-14: ESLint 10 needs `^22.13.0`). The host has Node 23.10, which eslint 10 and vitest 5 do not list as supported (they warn at install); both were run on it without problems. CI runs on Node 22 (v22.23.4 in run 43835309136, control matrix B12).
 
 ## 4. Environment variables (`.env`, documented in `.env.example`)
 
@@ -66,7 +66,7 @@ The API's `dev` and `start` scripts load `../../.env` through tsx's `--env-file`
 | Variable | Role | Database | Use |
 |---|---|---|---|
 | `DATABASE_URL` | `tinnox_app` | `tinnox` | The running API. Nothing else. |
-| `DATABASE_MIGRATOR_URL` | `tinnox_migrator` | `tinnox` | `db:migrate`, `db:seed` only. |
+| `DATABASE_MIGRATOR_URL` | `tinnox_migrator` | `tinnox` | Offline tools only: `db:migrate`, `db:seed` and `npm run provision` (from a controlled host), each through `connectMigrator`; the e2e setup also reads it to build its own database. |
 | `TEST_DATABASE_URL` | `tinnox_app` | `tinnox_test` | Integration tests, acting as the application. |
 | `TEST_DATABASE_MIGRATOR_URL` | `tinnox_migrator` | `tinnox_test` | Integration tests, arranging data. |
 

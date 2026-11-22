@@ -3,8 +3,9 @@
  * history before it applies anything (backend review round 1, CX-03). Each case offers
  * the fully migrated test database a directory with one fault and a harmless new
  * migration, and checks that the new migration was not applied. connectMigrator, which
- * the runner and the test reset connect through, refuses every login but tinnox_migrator
- * (poteto adoption plan, D4).
+ * the runner and the test reset connect through, refuses a connection whose session_user or
+ * current_user is not tinnox_migrator, so the session must act as the migrator (poteto
+ * adoption plan, D4).
  */
 import { appendFile, copyFile, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';

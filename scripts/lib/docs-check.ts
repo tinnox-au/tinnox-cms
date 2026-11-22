@@ -10,8 +10,10 @@
 //   - every action is pinned by a 40-character commit and every external image by digest, in
 //     workflows, compose files, Dockerfiles, scripts/ and any other script or source file that
 //     runs docker;
-//   - dated sections are frozen snapshots; in live text a hand-typed count of tests, cases,
-//     routes, tables or `sec` functions needs a date or run link in its own sentence (D17).
+//   - dated sections are snapshots, left out of the path and count rules (nothing here checks
+//     that a snapshot is never rewritten: that is left to review); in live text a hand-typed
+//     count of tests, cases, routes, tables or `sec` functions needs a date or run link in its
+//     own sentence, not elsewhere in its cell or paragraph (D17).
 
 export const AGENTS_PATH = 'AGENTS.md';
 export const BUGBOT_PATH = '.cursor/BUGBOT.md';
@@ -632,7 +634,7 @@ interface Unit {
   lineAt: (offset: number) => number;
 }
 
-/** Paragraphs, list items and table cells of the live lines; a count is judged inside one. */
+/** Paragraphs, list items and table cells of the live lines; a count's sentence is cut from one. */
 function units(lines: readonly LiveLine[]): Unit[] {
   const result: Unit[] = [];
   let parts: LiveLine[] = [];

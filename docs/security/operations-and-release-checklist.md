@@ -4,7 +4,7 @@ Date: 2026-11-14. Companion to `docs/security/threat-model.md` and `docs/securit
 
 Status of this page: procedures written on 2026-11-14. **The backup and restore procedure (section 2) was executed on 2026-11-14 (twice) and on 2026-11-18** with `npm run backup:verify` (results in section 2.4). The incident runbook has not been rehearsed. The release-checklist statuses in section 5 were updated by the integration step. This page states no legal conclusion; where the law is mentioned, it is OAIC's published description, and whether it applies to TINNOX is for TINNOX and its advisers to determine (`docs/security/control-matrix.md` section 6).
 
-Dated snapshots: every section whose heading ends in a date in brackets is a record of that date, corrected only by a dated line or a later dated section, never rewritten; everything else on this page must be true now, and a hand-typed count of tests, cases, routes, tables or `sec` functions carries its own date or run link (`npm run check:docs` holds both; DEC-38, D17).
+Dated snapshots: every section whose heading ends in a date in brackets is a record of that date, corrected only by a dated line or a later dated section, never rewritten; everything else on this page must be true now, and a hand-typed count of tests, cases, routes, tables or `sec` functions carries a date or run link in its own sentence (`npm run check:docs` finds dated sections and holds the count rule; that a dated section is not rewritten is a review rule; DEC-38, D17).
 
 Contents: 1 incident response; 2 backup and restore; 3 retention; 4 data locations; 5 pre-customer-release checklist; 6 dependency updates; 7 membership operations.
 
@@ -322,7 +322,7 @@ Status values: **implemented** (exists in the build), **tested** (verified, with
 
 ## 6. Dependency-update process
 
-Tooling facts (from `docs/dev-handoff.md`): exact versions, committed `package-lock.json`, `npm ci` for installs; the lockfile must be changed with npm 11 (`npx npm@11.21.2 install <pkg>@<exact version> -w <workspace>`) because the host's npm 10.9.2 fails on `npm install`; container images are pinned by tag and digest in `infra/docker-compose.yml`.
+Tooling facts (from `docs/dev-handoff.md`): exact versions, committed `package-lock.json`, `npm ci` for installs; the lockfile must be changed with npm 11 (`npx npm@11.21.2 install <pkg>@<exact version> -w <workspace>`) because the host's npm 10.9.2 fails on `npm install`; container images are pinned by tag and digest in `infra/docker-compose.yml`. A refresh of `package-lock.json` that only follows edited manifests may be written with the host's npm 10.9.2 (`npm install --package-lock-only`), as was done on 2026-11-22; the committed lockfile carries 32 `"peer": true` flags that npm 11.21.2 drops (found on 2026-11-22), so the first lockfile write with npm 11 should drop them in a commit of its own.
 
 Routine, at least monthly, and whenever an advisory arrives:
 

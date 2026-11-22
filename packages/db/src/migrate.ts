@@ -8,19 +8,26 @@ const MIGRATOR_ROLE = 'tinnox_migrator';
 
 declare const migratorBrand: unique symbol;
 /**
- * A pool that connectMigrator has checked: it logs in and acts as tinnox_migrator. Only
- * connectMigrator makes one, so a function that takes it cannot be handed the runtime pool
- * or a superuser connection.
+ * A pool that connectMigrator has checked: its session acts as tinnox_migrator. The brand
+ * stops a mistake at compile time, since tsc refuses the runtime pool or a plain superuser
+ * pool where a MigratorPool is wanted. It does not stop a deliberate cast by itself: lint
+ * refuses a cast to MigratorPool outside this file (NO_MIGRATOR_POOL_CAST in eslint.config.js),
+ * and what that rule cannot see is left to review.
  */
 export type MigratorPool = Pool & { readonly [migratorBrand]: true };
 
 /**
- * The one way to connect as tinnox_migrator: the runner, the test reset, the seed and
- * provisioning all come through here (poteto adoption plan, decision D4). Refuses unless current_user and
- * session_user are both tinnox_migrator, so neither the runtime role nor the superuser
- * (even after SET ROLE tinnox_migrator, whose writes the 0013 exemptions would not cover)
- * can run them. The pool holds one connection, kept while idle, so every statement runs on
- * the connection that was checked.
+ * The one way the offline tools connect as tinnox_migrator: the runner, the test reset, the
+ * seed and provisioning all come through here (poteto adoption plan, decision D4). Test
+ * helpers that arrange data, and the administrator's psql session for the incident scripts,
+ * connect without it. Refuses unless current_user and session_user are both tinnox_migrator:
+ * the session then acts with the migrator's rights and under its identity, which the 0013
+ * exemptions test. So neither the runtime role nor the superuser (even after SET ROLE
+ * tinnox_migrator, whose writes the 0013 exemptions would not cover) can run them. A superuser
+ * cannot pass by setting session_authorization at startup either: PostgreSQL 17 keeps
+ * session_user as the login (checked on 2026-11-22). The check runs once, at connect, on the
+ * pool's one connection, which is kept while idle. If that connection drops, the pool opens
+ * another with the same connection string on the next use and does not check it again.
  */
 export async function connectMigrator(
   connectionString: string,

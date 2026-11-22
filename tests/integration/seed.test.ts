@@ -1,7 +1,8 @@
 /**
  * scripts/seed.ts run for real, as a child process the way `npm run db:seed` and the e2e
- * setup run it. It connects through connectMigrator, so it refuses every login but
- * tinnox_migrator before it writes (poteto adoption plan, D4), and it writes each
+ * setup run it. It connects through connectMigrator, so before it writes it refuses a
+ * connection whose session does not act as tinnox_migrator (session_user and current_user;
+ * poteto adoption plan, D4), and it writes each
  * organisation in one withOrg transaction (D25).
  *
  * Each case uses its own database, tinnox_seedcheck_test, never the shared integration-test
