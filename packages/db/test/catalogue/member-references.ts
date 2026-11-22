@@ -26,7 +26,7 @@ export interface MemberReference {
 export const MEMBER_REFERENCES: Readonly<Record<string, MemberReference>> = {
   'public.alert_recipient.created_by': {
     closes: 'cut-off at confirmation',
-    how: 'Decision D22: confirming a pending address, and showing it as waiting, require that the member who added it is still active and that the address is newer than their cut-off; an address with no recorded adder is dead, and a reactivation keeps the cut-off. Confirmed addresses stay. The predicate belongs to apps/api/src/routes/alert-recipients.ts and is step 6a of docs/coding_guide/poteto_pyramid/adoption-plan.md: until that step lands, a pending address and its link outlive the member.',
+    how: 'Decision D22: confirming a pending address, and showing it as waiting, require that the member who added it is still active and that the address is newer than their cut-off; an address with no recorded adder is dead, and a reactivation keeps the cut-off. Confirmed addresses stay. One predicate in apps/api/src/routes/alert-recipients.ts (ADDER_STILL_HAS_ACCESS), read by the confirmation and by the list status; pinned by tests/integration/display-alerts.test.ts and, for the reactivation, tests/integration/provision-member.test.ts.',
   },
   'public.media.created_by': {
     closes: 'record only',

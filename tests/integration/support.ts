@@ -9,7 +9,7 @@ import { chmodSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
-import type { PairedPlayer, TestApp } from '@tinnox/api/test-support';
+import type { Operator, PairedPlayer, TestApp } from '@tinnox/api/test-support';
 
 export * from '@tinnox/api/test-support';
 
@@ -103,6 +103,27 @@ export function requestMediaUrls(
     headers: { ...player.headers, 'content-type': 'application/json' },
     body: JSON.stringify({ publicationId, assetIds }),
   });
+}
+
+/** Adds an address to the operator's alert list; its confirmation e-mail lands in `t.sentMail`. */
+export function addAlertAddress(operator: Operator, email: string): Promise<Response> {
+  return operator.fetch('/api/alert-recipients', { method: 'POST', json: { email } });
+}
+
+/** Posts a confirmation token as the address's owner does: with no session. */
+export function confirmAlertAddress(t: TestApp, token: string): Promise<Response> {
+  return fetch(`${t.url}/api/alert-recipients/confirm`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ token }),
+  });
+}
+
+/** The token of the newest confirmation e-mail. */
+export function lastConfirmationToken(t: TestApp): string {
+  const match = /\/alerts\/confirm#([A-Za-z0-9_-]{43})/.exec(t.sentMail.at(-1)?.text ?? '');
+  if (match?.[1] === undefined) throw new Error('no confirmation e-mail');
+  return match[1];
 }
 
 /**

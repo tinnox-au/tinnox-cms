@@ -1174,7 +1174,10 @@ describe('member invites (0013)', () => {
 });
 
 describe('alert episodes and addresses (0014)', () => {
-  /** Arranges one row of each for `org`, as the migrator, and returns the recipient id. */
+  /**
+   * Arranges one row of each for `org`, as the migrator, and returns the recipient id. The
+   * address has the organisation's member as its adder: one with none is dead (D22).
+   */
   async function arrange(org: TestOrg): Promise<string> {
     const recipientId = randomUUID();
     await migrator.query('BEGIN');
@@ -1185,9 +1188,9 @@ describe('alert episodes and addresses (0014)', () => {
         [org.displayId, org.orgId],
       );
       await migrator.query(
-        `INSERT INTO alert_recipient (id, org_id, email, confirm_token_hash, confirm_expires_at)
-         VALUES ($1, $2, $3, $4, now() + interval '7 days')`,
-        [recipientId, org.orgId, `ops-${org.orgId}@example.com`, randomBytes(32)],
+        `INSERT INTO alert_recipient (id, org_id, email, created_by, confirm_token_hash, confirm_expires_at)
+         VALUES ($1, $2, $3, $4, $5, now() + interval '7 days')`,
+        [recipientId, org.orgId, `ops-${org.orgId}@example.com`, org.membershipId, randomBytes(32)],
       );
       await migrator.query('COMMIT');
     } catch (error) {

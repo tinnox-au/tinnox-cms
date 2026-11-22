@@ -8,23 +8,29 @@
  */
 import { randomBytes } from 'node:crypto';
 import { localWallClock, type AlertRecipientDto } from '@tinnox/contracts';
+import { alertRecipientByTokenHash, poolAsTx, sha256 } from '@tinnox/db';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
+  addAlertAddress,
   addMember,
   appClient,
   asMigratorIn,
   auditEvents,
   checkAlerts,
+  confirmAlertAddress,
   createDisplay,
   createOrg,
   heartbeatBody,
+  lastConfirmationToken,
   pairPlayer,
   PORTAL_ORIGIN,
   sendHeartbeat,
   signIn,
   startTestApp,
+  statementHolds,
   type Operator,
   type PairedPlayer,
+  type StatementHold,
   type TestApp,
   type TestOrg,
 } from './support.ts';
@@ -43,7 +49,7 @@ describe('e-mail alerts for screens', () => {
     owner = await signIn(t, org);
     await addConfirmed(t, owner, 'ops@example.com');
     // Waiting for confirmation: receives nothing.
-    expect((await addAddress(owner, 'waiting@example.com')).status).toBe(201);
+    expect((await addAlertAddress(owner, 'waiting@example.com')).status).toBe(201);
   });
   afterAll(async () => {
     await t.close();
@@ -467,7 +473,7 @@ describe('alert addresses', () => {
   });
 
   it('adds an address in lower case, sends the confirmation link, lists and removes it, never auditing the address', async () => {
-    const added = await addAddress(owner, ' New.Person@Example.com ');
+    const added = await addAlertAddress(owner, ' New.Person@Example.com ');
     expect(added.status).toBe(201);
     const dto = (await added.json()) as AlertRecipientDto;
     expect(dto).toMatchObject({ email: 'new.person@example.com', status: 'waiting' });
@@ -477,7 +483,7 @@ describe('alert addresses', () => {
     expect(mail?.text).toMatch(/http:\/\/localhost:5173\/alerts\/confirm#[A-Za-z0-9_-]{43}\n/);
     expect(mail?.text).toContain('Alert addresses asked to send screen alerts to this address.');
 
-    const duplicate = await addAddress(owner, 'NEW.PERSON@example.com');
+    const duplicate = await addAlertAddress(owner, 'NEW.PERSON@example.com');
     expect(duplicate.status).toBe(409);
     const list = (await (await owner.fetch('/api/alert-recipients')).json()) as {
       items: AlertRecipientDto[];
@@ -503,7 +509,7 @@ describe('alert addresses', () => {
   });
 
   it('refuses an address that is not one, and unknown fields', async () => {
-    expect((await addAddress(owner, 'not an address')).status).toBe(400);
+    expect((await addAlertAddress(owner, 'not an address')).status).toBe(400);
     const planted = await owner.fetch('/api/alert-recipients', {
       method: 'POST',
       json: { email: 'a@example.com', orgId: org.orgId },
@@ -515,24 +521,24 @@ describe('alert addresses', () => {
     const full = await createOrg('Full alert list');
     const fullOwner = await signIn(t, full);
     for (let i = 0; i < 20; i += 1) {
-      expect((await addAddress(fullOwner, `person${i}@example.com`)).status).toBe(201);
+      expect((await addAlertAddress(fullOwner, `person${i}@example.com`)).status).toBe(201);
     }
-    const refused = await addAddress(fullOwner, 'one-more@example.com');
+    const refused = await addAlertAddress(fullOwner, 'one-more@example.com');
     expect(refused.status).toBe(409);
   });
 
   it('confirms once: used, unknown and expired links all answer the same 404', async () => {
     const id = await addConfirmed(t, owner, 'confirmed@example.com');
-    const used = lastToken(t);
+    const used = lastConfirmationToken(t);
     const listed = (await (await owner.fetch('/api/alert-recipients')).json()) as {
       items: AlertRecipientDto[];
     };
     expect(listed.items.find((r) => r.id === id)?.status).toBe('confirmed');
 
     const expiredId = (
-      (await (await addAddress(owner, 'late@example.com')).json()) as { id: string }
+      (await (await addAlertAddress(owner, 'late@example.com')).json()) as { id: string }
     ).id;
-    const expired = lastToken(t);
+    const expired = lastConfirmationToken(t);
     await asMigratorIn(org.orgId, (client) =>
       client.query(
         "UPDATE alert_recipient SET confirm_expires_at = now() - interval '1 second' WHERE id = $1",
@@ -541,7 +547,7 @@ describe('alert addresses', () => {
     );
     const answers = [];
     for (const token of [used, expired, randomBytes(32).toString('base64url')]) {
-      const response = await confirm(t, token);
+      const response = await confirmAlertAddress(t, token);
       expect(response.status).toBe(404);
       answers.push(((await response.json()) as { error: { code: string; message: string } }).error);
     }
@@ -562,11 +568,11 @@ describe('alert addresses', () => {
     const other = await createOrg('Other alert addresses');
     const otherOwner = await signIn(t, other);
     const theirs = (
-      (await (await addAddress(otherOwner, 'theirs@example.com')).json()) as {
+      (await (await addAlertAddress(otherOwner, 'theirs@example.com')).json()) as {
         id: string;
       }
     ).id;
-    expect((await confirm(t, lastToken(t))).status).toBe(204);
+    expect((await confirmAlertAddress(t, lastConfirmationToken(t))).status).toBe(204);
     const mine = await (await owner.fetch('/api/alert-recipients')).text();
     expect(mine).not.toContain('theirs@example.com');
     expect(mine).not.toContain(theirs);
@@ -586,11 +592,11 @@ describe('alert addresses', () => {
     });
     try {
       const a = await signIn(noMail, await createOrg('No mail'));
-      expect((await addAddress(a, 'nobody@example.com')).status).toBe(503);
+      expect((await addAlertAddress(a, 'nobody@example.com')).status).toBe(503);
       expect(await (await a.fetch('/api/alert-recipients')).json()).toEqual({ items: [] });
 
       const b = await signIn(failing, await createOrg('Failing mail'));
-      expect((await addAddress(b, 'bounced@example.com')).status).toBe(503);
+      expect((await addAlertAddress(b, 'bounced@example.com')).status).toBe(503);
       expect(await (await b.fetch('/api/alert-recipients')).json()).toMatchObject({
         items: [{ email: 'bounced@example.com', status: 'waiting' }],
       });
@@ -601,30 +607,252 @@ describe('alert addresses', () => {
   });
 });
 
-function addAddress(operator: Operator, email: string): Promise<Response> {
-  return operator.fetch('/api/alert-recipients', { method: 'POST', json: { email } });
-}
+/**
+ * D22: a pending address dies with the access of the member who added it. One predicate in
+ * apps/api/src/routes/alert-recipients.ts decides both what the link is answered and what the
+ * list shows. The reactivation case needs provision-member and is in provision-member.test.ts.
+ */
+describe('alert addresses and the member who added them (D22)', () => {
+  const holds = statementHolds();
+  let t: TestApp;
+  let org: TestOrg;
+  let owner: Operator;
 
-function confirm(t: TestApp, token: string): Promise<Response> {
-  return fetch(`${t.url}/api/alert-recipients/confirm`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ token }),
+  beforeAll(async () => {
+    t = await startTestApp({}, 1000, { wrapPool: holds.wrapPool });
+    org = await createOrg('Alert address adders');
+    owner = await signIn(t, org);
   });
-}
+  afterAll(async () => {
+    await t.close();
+  });
 
-/** The token of the newest confirmation e-mail. */
-function lastToken(t: TestApp): string {
-  const match = /\/alerts\/confirm#([A-Za-z0-9_-]{43})/.exec(t.sentMail.at(-1)?.text ?? '');
-  if (match?.[1] === undefined) throw new Error('no confirmation e-mail');
-  return match[1];
-}
+  interface Pending {
+    readonly member: TestOrg;
+    readonly id: string;
+    readonly token: string;
+  }
+
+  /** A new Admin and one address they added, waiting, with the token of its link. */
+  async function pendingFrom(email: string): Promise<Pending> {
+    const member = await addMember(org, 'admin');
+    const added = await addAlertAddress(await signIn(t, member), email);
+    expect(added.status).toBe(201);
+    const dto = (await added.json()) as AlertRecipientDto;
+    expect(dto.status).toBe('waiting');
+    return { member, id: dto.id, token: lastConfirmationToken(t) };
+  }
+
+  async function statusOf(id: string): Promise<string | undefined> {
+    const list = (await (await owner.fetch('/api/alert-recipients')).json()) as {
+      items: AlertRecipientDto[];
+    };
+    return list.items.find((r) => r.id === id)?.status;
+  }
+
+  /**
+   * The status and body a link is answered with (a confirmation has no body), less the request
+   * id, which differs for every answer.
+   */
+  async function answerTo(token: string): Promise<{ status: number; body: unknown }> {
+    const response = await confirmAlertAddress(t, token);
+    const text = await response.text();
+    if (text === '') return { status: response.status, body: null };
+    const body = JSON.parse(text) as { error: Record<string, unknown> };
+    return { status: response.status, body: { error: { ...body.error, requestId: null } } };
+  }
+
+  /** The link is answered exactly as a token nobody was sent, and the list shows Expired. */
+  async function expectDead(pending: Pending): Promise<void> {
+    const unknown = await answerTo(randomBytes(32).toString('base64url'));
+    expect(unknown.status).toBe(404);
+    expect(await answerTo(pending.token)).toEqual(unknown);
+    expect(await statusOf(pending.id)).toBe('expired');
+  }
+
+  const post = (path: string) => owner.fetch(path, { method: 'POST' });
+  const signOutEverywhere = (member: TestOrg) =>
+    post(`/api/members/${member.membershipId}/sign-out`);
+
+  /** True when the promise is still pending after a short wait. */
+  async function stillWaiting(promise: Promise<unknown>): Promise<boolean> {
+    let settled = false;
+    const mark = (): void => {
+      settled = true;
+    };
+    promise.then(mark, mark);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    return !settled;
+  }
+
+  it('D22: after the adder is removed, the link answers 404 like an unknown one and the list shows Expired', async () => {
+    const pending = await pendingFrom('adder-removed@example.com');
+    expect(await statusOf(pending.id)).toBe('waiting');
+    expect((await post(`/api/members/${pending.member.membershipId}/remove`)).status).toBe(200);
+    await expectDead(pending);
+    // Refused, so nothing was confirmed or audited.
+    const confirmations = (await auditEvents(owner, '&category=alert_recipient')).filter(
+      (e) => e.action === 'alert_recipient.confirm' && e.objectId === pending.id,
+    );
+    expect(confirmations).toEqual([]);
+  });
+
+  it('D22: an adder who is no longer a member ends the address even when no cut-off was set', async () => {
+    const pending = await pendingFrom('adder-gone-no-cut-off@example.com');
+    // Every removal in the product also sets the cut-off, so only a direct write leaves the
+    // "still a member" half of the rule to refuse the link by itself.
+    let cutOff: Date | null | undefined;
+    await asMigratorIn(org.orgId, async (client) => {
+      const removed = await client.query<{ sessions_valid_after: Date | null }>(
+        'UPDATE membership SET removed_at = now() WHERE id = $1 RETURNING sessions_valid_after',
+        [pending.member.membershipId],
+      );
+      cutOff = removed.rows[0]?.sessions_valid_after;
+    });
+    expect(cutOff).toBeNull();
+    await expectDead(pending);
+  });
+
+  it('D22: a demotion ends the adder’s pending address; a promotion, which ends no session, does not', async () => {
+    const demoted = await pendingFrom('adder-demoted@example.com');
+    const down = await owner.fetch(`/api/members/${demoted.member.membershipId}`, {
+      method: 'PATCH',
+      json: { role: 'editor' },
+    });
+    expect(down.status).toBe(200);
+    await expectDead(demoted);
+
+    const promoted = await pendingFrom('adder-promoted@example.com');
+    const up = await owner.fetch(`/api/members/${promoted.member.membershipId}`, {
+      method: 'PATCH',
+      json: { role: 'owner' },
+    });
+    expect(up.status).toBe(200);
+    expect(await statusOf(promoted.id)).toBe('waiting');
+    expect((await confirmAlertAddress(t, promoted.token)).status).toBe(204);
+    expect(await statusOf(promoted.id)).toBe('confirmed');
+  });
+
+  it('D22: after a sign out everywhere the old address is dead, and one added after the cut-off confirms', async () => {
+    const pending = await pendingFrom('adder-signed-out@example.com');
+    expect((await signOutEverywhere(pending.member)).status).toBe(200);
+    await expectDead(pending);
+
+    // The same Admin signs in again and adds another address.
+    const added = await addAlertAddress(
+      await signIn(t, pending.member),
+      'after-cut-off@example.com',
+    );
+    expect(added.status).toBe(201);
+    const dto = (await added.json()) as AlertRecipientDto;
+    expect(dto.status).toBe('waiting');
+    expect((await confirmAlertAddress(t, lastConfirmationToken(t))).status).toBe(204);
+    expect(await statusOf(dto.id)).toBe('confirmed');
+    expect(await statusOf(pending.id)).toBe('expired');
+  });
+
+  it('D22: an address with no recorded adder is dead', async () => {
+    const token = randomBytes(32).toString('base64url');
+    let id = '';
+    await asMigratorIn(org.orgId, async (client) => {
+      const inserted = await client.query<{ id: string }>(
+        `INSERT INTO alert_recipient (org_id, email, confirm_token_hash, confirm_expires_at)
+         VALUES ($1, 'no-adder@example.com', $2, now() + interval '7 days') RETURNING id`,
+        [org.orgId, sha256(token)],
+      );
+      id = inserted.rows[0]?.id ?? '';
+    });
+    // The link is known and in date: it is the missing adder that refuses it.
+    expect(await alertRecipientByTokenHash(poolAsTx(t.pool), sha256(token))).toEqual({
+      orgId: org.orgId,
+      recipientId: id,
+    });
+    await expectDead({ member: org, id, token });
+  });
+
+  it('D22: a confirmed address stays confirmed when the adder is removed', async () => {
+    const pending = await pendingFrom('confirmed-first@example.com');
+    expect((await confirmAlertAddress(t, pending.token)).status).toBe(204);
+    expect((await post(`/api/members/${pending.member.membershipId}/remove`)).status).toBe(200);
+    expect(await statusOf(pending.id)).toBe('confirmed');
+  });
+
+  // The three cases below are the lock order of the confirmation under READ COMMITTED: the
+  // recipient row, then the adder's member row FOR SHARE, then the conditional UPDATE.
+  const isAdderLock = (text: string): boolean =>
+    text.includes('FROM membership') && text.includes('id = $1 FOR SHARE');
+  const isConfirmUpdate = (text: string): boolean =>
+    text.includes('UPDATE alert_recipient') && text.includes('SET confirmed_at');
+
+  /** Waits for the held statement; fails at once when the request ends without sending it. */
+  async function reached(held: StatementHold, request: Promise<unknown>, statement: string) {
+    const settled = () => false;
+    const arrived = await Promise.race([
+      held.reached.then(() => true),
+      request.then(settled, settled),
+    ]);
+    if (arrived) return;
+    held.release();
+    throw new Error(`the confirmation ended without ${statement}`);
+  }
+
+  // Each case lets its requests finish before it asserts: a request still running when the
+  // app closes keeps its connection open, and the close then waits for it.
+  it('D22: refuses when a sign out everywhere commits between the recipient lock and the member lock', async () => {
+    const pending = await pendingFrom('cut-off-between@example.com');
+    const held = holds.hold(isAdderLock);
+    const confirming = answerTo(pending.token);
+    await reached(held, confirming, 'locking the adder’s member row FOR SHARE');
+    const signedOut = await signOutEverywhere(pending.member).finally(held.release);
+    const answer = await confirming;
+    expect(signedOut.status).toBe(200);
+    expect(answer.status).toBe(404);
+    await expectDead(pending);
+  });
+
+  it('D22: waits for a cut-off that is committing, then refuses', async () => {
+    const pending = await pendingFrom('cut-off-committing@example.com');
+    // What the people routes and the incident script do, left open: the member row is locked
+    // and its cut-off set, and neither is committed yet.
+    const ending = await appClient();
+    try {
+      await ending.query('BEGIN');
+      await ending.query("SELECT set_config('app.org_id', $1, true)", [org.orgId]);
+      await ending.query('SELECT sec.session_revoke_membership($1)', [pending.member.membershipId]);
+      const confirming = answerTo(pending.token);
+      // Without the lock the UPDATE would read the member row as it was and confirm at once.
+      const waited = await stillWaiting(confirming);
+      await ending.query('COMMIT');
+      const answer = await confirming;
+      expect(waited).toBe(true);
+      expect(answer.status).toBe(404);
+    } finally {
+      await ending.query('ROLLBACK').catch(() => undefined);
+      await ending.end();
+    }
+    await expectDead(pending);
+  });
+
+  it('D22: a sign out everywhere that starts during a confirmation waits for it, and the address stays confirmed', async () => {
+    const pending = await pendingFrom('confirmed-just-before@example.com');
+    const held = holds.hold(isConfirmUpdate);
+    const confirming = confirmAlertAddress(t, pending.token);
+    await reached(held, confirming, 'its conditional UPDATE');
+    const signingOut = signOutEverywhere(pending.member);
+    const waited = await stillWaiting(signingOut).finally(held.release);
+    const [confirmed, signedOut] = await Promise.all([confirming, signingOut]);
+    expect(waited).toBe(true);
+    expect(confirmed.status).toBe(204);
+    expect(signedOut.status).toBe(200);
+    expect(await statusOf(pending.id)).toBe('confirmed');
+  });
+});
 
 /** Adds an address and confirms it from its e-mail, as its owner would; returns its id. */
 async function addConfirmed(t: TestApp, operator: Operator, email: string): Promise<string> {
-  const added = await addAddress(operator, email);
+  const added = await addAlertAddress(operator, email);
   if (added.status !== 201) throw new Error(`adding an alert address failed: ${added.status}`);
-  const confirmed = await confirm(t, lastToken(t));
+  const confirmed = await confirmAlertAddress(t, lastConfirmationToken(t));
   if (confirmed.status !== 204) throw new Error(`confirming failed: ${confirmed.status}`);
   return ((await added.json()) as { id: string }).id;
 }

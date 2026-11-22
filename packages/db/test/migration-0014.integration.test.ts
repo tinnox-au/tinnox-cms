@@ -169,12 +169,13 @@ describe('sec.* functions', () => {
     const expired = randomBytes(32);
     await client.query('BEGIN');
     await client.query("SELECT set_config('app.org_id', $1, true)", [a.orgId]);
+    // Each with its adder, as the API stores them: an address with none is dead (D22).
     const inserted = await client.query<{ id: string }>(
-      `INSERT INTO alert_recipient (org_id, email, confirm_token_hash, confirm_expires_at)
-       VALUES ($1, 'live@example.com', $2, now() + interval '1 day'),
-              ($1, 'expired@example.com', $3, now() - interval '1 second')
+      `INSERT INTO alert_recipient (org_id, email, created_by, confirm_token_hash, confirm_expires_at)
+       VALUES ($1, 'live@example.com', $4, $2, now() + interval '1 day'),
+              ($1, 'expired@example.com', $4, $3, now() - interval '1 second')
        RETURNING id`,
-      [a.orgId, live, expired],
+      [a.orgId, live, expired, a.membershipId],
     );
     await client.query('COMMIT');
     const tx = poolAsTx(app);
