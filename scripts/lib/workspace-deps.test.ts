@@ -38,11 +38,28 @@ const LOADED_BY_NAME: Readonly<Record<string, LoadedByName>> = {
   },
 };
 
-/** Units where nothing ships: the root (shared tooling, scripts, configs) and the test suites. */
-const DEVELOPMENT_ONLY = new Set(['.', 'tests']);
-
-/** Units Vite bundles for a browser: the portal, the player and the app renderer both embed. */
-const BROWSER = new Set(['apps/portal', 'apps/player-web', 'packages/app-render']);
+/**
+ * The kind of every unit: the root and every workspace of the root package.json (CHK-7). A new
+ * workspace fails the repository test until it has an entry, because an unclassified browser
+ * workspace would be read as Node code and a bare 'events' or 'buffer' import would pass.
+ * - development: nothing ships (the root's shared tooling, scripts and configs; the test suites);
+ * - browser: Vite bundles it for a browser (the portal, the player, the app renderer both embed);
+ * - node: runs on Node, or is a shared package read as Node code.
+ */
+const UNIT_KIND: Readonly<Record<string, 'node' | 'browser' | 'development'>> = {
+  '.': 'development',
+  tests: 'development',
+  'apps/api': 'node',
+  'apps/media-worker': 'node',
+  'apps/player-web': 'browser',
+  'apps/portal': 'browser',
+  'packages/app-render': 'browser',
+  'packages/contracts': 'node',
+  'packages/db': 'node',
+  'packages/delivery': 'node',
+  'packages/domain': 'node',
+  'packages/storage': 'node',
+};
 
 const NO_FACTS: PackageFacts = { bins: [], peers: [] };
 
@@ -433,8 +450,8 @@ function parseManifestWorkspaces(json: unknown): string[] {
 function repositoryInput(): DependencyInput {
   const units: Unit[] = ['.', ...workspaceDirs()].map((dir) => ({
     dir,
-    developmentOnly: DEVELOPMENT_ONLY.has(dir),
-    browser: BROWSER.has(dir),
+    developmentOnly: UNIT_KIND[dir] === 'development',
+    browser: UNIT_KIND[dir] === 'browser',
     manifest: parseManifest(readJson(dir === '.' ? 'package.json' : `${dir}/package.json`)),
   }));
   const files = spawnSync(
@@ -456,17 +473,11 @@ function repositoryInput(): DependencyInput {
 describe('the repository (step 9, manifest drift)', () => {
   const repository = repositoryInput();
 
-  it('finds the root and every workspace, including each one DEVELOPMENT_ONLY and BROWSER name', () => {
-    expect(repository.units.map((unit) => unit.dir)).toEqual(
-      expect.arrayContaining([
-        '.',
-        'apps/api',
-        'apps/media-worker',
-        'packages/contracts',
-        ...DEVELOPMENT_ONLY,
-        ...BROWSER,
-      ]),
-    );
+  it('gives the root and every workspace a kind in UNIT_KIND, and lists no other (CHK-7)', () => {
+    expect(
+      repository.units.map((unit) => unit.dir).sort(),
+      'give each workspace its kind in UNIT_KIND in scripts/lib/workspace-deps.test.ts, and remove an entry whose workspace is gone',
+    ).toEqual(Object.keys(UNIT_KIND).sort());
   });
 
   it('declares every import in its workspace, in the right section, and uses every entry', () => {

@@ -60,7 +60,9 @@ const BROWSER_PATHS = [
   'packages/app-render/src/fixture.ts',
 ] as const;
 
-describe('web storage and HTML sinks in browser code', () => {
+// The first case loads eslint.config.js, which a busy CI runner can stretch towards the unit
+// project's 5 s default (GAP-1).
+describe('web storage and HTML sinks in browser code', { timeout: 30_000 }, () => {
   const STORAGE = /Keep nothing in web storage: .*idb-store\.ts/;
 
   for (const path of BROWSER_PATHS) {

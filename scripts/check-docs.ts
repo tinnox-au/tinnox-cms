@@ -18,6 +18,7 @@ import {
   bugbotFrom,
   checkCounts,
   checkDecisionRanges,
+  checkListedDocs,
   checkPaths,
   checkPins,
   checkRuleFilePlacement,
@@ -45,7 +46,7 @@ function git(args: string[], input?: string): string {
 
 function read(path: string): string | undefined {
   const full = join(repoRoot, path);
-  return existsSync(full) ? readFileSync(full, 'utf8') : undefined;
+  return existsSync(full) && lstatSync(full).isFile() ? readFileSync(full, 'utf8') : undefined;
 }
 
 // Tracked files and new files that are not ignored, never a filesystem walk: the main checkout
@@ -84,6 +85,7 @@ const ignored = new Set(
 );
 
 const findings = [
+  ...checkListedDocs((path) => read(path) !== undefined),
   ...checkRuleFileSync(agents, bugbot),
   ...checkRuleFilePlacement(files),
   ...checkRuleFileSizes(

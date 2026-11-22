@@ -7,7 +7,9 @@
 //   - every backticked repository path in the rule files, the README, the decision register
 //     and the security documents exists;
 //   - decision ranges quoted in README.md match the register;
-//   - every action is pinned by a 40-character commit and every external image by digest;
+//   - every action is pinned by a 40-character commit and every external image by digest, in
+//     workflows, compose files, Dockerfiles, scripts/ and any other script or source file that
+//     runs docker;
 //   - dated sections are frozen snapshots; in live text a hand-typed count of tests, cases,
 //     routes, tables or `sec` functions needs a date or run link in its own sentence (D17).
 
@@ -41,6 +43,21 @@ export const README_PATH = 'README.md';
 export interface Doc {
   path: string;
   text: string;
+}
+
+/**
+ * Every document listed above exists: a renamed or moved one would drop out of the path, count
+ * and range rules with no finding (CHK-5). AGENTS.md and .cursor/BUGBOT.md are left to
+ * checkRuleFileSync, which reports either one missing with its own fix.
+ * @param exists whether a repository path is a file
+ */
+export function checkListedDocs(exists: (path: string) => boolean): string[] {
+  return [...new Set([...PATH_DOCS, ...COUNT_DOCS, README_PATH, REGISTER_PATH])]
+    .filter((path) => path !== AGENTS_PATH && path !== BUGBOT_PATH && !exists(path))
+    .map(
+      (path) =>
+        `${path} is listed in scripts/lib/docs-check.ts but does not exist: update the list (PATH_DOCS, COUNT_DOCS, README_PATH or REGISTER_PATH) to its new path, or take it off if it was removed`,
+    );
 }
 
 const WRITE_HINT = 'edit AGENTS.md only and run `npm run check:docs -- --write`';
@@ -337,8 +354,13 @@ function isCompose(path: string): boolean {
 function isDockerfile(path: string): boolean {
   return /(^|\/)Dockerfile[^/]*$/.test(path) && !path.endsWith('.dockerignore');
 }
+/**
+ * A script or source file the pin rule may read. Every file under scripts/ is read; elsewhere
+ * only one whose text runs docker, such as tests/integration/support.ts (CHK-6), which
+ * unpinnedIn decides from the text. Unit tests hold unpinned images on purpose.
+ */
 function isScript(path: string): boolean {
-  return /^scripts\/.+\.(ts|mjs|js|sh)$/.test(path) && !/\.test\.ts$/.test(path);
+  return /\.(ts|mjs|js|sh)$/.test(path) && !/\.test\.ts$/.test(path);
 }
 
 /** The files the pin rule reads, from `git ls-files`. */
@@ -521,6 +543,7 @@ function unpinnedIn(doc: Doc, localImages: ReadonlySet<string>): Unpinned[] {
     });
   } else if (isScript(doc.path)) {
     const runsDocker = DOCKER_CALL.test(doc.text);
+    if (!runsDocker && !doc.path.startsWith('scripts/')) return found;
     let carried = '';
     lines.forEach((text, index) => {
       const references = new Set<string>();

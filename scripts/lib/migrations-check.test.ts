@@ -16,6 +16,7 @@ import {
   checkSql,
   checkUpgradeTests,
   chooseMode,
+  firstParentChanges,
   nextNumber,
   scanSql,
 } from './migrations-check.ts';
@@ -111,6 +112,7 @@ describe('rule 2: append-only (AG-4.4, D12)', () => {
         subject: 'fix a typo',
         status: 'M',
         path: 'db/migrations/0007.sql',
+        merge: true,
       },
       {
         commit: 'd'.repeat(40),
@@ -118,6 +120,7 @@ describe('rule 2: append-only (AG-4.4, D12)', () => {
         status: 'R100',
         path: 'db/migrations/0008_x.sql',
         renamedTo: 'db/migrations/0009_x.sql',
+        merge: true,
       },
     ]);
     expect(findings).toHaveLength(2);
@@ -125,10 +128,39 @@ describe('rule 2: append-only (AG-4.4, D12)', () => {
       /^db\/migrations\/0007\.sql: commit cccccccccccc \("fix a typo"\) on main's first-parent history modified this merged migration\. Merged migrations are immutable/,
     );
     expect(findings[1]).toContain('renamed this merged migration to db/migrations/0009_x.sql');
+    expect(findings[0]).toContain('Restore the merged bytes in a new commit');
+    expect(findings[0]).not.toContain('fast-forward');
+  });
+
+  it('says a commit that is not a merge may be a fast-forward of a branch revising its own new migration (CHK-1)', () => {
+    const [finding] = checkHistory([
+      {
+        commit: 'f'.repeat(40),
+        subject: 'review fix',
+        status: 'M',
+        path: 'db/migrations/0015_a.sql',
+        merge: false,
+      },
+    ]);
+    expect(finding).toContain(
+      'The commit is not a merge: a squash merge or direct push that edited a migration main already had, or a fast-forward or rebase merge of a branch that revised its own new migration',
+    );
+    expect(finding).toContain(
+      "If the earlier version was never main's tip, so no database applied it from main, add this commit to MAIN_HISTORY_EXCEPTIONS in scripts/lib/migrations-check.ts with that reason and restore nothing.",
+    );
+    expect(finding).toContain(
+      'Only if the earlier version was on main and could have been applied: Restore the merged bytes',
+    );
   });
 
   it('skips a commit listed with its reason in the exceptions', () => {
-    const change = { commit: 'e'.repeat(40), subject: 's', status: 'D', path: 'db/migrations/x' };
+    const change = {
+      commit: 'e'.repeat(40),
+      subject: 's',
+      status: 'D',
+      path: 'db/migrations/x',
+      merge: false,
+    };
     expect(checkHistory([change], { ['e'.repeat(40)]: 'restored in the next commit' })).toEqual([]);
   });
 });
@@ -313,6 +345,99 @@ describe('rule 4: text rules (AG-4.3, AG-4.8, AG-4.9, AG-4.10, AG-4.11)', () => 
     expect(findings[0]).toContain(`put the comment line \`${AUDIT_EVENT_MARKER} <why>\``);
   });
 
+  it('reports a dropped, replaced or disabled audit_event trigger, a dropped table and a new owner (CHK-2)', () => {
+    const statements = [
+      'DROP TRIGGER audit_event_no_update ON public.audit_event;',
+      'DROP TRIGGER IF EXISTS audit_event_no_update ON audit_event;',
+      'ALTER TRIGGER audit_event_no_update ON public.audit_event RENAME TO old;',
+      'CREATE OR REPLACE TRIGGER audit_event_no_update BEFORE UPDATE ON public.audit_event FOR EACH ROW EXECUTE FUNCTION f();',
+      'ALTER TABLE public.audit_event DISABLE TRIGGER audit_event_no_update;',
+      'ALTER TABLE ONLY public.audit_event ADD COLUMN x int, DISABLE TRIGGER ALL;',
+      'ALTER TABLE audit_event ENABLE REPLICA TRIGGER audit_event_no_update;',
+      'ALTER TABLE public.audit_event OWNER TO tinnox_app;',
+      'DROP TABLE IF EXISTS public.audit_event;',
+    ];
+    const findings = one(`${statements.join('\n')}\n`);
+    expect(findings.map((f) => /:(\d+) /.exec(f)?.[1])).toEqual([
+      '3',
+      '4',
+      '5',
+      '6',
+      '7',
+      '8',
+      '9',
+      '10',
+      '11',
+    ]);
+    expect(findings[0]).toContain('the audit_event_no_update trigger stays');
+    // A legitimate change passes with the marker line directly above.
+    expect(
+      one(
+        `${AUDIT_EVENT_MARKER} the owner moves with the plan, reviewed in the pull request\n${statements[7] ?? ''}\n`,
+      ),
+    ).toEqual([]);
+  });
+
+  it('passes a new audit_event trigger and a new column, as 0004 and 0005 add them (CHK-2)', () => {
+    expect(
+      one(
+        [
+          'CREATE TRIGGER audit_event_stamp BEFORE INSERT ON public.audit_event',
+          '  FOR EACH ROW EXECUTE FUNCTION public.audit_event_stamp();',
+          'ALTER TABLE public.audit_event',
+          "  ADD COLUMN category text GENERATED ALWAYS AS (split_part(action, '.', 1)) STORED;",
+          'DROP TRIGGER t ON public.audit_event_archive;',
+          '',
+        ].join('\n'),
+      ),
+    ).toEqual([]);
+  });
+
+  it('reads a quoted identifier as the same name unquoted (CHK-9)', () => {
+    expect(
+      one(
+        [
+          'GRANT UPDATE ON "audit_event" TO tinnox_app;',
+          'DELETE FROM "public"."audit_event";',
+          'CREATE FUNCTION "sec".f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;',
+          '',
+        ].join('\n'),
+      ).map((f) => f.split(' ').slice(0, 2).join(' ')),
+    ).toEqual([
+      'db/migrations/0015_change.sql:3 grants',
+      'db/migrations/0015_change.sql:4 grants',
+      'db/migrations/0015_change.sql:5 changes',
+    ]);
+    expect(
+      one(
+        [
+          'SET LOCAL ROLE "tinnox_definer";',
+          'CREATE FUNCTION "sec"."thing"() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;',
+          'RESET ROLE;',
+          '',
+        ].join('\n'),
+      ),
+    ).toEqual([]);
+  });
+
+  it('keeps the quotes of a name with upper case, which PostgreSQL does not fold to audit_event (CHK-9)', () => {
+    expect(
+      one(
+        [
+          'GRANT UPDATE ON "Audit_Event" TO x;',
+          'TRUNCATE "AUDIT_EVENT";',
+          'DROP TABLE public."Audit_Event";',
+          '',
+        ].join('\n'),
+      ),
+    ).toEqual([]);
+    expect(
+      one('GRANT UPDATE ON "Display", audit_event TO x;\n').map((f) =>
+        f.split(' ').slice(0, 2).join(' '),
+      ),
+    ).toEqual(['db/migrations/0015_change.sql:3 grants']);
+  });
+
   it('grandfathers 0001 and 0002 by name, for their own rule only', () => {
     const grant = 'GRANT SELECT, INSERT ON public.audit_event TO tinnox_app;\n';
     const secDdl = 'CREATE FUNCTION sec.x() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;\n';
@@ -347,8 +472,10 @@ describe('rule 4: text rules (AG-4.3, AG-4.8, AG-4.9, AG-4.10, AG-4.11)', () => 
 
 describe('rule 5: db/upgrade-tests.json (AG-4.13)', () => {
   const files = ['0001_schema.sql', '0002_x.sql'];
-  const exists = (path: string): boolean =>
-    path === 'packages/db/test/migration-0002.integration.test.ts';
+  const readTest = (path: string): string | undefined =>
+    path === 'packages/db/test/migration-0002.integration.test.ts'
+      ? "const MIGRATION = '0002_x.sql';"
+      : undefined;
   const json = (entries: unknown[]): string => JSON.stringify({ migrations: entries }, null, 2);
 
   it('passes one sorted entry per migration, each with a test or a reason', () => {
@@ -356,12 +483,12 @@ describe('rule 5: db/upgrade-tests.json (AG-4.13)', () => {
       { file: '0001_schema.sql', reason: 'first schema' },
       { file: '0002_x.sql', test: 'packages/db/test/migration-0002.integration.test.ts' },
     ]);
-    expect(checkUpgradeTests(files, text, exists)).toEqual([]);
+    expect(checkUpgradeTests(files, text, readTest)).toEqual([]);
   });
 
   it('reports a migration with no entry, saying what to add', () => {
     expect(
-      checkUpgradeTests(files, json([{ file: '0001_schema.sql', reason: 'r' }]), exists),
+      checkUpgradeTests(files, json([{ file: '0001_schema.sql', reason: 'r' }]), readTest),
     ).toEqual([
       expect.stringMatching(
         /^db\/migrations\/0002_x\.sql has no entry in db\/upgrade-tests\.json\. Add one in file-name order\. Each entry is/,
@@ -374,12 +501,32 @@ describe('rule 5: db/upgrade-tests.json (AG-4.13)', () => {
       { file: '0001_schema.sql', test: 'packages/db/src/tx.test.ts' },
       { file: '0002_x.sql', test: 'packages/db/test/migration-0099.integration.test.ts' },
     ]);
-    expect(checkUpgradeTests(files, text, exists)).toEqual([
+    expect(checkUpgradeTests(files, text, readTest)).toEqual([
       expect.stringContaining('0001_schema.sql: "test" must name an integration test file'),
       expect.stringMatching(
         /^db\/upgrade-tests\.json:\d+ 0002_x\.sql names packages\/db\/test\/migration-0099\.integration\.test\.ts, which does not exist\./,
       ),
     ]);
+  });
+
+  it('reports a named test that mentions neither the file nor its number (CHK-4)', () => {
+    const text = json([
+      { file: '0001_schema.sql', test: 'packages/db/test/migration-0002.integration.test.ts' },
+      { file: '0002_x.sql', test: 'packages/db/test/migration-0002.integration.test.ts' },
+    ]);
+    expect(checkUpgradeTests(files, text, readTest)).toEqual([
+      expect.stringMatching(
+        /^db\/upgrade-tests\.json:\d+ 0001_schema\.sql names packages\/db\/test\/migration-0002\.integration\.test\.ts, which mentions neither 0001_schema\.sql nor 0001\. Name the test/,
+      ),
+    ]);
+    // The number alone is enough: a test may load the file through a helper by number.
+    expect(
+      checkUpgradeTests(
+        ['0002_x.sql'],
+        json([{ file: '0002_x.sql', test: 'packages/db/test/m.integration.test.ts' }]),
+        () => "await upgradeTo('0002');",
+      ),
+    ).toEqual([]);
   });
 
   it('reports entries out of order, twice, stale, empty or with unknown keys', () => {
@@ -389,7 +536,7 @@ describe('rule 5: db/upgrade-tests.json (AG-4.13)', () => {
       { file: '0001_schema.sql', reason: 'r', note: 'n' },
       { file: '0003_gone.sql', reason: 'r' },
     ]);
-    const findings = checkUpgradeTests(files, text, exists);
+    const findings = checkUpgradeTests(files, text, readTest);
     expect(findings).toEqual([
       expect.stringContaining(
         '0001_schema.sql comes after 0002_x.sql. Keep the entries sorted by file name',
@@ -402,14 +549,14 @@ describe('rule 5: db/upgrade-tests.json (AG-4.13)', () => {
   });
 
   it('reports a missing file, bad JSON and an entry with neither test nor reason', () => {
-    expect(checkUpgradeTests(files, undefined, exists)[0]).toMatch(
+    expect(checkUpgradeTests(files, undefined, readTest)[0]).toMatch(
       /^db\/upgrade-tests\.json is missing\./,
     );
-    expect(checkUpgradeTests(files, '{', exists)[0]).toMatch(
+    expect(checkUpgradeTests(files, '{', readTest)[0]).toMatch(
       /^db\/upgrade-tests\.json is not valid JSON/,
     );
     expect(
-      checkUpgradeTests(['0001_schema.sql'], json([{ file: '0001_schema.sql' }]), exists),
+      checkUpgradeTests(['0001_schema.sql'], json([{ file: '0001_schema.sql' }]), readTest),
     ).toEqual([expect.stringContaining('0001_schema.sql has neither "test" nor "reason"')]);
   });
 });
@@ -597,6 +744,28 @@ describe('main mode over fixture histories (D12)', () => {
     expect(checkRepository(root, 'main').findings).toEqual([]);
   });
 
+  it('fails a branch fast-forwarded onto main that revised its own new migration, and says to list the commit (CHK-1)', () => {
+    const root = fixture();
+    git(root, ['switch', '-q', '-c', 'feat']);
+    addMigrations(root, ['0003_m3.sql']);
+    commit(root, 'add 0003');
+    write(root, 'db/migrations/0003_m3.sql', sql(3, '-- reviewed\n'));
+    const revise = commit(root, 'revise 0003 before merge');
+    expect(checkRepository(root, 'branch').findings).toEqual([]);
+    git(root, ['switch', '-q', 'main']);
+    git(root, ['merge', '-q', '--ff-only', 'feat']);
+    expect(checkRepository(root, 'main').findings).toEqual([
+      expect.stringContaining(
+        `db/migrations/0003_m3.sql: commit ${revise.slice(0, 12)} ("revise 0003 before merge") on main's first-parent history modified this merged migration.`,
+      ),
+    ]);
+    expect(checkRepository(root, 'main').findings[0]).toContain('fast-forward or rebase merge');
+    // Listing the commit with its reason is the fix: the draft of 0003 was never main's tip.
+    expect(
+      checkHistory(firstParentChanges(root), { [revise]: '0003 was revised on its branch' }),
+    ).toEqual([]);
+  });
+
   it('fails a commit on main that modifies, renames or deletes a merged migration', () => {
     const root = fixture();
     write(root, 'db/migrations/0001_m1.sql', sql(1, '-- edited on main\n'));
@@ -629,6 +798,8 @@ describe('main mode over fixture histories (D12)', () => {
         /^db\/migrations\/0002_m2\.sql: commit [0-9a-f]{12} \("merge feat"\) on main's first-parent history modified/,
       ),
     ]);
+    // A merge brought the edit, so the merged bytes are main's: the advice is to restore them.
+    expect(checkRepository(root, 'main').findings[0]).not.toContain('The commit is not a merge');
   });
 });
 

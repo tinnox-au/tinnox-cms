@@ -7,6 +7,7 @@ import {
   bugbotFrom,
   checkCounts,
   checkDecisionRanges,
+  checkListedDocs,
   checkPaths,
   checkPins,
   checkRuleFilePlacement,
@@ -184,6 +185,31 @@ describe('paths', () => {
   });
 });
 
+describe('listed documents (CHK-5)', () => {
+  it('passes when every listed document exists', () => {
+    expect(checkListedDocs(() => true)).toEqual([]);
+  });
+
+  it('reports each listed document that is missing, saying to update the list', () => {
+    const missing = new Set(['README.md', 'tests/README.md', 'docs/security/threat-model.md']);
+    expect(checkListedDocs((path) => !missing.has(path))).toEqual([
+      'README.md is listed in scripts/lib/docs-check.ts but does not exist: update the list (PATH_DOCS, COUNT_DOCS, README_PATH or REGISTER_PATH) to its new path, or take it off if it was removed',
+      expect.stringMatching(
+        /^docs\/security\/threat-model\.md is listed in scripts\/lib\/docs-check\.ts but does not exist/,
+      ),
+      expect.stringMatching(
+        /^tests\/README\.md is listed in scripts\/lib\/docs-check\.ts but does not exist/,
+      ),
+    ]);
+  });
+
+  it('leaves the rule files to the sync rule, which has its own fix', () => {
+    expect(checkListedDocs((path) => path !== 'AGENTS.md' && path !== '.cursor/BUGBOT.md')).toEqual(
+      [],
+    );
+  });
+});
+
 describe('decision ranges', () => {
   const register = decisionRegister(
     ['| ID | Decision |', '|---|---|', '| DEC-01 | a |', '| DEC-02 | b |', '| DEC-04 | d |'].join(
@@ -223,7 +249,7 @@ describe('pins', () => {
   const digest = `@sha256:${'b'.repeat(64)}`;
   const pins = (path: string, ...lines: string[]) => checkPins([{ path, text: lines.join('\n') }]);
 
-  it('reads workflows, compose files, Dockerfiles and scripts, but not tests', () => {
+  it('reads workflows, compose files, Dockerfiles and script or source files, but not tests', () => {
     expect(
       pinSources([
         '.github/workflows/ci.yml',
@@ -232,6 +258,8 @@ describe('pins', () => {
         'apps/media-worker/Dockerfile.dockerignore',
         'scripts/scan-secrets.mjs',
         'scripts/lib/docs-check.test.ts',
+        'tests/integration/support.ts',
+        'apps/media-worker/scripts/direct-check.mjs',
         'README.md',
       ]),
     ).toEqual([
@@ -239,7 +267,44 @@ describe('pins', () => {
       'infra/docker-compose.yml',
       'apps/media-worker/Dockerfile',
       'scripts/scan-secrets.mjs',
+      'tests/integration/support.ts',
+      'apps/media-worker/scripts/direct-check.mjs',
     ]);
+  });
+
+  it('wants an image pinned in a file outside scripts/ that runs docker, and reads no other (CHK-6)', () => {
+    expect(
+      pins(
+        'tests/integration/support.ts',
+        "execFileSync('docker', [",
+        "  'run',",
+        "  '--rm',",
+        "  'postgres:17',",
+        ']);',
+      ),
+    ).toEqual([
+      expect.stringMatching(
+        /^tests\/integration\/support\.ts:4 image postgres:17 is pinned by tag only/,
+      ),
+    ]);
+    expect(pins('apps/api/test-fixtures/generate.mjs', 'docker run --rm node:24 true')).toEqual([
+      expect.stringMatching(/^apps\/api\/test-fixtures\/generate\.mjs:1 image node:24 is pinned/),
+    ]);
+    // A registry-host string in a file that runs no docker is not an image it pulls.
+    expect(pins('apps/api/src/x.ts', "const IMAGE = 'ghcr.io/a/b:1';")).toEqual([]);
+    // The exemption for an image a compose service builds here holds outside scripts/ too.
+    expect(
+      checkPins([
+        {
+          path: 'infra/docker-compose.yml',
+          text: 'services:\n  worker:\n    build: ..\n    image: tinnox-cms-media-worker:m0',
+        },
+        {
+          path: 'tests/integration/support.ts',
+          text: "execFileSync('docker', ['run', '--rm', 'tinnox-cms-media-worker:m0']);",
+        },
+      ]),
+    ).toEqual([]);
   });
 
   it('wants every action pinned by a 40-character commit', () => {

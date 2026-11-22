@@ -1,8 +1,13 @@
-// The history-scan verdict of scripts/scan-secrets.mjs. The logs are the stderr of the pinned
-// gitleaks v8.30.1 image, captured on 2026-11-22 with its colours; only the host path is changed.
-// The short uncoloured lines are written by hand in the same format.
+// The scan verdicts of scripts/scan-secrets.mjs. The logs are the stderr of the pinned gitleaks
+// v8.30.1 image, captured on 2026-11-22 with its colours; only the host path is changed. The
+// short uncoloured lines are written by hand in the same format.
 import { describe, expect, it } from 'vitest';
-import { gitleaksRunProblem, historyScanProblems, readHistoryLog } from './secret-scan-check.ts';
+import {
+  gitleaksRunProblem,
+  historyScanProblems,
+  readHistoryLog,
+  workingScanProblem,
+} from './secret-scan-check.ts';
 
 const log = (...lines: string[]): string => lines.map((line) => `${line}\n`).join('');
 const info = (text: string): string =>
@@ -45,6 +50,19 @@ const GITLEAKS_FATAL = log(
   '\x1b[90m2:04AM\x1b[0m \x1b[31mFTL\x1b[0m \x1b[1mstat /nonexistent: no such file or directory\x1b[0m',
 );
 
+// `gitleaks dir /scan` over a directory holding two files, and over an empty one (a directory
+// whose one file the container cannot read logs the same). Both exited 0.
+const dirLine = (time: string, text: string): string =>
+  `\x1b[90m${time}\x1b[0m \x1b[32mINF\x1b[0m \x1b[1m${text}\x1b[0m`;
+const DIR_SCANNED = log(
+  dirLine('5:53AM', 'scanned ~24934 bytes (24.93 KB) in 18.4ms'),
+  dirLine('5:53AM', 'no leaks found'),
+);
+const DIR_EMPTY = log(
+  dirLine('5:53AM', 'scanned ~0 bytes (0) in 2.09ms'),
+  dirLine('5:53AM', 'no leaks found'),
+);
+
 const NOT_RUN =
   'check that Docker is installed and running (`docker info`) and that the image pinned in scripts/scan-secrets.mjs can be pulled';
 
@@ -54,12 +72,20 @@ describe('readHistoryLog', () => {
       commits: 166,
       gitErrors: [],
       fatal: null,
+      bytes: 10868902,
+      errors: [],
       ranGitleaks: true,
     });
     expect(readHistoryLog(WORKTREE_NOT_MOUNTED)).toEqual({
       commits: 0,
       gitErrors: ['fatal: not a git repository: /home/dev/tinnox-cms/.git/worktrees/x'],
       fatal: null,
+      bytes: 0,
+      errors: [
+        '[git] fatal: not a git repository: /home/dev/tinnox-cms/.git/worktrees/x',
+        'skipping finding links: unable to parse remote URL error="command failed (128): exit status 128, stderr: fatal: not a git repository: /home/dev/tinnox-cms/.git/worktrees/x"',
+        'error="stderr is not empty"',
+      ],
       ranGitleaks: true,
     });
     expect(
@@ -70,6 +96,8 @@ describe('readHistoryLog', () => {
       commits: 1,
       gitErrors: ['error: object file is empty'],
       fatal: null,
+      bytes: null,
+      errors: ['[git] error: object file is empty'],
       ranGitleaks: true,
     });
   });
@@ -79,6 +107,8 @@ describe('readHistoryLog', () => {
       commits: null,
       gitErrors: [],
       fatal: null,
+      bytes: 9689863,
+      errors: [],
       ranGitleaks: true,
     });
     expect(
@@ -89,6 +119,8 @@ describe('readHistoryLog', () => {
       commits: 2,
       gitErrors: [],
       fatal: null,
+      bytes: null,
+      errors: ['[git] warning: refname is ambiguous'],
       ranGitleaks: true,
     });
   });
@@ -144,5 +176,47 @@ describe('gitleaksRunProblem', () => {
     expect(gitleaksRunProblem(LEAK, 1)).toBeNull();
     expect(gitleaksRunProblem(CLONE, 2)).toBe(`gitleaks did not run (exit 2): ${NOT_RUN}`);
     expect(gitleaksRunProblem(DOCKER_DOWN, 1)).toBe(`gitleaks did not run (exit 1): ${NOT_RUN}`);
+  });
+});
+
+describe('workingScanProblem (CHK-10)', () => {
+  it('passes a directory scan that read bytes, leak or no leak', () => {
+    expect(workingScanProblem(DIR_SCANNED, 0, 2)).toBeNull();
+    expect(
+      workingScanProblem(
+        log(
+          dirLine('5:53AM', 'scanned ~24934 bytes (24.93 KB) in 18.4ms'),
+          '5:53AM WRN leaks found: 1',
+        ),
+        1,
+        2,
+      ),
+    ).toBeNull();
+  });
+
+  it('fails a scan that read 0 bytes of the staged files although gitleaks exited 0', () => {
+    expect(workingScanProblem(DIR_EMPTY, 0, 640)).toBe(
+      'gitleaks scanned 0 bytes of the 640 staged files: the mount was empty or unreadable; check that Docker can read data/.secret-scan, which scripts/scan-secrets.mjs mounts',
+    );
+  });
+
+  it('fails a scan that logged an error, or no byte count', () => {
+    expect(
+      workingScanProblem(
+        log('5:53AM ERR failed to scan file path=/scan/a.txt', DIR_SCANNED.trimEnd()),
+        0,
+        2,
+      ),
+    ).toBe(
+      'gitleaks logged an error while scanning the staged files (failed to scan file path=/scan/a.txt): read its output above and fix the cause, so that every file is read',
+    );
+    expect(workingScanProblem(log(dirLine('5:53AM', 'no leaks found')), 0, 2)).toBe(
+      'gitleaks logged no "scanned ~N bytes" line: the pinned image may have changed its log format; read its output and update scripts/lib/secret-scan-check.ts',
+    );
+  });
+
+  it('says Docker is the problem when gitleaks never ran, and asks nothing of an empty staging', () => {
+    expect(workingScanProblem(DOCKER_DOWN, 1, 2)).toBe(`gitleaks did not run (exit 1): ${NOT_RUN}`);
+    expect(workingScanProblem('', 0, 0)).toBeNull();
   });
 });

@@ -40,7 +40,9 @@ const SKIPPED = /^A skipped, focused or expected-to-fail test is a red run \(U-1
 const RANDOM = /^Do not call Math\.random\(\) in a test/;
 const MOCKED = /Integration and e2e tests use real services \(OTH-13/;
 
-describe('skipped and focused tests (U-15)', () => {
+// The first case loads eslint.config.js, which a busy CI runner can stretch towards the unit
+// project's 5 s default (GAP-1).
+describe('skipped and focused tests (U-15)', { timeout: 30_000 }, () => {
   it.each([
     "it.skip('a', () => {});",
     "test.only('a', () => {});",

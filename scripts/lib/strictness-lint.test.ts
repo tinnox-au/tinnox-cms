@@ -65,7 +65,9 @@ async function flagged(path: string, code: string, rules: readonly string[]): Pr
   return (result?.messages ?? []).map((message) => message.message);
 }
 
-describe('switch-exhaustiveness-check (section 3.5)', () => {
+// The first case loads eslint.config.js and builds the TypeScript program, and the .tsx case
+// builds another: seconds on a busy CI runner, past the unit project's 5 s default (GAP-1).
+describe('switch-exhaustiveness-check (section 3.5)', { timeout: 30_000 }, () => {
   const missing = [
     "type Phase = 'idle' | 'playing' | 'faulted';",
     'export function label(phase: Phase): string {',

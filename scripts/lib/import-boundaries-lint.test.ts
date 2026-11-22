@@ -72,7 +72,10 @@ async function layerTable(): Promise<Record<string, unknown>> {
   return { ...table };
 }
 
-describe('the layer table', () => {
+// The first case of each of the next two describes loads eslint.config.js, once by import and
+// once through ESLint, which a busy CI runner can stretch towards the unit project's 5 s default
+// (GAP-1).
+describe('the layer table', { timeout: 30_000 }, () => {
   it('has one row for every workspace of the root package.json, plus scripts and tests', async () => {
     expect(Object.keys(await layerTable()).sort()).toEqual(workspaces());
   });
@@ -257,7 +260,7 @@ const ROWS: readonly {
   },
 ];
 
-describe('import boundaries, one row per workspace (section 3.1)', () => {
+describe('import boundaries, one row per workspace (section 3.1)', { timeout: 30_000 }, () => {
   for (const row of ROWS) {
     it.each(row.forbidden)(`${row.path}: flags %s`, async (specifier, message) => {
       const messages = await flagged(row.path, importOf(specifier));

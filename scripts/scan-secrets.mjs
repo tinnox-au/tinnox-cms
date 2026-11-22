@@ -4,7 +4,8 @@
 //   1. the whole git history: every commit reachable from any branch, tag, remote branch, stash
 //      or worktree HEAD (`git log --all`). The scan fails when gitleaks read no commit, git
 //      failed inside the container, or the clone is shallow (scripts/lib/secret-scan-check.ts);
-//   2. the files git tracks or would track (so work that is not committed yet is covered).
+//   2. the files git tracks or would track (so work that is not committed yet is covered). The
+//      scan fails when gitleaks read no bytes of them or logged an error;
 // Gitignored files (.env, infra/.generated, data) hold generated development secrets by
 // design and are not scanned; .gitignore is what keeps them out of the repository.
 //   3. an exact-value check: the generated secrets on this machine must not appear in any
@@ -18,6 +19,7 @@ import {
   gitleaksRunProblem,
   historyScanProblems,
   readHistoryLog,
+  workingScanProblem,
 } from './lib/secret-scan-check.ts';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -108,8 +110,7 @@ try {
     copied += 1;
   }
   const workingRun = copied === 0 ? { status: 0, log: '' } : gitleaks(staging, ['dir', '/scan']);
-  const workingProblem =
-    copied === 0 ? null : gitleaksRunProblem(workingRun.log, workingRun.status);
+  const workingProblem = workingScanProblem(workingRun.log, workingRun.status, copied);
   if (workingProblem !== null) console.error(`working-tree scan: ${workingProblem}`);
   const generated = findGeneratedSecrets(files);
   if (problems.length > 0) {
@@ -119,7 +120,7 @@ try {
   }
   if (workingProblem !== null) {
     console.error(
-      'Secret scan FAILED: the working tree was not scanned (see "working-tree scan:").',
+      'Secret scan FAILED: the working tree was not fully scanned (see "working-tree scan:").',
     );
     process.exitCode = 1;
   }

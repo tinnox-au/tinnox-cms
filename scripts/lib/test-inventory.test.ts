@@ -23,9 +23,9 @@ describe('inventoryProblems', () => {
     ).toEqual([]);
   });
 
-  it('fails a test file that no suite runs (an orphan never runs and nothing says so)', () => {
+  it('fails a test file that no suite runs (an orphan never runs and nothing says so, CHK-11)', () => {
     expect(inventoryProblems(['packages/db/src/x.integration.test.ts'], suites)).toEqual([
-      'packages/db/src/x.integration.test.ts is run by no suite: move it under an include glob of a project in vitest.config.ts or under tests/e2e, or rename it if it is not a test',
+      'packages/db/src/x.integration.test.ts is run by no suite: move it under an include glob of a project in vitest.config.ts or under tests/e2e (a Playwright config with another testDir needs its own suite in scripts/lib/test-inventory.test.ts), or rename it if it is not a test',
     ]);
   });
 
@@ -56,7 +56,9 @@ describe('inventoryProblems', () => {
 });
 
 describe('the repository', () => {
-  it('runs every test file in exactly one suite', async () => {
+  // Building a Vitest instance from vitest.config.ts is a cold start that a busy CI runner can
+  // stretch towards the unit project's 5 s default (GAP-1).
+  it('runs every test file in exactly one suite', { timeout: 30_000 }, async () => {
     // Tracked files and new files that are not ignored, as check:docs lists them.
     const files = spawnSync(
       'git',

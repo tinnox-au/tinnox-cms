@@ -46,7 +46,10 @@ jobs:
       # pull request or branch it compares db/migrations with the merge-base of HEAD and
       # origin/main, on main it reads HEAD's first-parent history; plus names, text rules and
       # db/upgrade-tests.json. Until a ruleset on main requires this job (Michael's to create),
-      # a failure here reports but does not block a merge.
+      # a failure here reports but does not block a merge. Main takes merge commits or squash
+      # merges only, no fast-forward push and no rebase merge: those put a branch's own revisions
+      # of its new migration on the first-parent history, which this check then reports (CHK-1).
+      # The repository setting that enforces this is Michael's to make.
       - run: npm run check:migrations
       - run: npm run typecheck
       - run: npm test

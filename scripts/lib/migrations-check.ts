@@ -24,8 +24,11 @@ export const MAIN_REF = 'origin/main';
 
 /**
  * Commits on main's first-parent history allowed to change a merged migration, each with its
- * reason (D12). None today: the history has never changed one. Should one ever land, restore
- * the merged bytes in a new commit and list both here, or main fails this check for good.
+ * reason (D12). None today: the history has never changed one. Should one ever land, main fails
+ * this check for good until it is listed here. A merge that changed a migration main already had
+ * is listed together with a new commit that restores the merged bytes. A commit that is not a
+ * merge may come from a fast-forward or rebase merge of a branch that revised its own new
+ * migration: when the earlier version was never main's tip, it is listed with that reason alone.
  */
 export const MAIN_HISTORY_EXCEPTIONS: Readonly<Record<string, string>> = {};
 
@@ -140,11 +143,16 @@ export interface HistoryChange {
   readonly path: string;
   /** The new path of a rename. */
   readonly renamedTo?: string;
+  /** The commit has more than one parent. */
+  readonly merge: boolean;
 }
 
 /**
  * Main mode: the first-parent history of HEAD lists no deletion, modification, rename or type
- * change under db/migrations, apart from MAIN_HISTORY_EXCEPTIONS.
+ * change under db/migrations, apart from MAIN_HISTORY_EXCEPTIONS. Main takes merge commits or
+ * squash merges only. A fast-forward or rebase merge puts the branch's own commits on the
+ * first-parent history, so a review fix to the branch's new migration lands here too (CHK-1):
+ * the message for a commit that is not a merge says how to tell the two cases apart.
  */
 export function checkHistory(
   changes: readonly HistoryChange[],
@@ -161,7 +169,10 @@ export function checkHistory(
     .map((c) => {
       const verb = verbs[c.status.charAt(0)] ?? `changed (${c.status})`;
       const target = c.renamedTo === undefined ? '' : ` to ${c.renamedTo}`;
-      return `${c.path}: commit ${c.commit.slice(0, 12)} ("${c.subject}") on main's first-parent history ${verb} this merged migration${target}. Merged migrations are immutable: every existing database rejects a changed checksum. Restore the merged bytes in a new commit and add both commits to MAIN_HISTORY_EXCEPTIONS in scripts/lib/migrations-check.ts with the reason; put the actual fix in a new migration with the next free number.`;
+      const head = `${c.path}: commit ${c.commit.slice(0, 12)} ("${c.subject}") on main's first-parent history ${verb} this merged migration${target}. Merged migrations are immutable: every existing database rejects a changed checksum.`;
+      const restore = `Restore the merged bytes in a new commit and add both commits to MAIN_HISTORY_EXCEPTIONS in scripts/lib/migrations-check.ts with the reason; put the actual fix in a new migration with the next free number.`;
+      if (c.merge) return `${head} ${restore}`;
+      return `${head} The commit is not a merge: a squash merge or direct push that edited a migration main already had, or a fast-forward or rebase merge of a branch that revised its own new migration (main takes merge commits or squash merges only, .github/workflows/ci.yml). If the earlier version was never main's tip, so no database applied it from main, add this commit to MAIN_HISTORY_EXCEPTIONS in scripts/lib/migrations-check.ts with that reason and restore nothing. Only if the earlier version was on main and could have been applied: ${restore}`;
     });
 }
 
@@ -352,7 +363,7 @@ export function scanSql(sql: string): ScannedSql {
 
 interface Statement {
   readonly line: number;
-  /** Upper case, whitespace collapsed. */
+  /** Upper case, whitespace collapsed, simple identifiers unquoted. */
   readonly text: string;
 }
 
@@ -361,7 +372,14 @@ function statements(code: string): Statement[] {
   let line = 1;
   for (const part of code.split(';')) {
     const lead = /^\s*/.exec(part)?.[0] ?? '';
-    const text = part.trim().replace(/\s+/g, ' ').toUpperCase();
+    // "audit_event" and audit_event name the same table, so quoting must not change a result
+    // (CHK-9). Only a name PostgreSQL would fold to itself loses its quotes: "Audit_Event" is a
+    // different table from audit_event, so it keeps them and no rule below matches it.
+    const text = part
+      .trim()
+      .replace(/\s+/g, ' ')
+      .replace(/"([a-z_][a-z0-9_$]*)"/g, '$1')
+      .toUpperCase();
     if (text !== '') result.push({ line: line + (lead.match(/\n/g)?.length ?? 0), text });
     line += part.match(/\n/g)?.length ?? 0;
   }
@@ -373,12 +391,22 @@ const TRANSACTION_CONTROL =
 const ROLE_DDL = /^(CREATE|ALTER|DROP) (ROLE|USER|GROUP)\b/;
 const SEC_DDL =
   /^((CREATE (OR REPLACE )?|ALTER |DROP )(FUNCTION|PROCEDURE) (IF EXISTS )?SEC\.|COMMENT ON (FUNCTION|PROCEDURE) SEC\.|(GRANT|REVOKE) .* ON (FUNCTION|PROCEDURE) SEC\.|(GRANT|REVOKE) .* ON ALL (FUNCTIONS|PROCEDURES|ROUTINES) IN SCHEMA SEC\b)/;
+/**
+ * Statements that write to audit_event, widen who may, or take away the triggers that keep it
+ * append-only (CHK-2). A new trigger and a new column are allowed: 0004 adds the stamp trigger
+ * and 0005 a generated column, and neither can rewrite a row. Like every text rule, this one sees
+ * top-level statements only: a statement inside a DO block or a function body is out of its
+ * reach, and step 6's catalogue test (AG-3.7) holds the trigger and the grants there.
+ */
 const AUDIT_EVENT_WRITE = [
   /\bUPDATE (ONLY )?(PUBLIC\.)?AUDIT_EVENT\b/,
   /\bDELETE FROM (ONLY )?(PUBLIC\.)?AUDIT_EVENT\b/,
-  /^TRUNCATE\b.*\bAUDIT_EVENT\b/,
-  /^GRANT .* ON (TABLE )?([A-Z_.]+, )*(PUBLIC\.)?AUDIT_EVENT\b/,
+  /^TRUNCATE\b.*(?<!")\bAUDIT_EVENT\b(?!")/,
+  /^GRANT .* ON (TABLE )?([A-Z0-9_$."]+, )*(PUBLIC\.)?AUDIT_EVENT\b/,
   /^GRANT .* ON ALL TABLES IN SCHEMA PUBLIC\b/,
+  /^DROP TABLE\b.*(?<!")\bAUDIT_EVENT\b(?!")/,
+  /^ALTER TABLE (IF EXISTS )?(ONLY )?(PUBLIC\.)?AUDIT_EVENT\b.*\b(DISABLE TRIGGER|ENABLE REPLICA TRIGGER|OWNER TO)\b/,
+  /^(CREATE OR REPLACE|DROP|ALTER) TRIGGER\b.* ON (ONLY )?(PUBLIC\.)?AUDIT_EVENT\b/,
 ];
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 /** The comment line that allows one audit_event statement; it sits directly above it. */
@@ -459,7 +487,7 @@ export function checkSql(name: string, sql: string): string[] {
       add(
         'audit-event',
         s.line,
-        `grants on, updates, deletes from or truncates audit_event, which is append-only: tinnox_app keeps INSERT and SELECT only (AGENTS.md sections 1 and 3). If it is truly needed, put the comment line \`${AUDIT_EVENT_MARKER} <why>\` directly above the statement and say why in the pull request.`,
+        `grants on, writes to, drops, changes the owner of, or replaces, drops or disables a trigger of audit_event, which is append-only: tinnox_app keeps INSERT and SELECT only, and the audit_event_no_update trigger stays (AGENTS.md sections 1 and 3). If it is truly needed, put the comment line \`${AUDIT_EVENT_MARKER} <why>\` directly above the statement and say why in the pull request.`,
       );
     }
     const create = /^CREATE (UNLOGGED )?TABLE (IF NOT EXISTS )?(PUBLIC\.)?"?([A-Z0-9_]+)/.exec(
@@ -545,12 +573,12 @@ const INTEGRATION_TEST =
 /**
  * @param names the migration file names in the working tree
  * @param text the contents of db/upgrade-tests.json, or undefined when it is missing
- * @param exists whether a repository path is a file
+ * @param readTest the text of a repository file, or undefined when it is not a file
  */
 export function checkUpgradeTests(
   names: readonly string[],
   text: string | undefined,
-  exists: (path: string) => boolean,
+  readTest: (path: string) => string | undefined,
 ): string[] {
   const how = `Each entry is { "file": "NNNN_description.sql", "test": "packages/db/test/migration-NNNN.integration.test.ts" } for a migration that changes existing rows (as migration-0014.integration.test.ts does), or { "file": ..., "reason": "..." } saying why it needs no upgrade test.`;
   if (text === undefined) {
@@ -614,10 +642,19 @@ export function checkUpgradeTests(
         findings.push(
           `${at(file)} ${file}: "test" must name an integration test file (packages/<name>/test/*.integration.test.ts or tests/integration/*.test.ts), because an upgrade test needs a database.`,
         );
-      } else if (!exists(test)) {
-        findings.push(
-          `${at(file)} ${file} names ${test}, which does not exist. Name the test that upgrades a populated database through it, or give a "reason" instead.`,
-        );
+      } else {
+        const body = readTest(test);
+        const number = file.slice(0, 4);
+        if (body === undefined) {
+          findings.push(
+            `${at(file)} ${file} names ${test}, which does not exist. Name the test that upgrades a populated database through it, or give a "reason" instead.`,
+          );
+        } else if (!body.includes(file) && !new RegExp(`\\b${number}\\b`).test(body)) {
+          // A test that names neither the file nor its number does not upgrade through it (CHK-4).
+          findings.push(
+            `${at(file)} ${file} names ${test}, which mentions neither ${file} nor ${number}. Name the test that upgrades a populated database through this migration (it names the file, as migration-0014.integration.test.ts does), or give a "reason" instead.`,
+          );
+        }
       }
     }
     if (reason !== undefined && (typeof reason !== 'string' || reason.trim() === '')) {
@@ -733,7 +770,7 @@ export function firstParentChanges(root: string): HistoryChange[] {
     '--find-renames',
     '--name-status',
     '--no-show-signature',
-    '--format=%x1e%H%x1f%s',
+    '--format=%x1e%H%x1f%P%x1f%s',
     'HEAD',
     '--',
     MIGRATIONS_DIR,
@@ -741,15 +778,16 @@ export function firstParentChanges(root: string): HistoryChange[] {
   const changes: HistoryChange[] = [];
   for (const chunk of out.split('\x1e')) {
     const [head = '', ...rest] = chunk.split('\n');
-    const [commit = '', subject = ''] = head.split('\x1f');
+    const [commit = '', parents = '', subject = ''] = head.split('\x1f');
     if (commit === '') continue;
+    const merge = parents.trim().split(' ').length > 1;
     for (const line of rest) {
       const [status, path, renamedTo] = line.split('\t');
       if (status === undefined || status === '' || path === undefined) continue;
       changes.push(
         renamedTo === undefined
-          ? { commit, subject, status, path }
-          : { commit, subject, status, path, renamedTo },
+          ? { commit, subject, status, path, merge }
+          : { commit, subject, status, path, renamedTo, merge },
       );
     }
   }
@@ -785,7 +823,9 @@ export function checkRepository(root: string, mode: Mode): Report {
   const common = [
     ...checkNames(names),
     ...sqlNames.flatMap((n) => checkSql(n, read(`${MIGRATIONS_DIR}/${n}`) ?? '')),
-    ...checkUpgradeTests(sqlNames, read(UPGRADE_TESTS_PATH), exists),
+    ...checkUpgradeTests(sqlNames, read(UPGRADE_TESTS_PATH), (path) =>
+      exists(path) ? read(path) : undefined,
+    ),
   ];
 
   if (mode === 'main') {

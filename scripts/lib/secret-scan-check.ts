@@ -1,4 +1,4 @@
-// Decides whether the history scan of scripts/scan-secrets.mjs really read the history.
+// Decides whether the scans of scripts/scan-secrets.mjs really read the history and the files.
 // `gitleaks git` (v8.30.1) runs `git log -p -U0 --full-history --all` and logs to stderr; when
 // git fails (in a worktree whose git directory is not mounted, say) gitleaks logs git's error,
 // "0 commits scanned." and "no leaks found", and exits 0. Its report file lists findings only,
@@ -14,6 +14,10 @@ const GIT_FAILURE = /\[git\]\s*((?:fatal|error):.*)$/;
 const GITLEAKS_LINE = /^\S+ (?:TRC|DBG|INF|WRN|ERR|FTL) /;
 // "2:04AM FTL stat /scan: no such file or directory": gitleaks stopped before scanning.
 const FATAL = /^\S+ FTL (.*)$/;
+// "INF scanned ~24934 bytes (24.93 KB) in 18.4ms", logged by `gitleaks git` and `gitleaks dir`.
+const BYTES_SCANNED = /\bINF\b.*?\bscanned ~(\d+) bytes\b/;
+// Any error gitleaks logs, from git or its own.
+const ERROR = /^\S+ ERR (.*)$/;
 
 export interface HistoryScan {
   /** The number gitleaks logged, or null when it logged no count. */
@@ -22,6 +26,10 @@ export interface HistoryScan {
   gitErrors: string[];
   /** The message of gitleaks' own fatal line, or null. */
   fatal: string | null;
+  /** The bytes gitleaks logged as scanned, or null when it logged no count. */
+  bytes: number | null;
+  /** The message of every error line, git's included. */
+  errors: string[];
   /** Whether any line came from gitleaks: none when Docker could not start it. */
   ranGitleaks: boolean;
 }
@@ -30,6 +38,8 @@ export function readHistoryLog(log: string): HistoryScan {
   let commits: number | null = null;
   const gitErrors: string[] = [];
   let fatal: string | null = null;
+  let bytes: number | null = null;
+  const errors: string[] = [];
   let ranGitleaks = false;
   // gitleaks colours its log even when stderr is not a terminal.
   for (const line of stripVTControlCharacters(log).split('\n')) {
@@ -39,8 +49,12 @@ export function readHistoryLog(log: string): HistoryScan {
     const failure = GIT_FAILURE.exec(line)?.[1];
     if (failure !== undefined) gitErrors.push(failure.trim());
     fatal ??= FATAL.exec(line)?.[1]?.trim() ?? null;
+    const scannedBytes = BYTES_SCANNED.exec(line)?.[1];
+    if (scannedBytes !== undefined) bytes = Number(scannedBytes);
+    const error = ERROR.exec(line)?.[1];
+    if (error !== undefined) errors.push(error.trim());
   }
-  return { commits, gitErrors, fatal, ranGitleaks };
+  return { commits, gitErrors, fatal, bytes, errors, ranGitleaks };
 }
 
 /**
@@ -55,6 +69,29 @@ export function gitleaksRunProblem(log: string, status: number): string | null {
   }
   if (!scan.ranGitleaks || (status !== 0 && status !== 1)) {
     return `gitleaks did not run (exit ${status}): check that Docker is installed and running (\`docker info\`) and that the image pinned in scripts/scan-secrets.mjs can be pulled`;
+  }
+  return null;
+}
+
+/**
+ * Why the working-tree scan of `files` staged files cannot count as a pass, or null when it read
+ * them (CHK-10). A gitleaks that ran but read nothing (an empty or unreadable mount) logs
+ * "scanned ~0 bytes" and exits 0. With nothing staged there is nothing to read.
+ */
+export function workingScanProblem(log: string, status: number, files: number): string | null {
+  if (files === 0) return null;
+  const runProblem = gitleaksRunProblem(log, status);
+  if (runProblem !== null) return runProblem;
+  const scan = readHistoryLog(log);
+  const error = scan.errors[0];
+  if (error !== undefined) {
+    return `gitleaks logged an error while scanning the staged files (${error}): read its output above and fix the cause, so that every file is read`;
+  }
+  if (scan.bytes === null) {
+    return 'gitleaks logged no "scanned ~N bytes" line: the pinned image may have changed its log format; read its output and update scripts/lib/secret-scan-check.ts';
+  }
+  if (scan.bytes === 0) {
+    return `gitleaks scanned 0 bytes of the ${files} staged files: the mount was empty or unreadable; check that Docker can read data/.secret-scan, which scripts/scan-secrets.mjs mounts`;
   }
   return null;
 }

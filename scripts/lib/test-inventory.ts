@@ -21,7 +21,7 @@ export function inventoryProblems(files: readonly string[], suites: readonly Sui
     const owners = suites.filter((suite) => suite.runs(path)).map((suite) => suite.name);
     if (owners.length === 0) {
       problems.push(
-        `${path} is run by no suite: move it under an include glob of a project in vitest.config.ts or under tests/e2e, or rename it if it is not a test`,
+        `${path} is run by no suite: move it under an include glob of a project in vitest.config.ts or under tests/e2e (a Playwright config with another testDir needs its own suite in scripts/lib/test-inventory.test.ts), or rename it if it is not a test`,
       );
     } else if (owners.length > 1) {
       problems.push(
