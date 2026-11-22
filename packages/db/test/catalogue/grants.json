@@ -1,0 +1,287 @@
+{
+  "about": "Every privilege that a role other than the object's owner holds on this database, on its schemas and on their tables, columns, sequences, functions and types, and every default privilege, as packages/db/test/catalogue.integration.test.ts reads them from the migrated schema. A grant change is a diff of this file: change it in the same pull request as the migration and say why in the migration header. A column privilege is written \"UPDATE (column)\". Every tinnox_definer entry says in \"why\" which sec.* function or script uses it, and names any part that nothing uses.",
+  "grants": {
+    "PUBLIC": {},
+    "tinnox_app": {
+      "database": {
+        "privileges": ["CONNECT"]
+      },
+      "function public.app_org_id()": {
+        "privileges": ["EXECUTE"]
+      },
+      "function sec.alert_recipient_by_token_hash(bytea)": {
+        "privileges": ["EXECUTE"]
+      },
+      "function sec.audit_unscoped(text,text,text,text,text,text,jsonb)": {
+        "privileges": ["EXECUTE"]
+      },
+      "function sec.device_by_registration_id(uuid)": {
+        "privileges": ["EXECUTE"]
+      },
+      "function sec.device_by_token_hash(bytea)": {
+        "privileges": ["EXECUTE"]
+      },
+      "function sec.display_alert_orgs()": {
+        "privileges": ["EXECUTE"]
+      },
+      "function sec.heartbeat_log_purge(integer)": {
+        "privileges": ["EXECUTE"]
+      },
+      "function sec.login_state_put(bytea,text,text,text,integer)": {
+        "privileges": ["EXECUTE"]
+      },
+      "function sec.login_state_take(bytea)": {
+        "privileges": ["EXECUTE"]
+      },
+      "function sec.media_processing_jobs(integer)": {
+        "privileges": ["EXECUTE"]
+      },
+      "function sec.membership_by_oidc_sub(text)": {
+        "privileges": ["EXECUTE"]
+      },
+      "function sec.pairing_cancel_claims(uuid)": {
+        "privileges": ["EXECUTE"]
+      },
+      "function sec.pairing_claim(text,uuid,uuid,integer,integer)": {
+        "privileges": ["EXECUTE"]
+      },
+      "function sec.pairing_complete(uuid,bytea,bytea)": {
+        "privileges": ["EXECUTE"]
+      },
+      "function sec.pairing_create(text,bytea,text,integer,integer,integer)": {
+        "privileges": ["EXECUTE"]
+      },
+      "function sec.pairing_poll(uuid,bytea,integer)": {
+        "privileges": ["EXECUTE"]
+      },
+      "function sec.pairing_purge(integer)": {
+        "privileges": ["EXECUTE"]
+      },
+      "function sec.session_by_id_hash(bytea,integer)": {
+        "privileges": ["EXECUTE"]
+      },
+      "function sec.session_create(bytea,text,text,integer,text,timestamp with time zone)": {
+        "privileges": ["EXECUTE"]
+      },
+      "function sec.session_purge_expired()": {
+        "privileges": ["EXECUTE"]
+      },
+      "function sec.session_revoke(bytea)": {
+        "privileges": ["EXECUTE"]
+      },
+      "function sec.session_revoke_membership(uuid)": {
+        "privileges": ["EXECUTE"]
+      },
+      "schema public": {
+        "privileges": ["USAGE"]
+      },
+      "schema sec": {
+        "privileges": ["USAGE"]
+      },
+      "table public.alert_recipient": {
+        "privileges": [
+          "DELETE",
+          "INSERT",
+          "SELECT",
+          "UPDATE (confirm_expires_at)",
+          "UPDATE (confirm_token_hash)",
+          "UPDATE (confirmed_at)"
+        ]
+      },
+      "table public.app": {
+        "privileges": [
+          "DELETE",
+          "INSERT",
+          "SELECT",
+          "UPDATE (description)",
+          "UPDATE (name)",
+          "UPDATE (settings)"
+        ]
+      },
+      "table public.audit_event": {
+        "privileges": ["INSERT", "SELECT"]
+      },
+      "table public.display": {
+        "privileges": [
+          "INSERT",
+          "SELECT",
+          "UPDATE (alert_back_online)",
+          "UPDATE (alert_offline_minutes)",
+          "UPDATE (assigned_layout_id)",
+          "UPDATE (assigned_playlist_id)",
+          "UPDATE (assigned_schedule_id)",
+          "UPDATE (canvas_height)",
+          "UPDATE (canvas_width)",
+          "UPDATE (content_height)",
+          "UPDATE (content_width)",
+          "UPDATE (content_x)",
+          "UPDATE (content_y)",
+          "UPDATE (default_fit)",
+          "UPDATE (description)",
+          "UPDATE (name)",
+          "UPDATE (rotation)",
+          "UPDATE (working_hours)"
+        ]
+      },
+      "table public.display_alert": {
+        "privileges": ["DELETE", "INSERT", "SELECT"]
+      },
+      "table public.display_delivery": {
+        "privileges": ["INSERT", "SELECT", "UPDATE"]
+      },
+      "table public.display_tag": {
+        "privileges": ["DELETE", "INSERT", "SELECT"]
+      },
+      "table public.folder": {
+        "privileges": ["DELETE", "INSERT", "SELECT", "UPDATE (name)"]
+      },
+      "table public.heartbeat_log": {
+        "privileges": ["DELETE", "INSERT", "SELECT"]
+      },
+      "table public.layout": {
+        "privileges": ["DELETE", "INSERT", "SELECT", "UPDATE (description)", "UPDATE (name)"]
+      },
+      "table public.layout_zone": {
+        "privileges": ["DELETE", "INSERT", "SELECT"]
+      },
+      "table public.media": {
+        "privileges": ["DELETE", "INSERT", "SELECT", "UPDATE"]
+      },
+      "table public.media_tag": {
+        "privileges": ["DELETE", "INSERT", "SELECT"]
+      },
+      "table public.member_invite": {
+        "privileges": ["INSERT", "SELECT", "UPDATE (closed_by)", "UPDATE (status)"]
+      },
+      "table public.membership": {
+        "privileges": [
+          "SELECT",
+          "UPDATE (display_name)",
+          "UPDATE (removed_at)",
+          "UPDATE (removed_by)",
+          "UPDATE (role)"
+        ]
+      },
+      "table public.organization": {
+        "privileges": ["SELECT"]
+      },
+      "table public.player_registration": {
+        "privileges": ["SELECT", "UPDATE (revoked_at)", "UPDATE (revoked_reason)"]
+      },
+      "table public.playlist": {
+        "privileges": ["DELETE", "INSERT", "SELECT", "UPDATE"]
+      },
+      "table public.playlist_item": {
+        "privileges": ["DELETE", "INSERT", "SELECT", "UPDATE"]
+      },
+      "table public.publication": {
+        "privileges": ["INSERT", "SELECT"]
+      },
+      "table public.publication_asset": {
+        "privileges": ["INSERT", "SELECT"]
+      },
+      "table public.schedule": {
+        "privileges": [
+          "DELETE",
+          "INSERT",
+          "SELECT",
+          "UPDATE (default_playlist_id)",
+          "UPDATE (description)",
+          "UPDATE (name)"
+        ]
+      },
+      "table public.schedule_event": {
+        "privileges": ["DELETE", "INSERT", "SELECT"]
+      },
+      "table public.site": {
+        "privileges": ["SELECT"]
+      },
+      "table public.tag": {
+        "privileges": ["DELETE", "INSERT", "SELECT", "UPDATE (colour)", "UPDATE (name)"]
+      }
+    },
+    "tinnox_definer": {
+      "function public.app_org_id()": {
+        "privileges": ["EXECUTE"],
+        "why": "sec.pairing_claim, sec.pairing_cancel_claims and sec.session_revoke_membership read the caller's organisation context with it."
+      },
+      "schema public": {
+        "privileges": ["USAGE"],
+        "why": "The sec.* functions name public tables and call public.app_org_id()."
+      },
+      "schema sec": {
+        "privileges": ["CREATE", "USAGE"],
+        "why": "It owns the functions in sec. Migrations create and replace them under SET LOCAL ROLE tinnox_definer, which needs CREATE on the schema."
+      },
+      "table public.alert_recipient": {
+        "privileges": [
+          "SELECT (confirm_expires_at)",
+          "SELECT (confirm_token_hash)",
+          "SELECT (confirmed_at)",
+          "SELECT (id)",
+          "SELECT (org_id)"
+        ],
+        "why": "sec.alert_recipient_by_token_hash resolves a confirmation link opened with no session: it filters on confirm_token_hash, confirmed_at and confirm_expires_at and returns org_id and id. Never email (AG-1.20)."
+      },
+      "table public.audit_event": {
+        "privileges": ["INSERT"],
+        "why": "sec.audit_unscoped writes events that have no organisation. scripts/revoke-all-sessions.sql, scripts/revoke-subject-sessions.sql, provision-member pending and migration 0012 write audit rows for every organisation under SET LOCAL ROLE tinnox_definer. INSERT only: audit_event is append-only."
+      },
+      "table public.display": {
+        "privileges": ["SELECT"],
+        "why": "sec.pairing_claim and sec.pairing_cancel_claims check that the display belongs to the caller's organisation."
+      },
+      "table public.heartbeat_log": {
+        "privileges": ["DELETE", "SELECT (received_at)"],
+        "why": "sec.heartbeat_log_purge deletes history older than the retention in every organisation; received_at is the only column it reads."
+      },
+      "table public.login_state": {
+        "privileges": ["DELETE", "INSERT", "SELECT", "UPDATE"],
+        "why": "sec.login_state_put deletes expired rows and inserts one; sec.login_state_take deletes one and returns it (its WHERE and RETURNING need SELECT). tinnox_app has no rights on the table. UPDATE is granted (0001) and no function or script uses it: a line to drop in a new migration (SCR-27)."
+      },
+      "table public.media": {
+        "privileges": ["SELECT (created_at)", "SELECT (id)", "SELECT (org_id)", "SELECT (status)"],
+        "why": "sec.media_processing_jobs lists media still waiting for the worker in every organisation: it filters on status and returns id, org_id and created_at."
+      },
+      "table public.member_invite": {
+        "privileges": [
+          "SELECT (created_at)",
+          "SELECT (email)",
+          "SELECT (expires_at)",
+          "SELECT (id)",
+          "SELECT (invited_by)",
+          "SELECT (name)",
+          "SELECT (org_id)",
+          "SELECT (role)",
+          "SELECT (status)",
+          "UPDATE (status)"
+        ],
+        "why": "Script only, no sec.* function reads it (AG-1.19): under SET LOCAL ROLE tinnox_definer, provision-member pending expires old invites (UPDATE (status)) and lists the pending ones of every organisation, and provision-member fulfil finds an invite's organisation. invited_by is granted (0013) and no definer statement reads it: a line to drop in a new migration (SCR-27)."
+      },
+      "table public.membership": {
+        "privileges": ["SELECT", "UPDATE (first_signed_in_at)", "UPDATE (sessions_valid_after)"],
+        "why": "SELECT: sec.membership_by_oidc_sub, sec.session_create, sec.session_by_id_hash, sec.pairing_claim and sec.pairing_complete look a member up, and provision-member finds a member's organisation by id or subject under SET LOCAL ROLE tinnox_definer. UPDATE (first_signed_in_at): sec.session_create stamps the first sign-in, and its FOR NO KEY UPDATE lock needs UPDATE on one column. UPDATE (sessions_valid_after): sec.session_revoke_membership and scripts/revoke-subject-sessions.sql set the cut-off; the FOR SHARE lock of sec.pairing_complete rests on it too (AG-1.18)."
+      },
+      "table public.organization": {
+        "privileges": ["SELECT"],
+        "why": "sec.membership_by_oidc_sub and sec.session_by_id_hash return the organisation's name, sec.display_alert_orgs lists every id for the alert check, and provision-member pending prints the organisation of each invite."
+      },
+      "table public.pairing_claim_failure": {
+        "privileges": ["DELETE", "INSERT", "SELECT", "UPDATE"],
+        "why": "sec.pairing_claim counts, records and purges an operator's wrong codes. tinnox_app has no rights on the table. UPDATE is granted (0001) and no function or script uses it: a line to drop in a new migration (SCR-27)."
+      },
+      "table public.pairing_session": {
+        "privileges": ["DELETE", "INSERT", "SELECT", "UPDATE"],
+        "why": "The sec.pairing_* functions are the only way to it: pairing_create inserts, pairing_poll, pairing_claim, pairing_complete and pairing_cancel_claims read and update, pairing_purge deletes. tinnox_app has no rights on the table."
+      },
+      "table public.player_registration": {
+        "privileges": ["INSERT", "SELECT", "UPDATE (revoked_at)", "UPDATE (revoked_reason)"],
+        "why": "sec.device_by_token_hash and sec.device_by_registration_id resolve a device credential before the organisation is known; sec.pairing_complete inserts the registration; sec.pairing_claim revokes the one it replaces (revoked_at, revoked_reason)."
+      },
+      "table public.session": {
+        "privileges": ["DELETE", "INSERT", "SELECT", "UPDATE"],
+        "why": "The sec.session_* functions are the only way to it: session_create inserts, session_by_id_hash, session_revoke and session_revoke_membership update, session_purge_expired updates and deletes. scripts/revoke-all-sessions.sql and scripts/revoke-subject-sessions.sql update it under SET LOCAL ROLE tinnox_definer. tinnox_app has no rights on the table."
+      }
+    }
+  }
+}

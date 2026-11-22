@@ -107,11 +107,11 @@ describe('function hardening', () => {
               has_function_privilege('tinnox_app', p.oid, 'EXECUTE') AS app_exec
        FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'sec' ORDER BY 1`,
     );
-    // 14 from migration 0002, two lookups from 0003_api_lookups.sql,
-    // heartbeat_log_purge from 0004_review_hardening.sql, pairing_cancel_claims from
-    // 0010_pairing_hardening.sql, session_revoke_membership from 0013_roles_and_members.sql, and
-    // display_alert_orgs and alert_recipient_by_token_hash from 0014_display_alerts.sql.
-    expect(rows.length).toBe(21);
+    // Which functions exist is held by the register (catalogue/sec-functions.ts), which
+    // catalogue.integration.test.ts compares with this schema and which asks for a reason; a
+    // count here would be a second edit that asks for none (AG-1.16). This only keeps the loop
+    // from passing over nothing.
+    expect(rows.length).toBeGreaterThan(0);
     for (const r of rows) {
       expect(r, r.proname).toMatchObject({
         prosecdef: true,

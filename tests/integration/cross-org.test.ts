@@ -727,32 +727,6 @@ describe('organisation isolation through the API', () => {
   });
 
   it('holds at the database: the runtime role sees nothing without a context and only its own rows with one', async () => {
-    const TABLES = [
-      'organization',
-      'membership',
-      'site',
-      'display',
-      'player_registration',
-      'media',
-      'folder',
-      'tag',
-      'media_tag',
-      'display_tag',
-      'playlist',
-      'playlist_item',
-      'schedule',
-      'schedule_event',
-      'layout',
-      'layout_zone',
-      'publication',
-      'publication_asset',
-      'display_delivery',
-      'heartbeat_log',
-      'audit_event',
-      'member_invite',
-      'alert_recipient',
-      'display_alert',
-    ];
     // Both organisations have a row in every tenant table, heartbeat log included, and an open
     // alert episode once both screens have been silent past the 30-minute default.
     expect((await sendHeartbeat(t, b.player, heartbeatBody(b.displayId, Date.now()))).status).toBe(
@@ -771,8 +745,21 @@ describe('organisation isolation through the API', () => {
       );
       expect(role.rows[0]).toEqual({ current_user: 'tinnox_app', bypass: false, super: false });
 
+      // Every table the runtime role can read, asked of the database: a typed list once left
+      // `app` out. packages/db/test/catalogue.integration.test.ts holds that these are exactly
+      // the tenant tables.
+      const readable = await client.query<{ name: string }>(
+        `SELECT c.oid::regclass::text AS name
+         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
+           AND (has_table_privilege(c.oid, 'SELECT') OR has_any_column_privilege(c.oid, 'SELECT'))
+         ORDER BY 1`,
+      );
+      const tables = readable.rows.map((row) => row.name);
+      expect(tables).toEqual(expect.arrayContaining(['organization', 'app', 'audit_event']));
+
       // No WHERE clause anywhere below: only the policies decide what comes back.
-      for (const table of TABLES) {
+      for (const table of tables) {
         const none = await client.query(`SELECT * FROM ${table}`);
         expect(none.rowCount, `${table} without context`).toBe(0);
       }
@@ -782,7 +769,7 @@ describe('organisation isolation through the API', () => {
       ] as const) {
         await client.query('BEGIN');
         await client.query("SELECT set_config('app.org_id', $1, true)", [mine.orgId]);
-        for (const table of TABLES) {
+        for (const table of tables) {
           const column = table === 'organization' ? 'id' : 'org_id';
           const rows = await client.query<{ org: string }>(`SELECT ${column} AS org FROM ${table}`);
           expect(rows.rowCount, `${table} for its own organisation`).toBeGreaterThan(0);
