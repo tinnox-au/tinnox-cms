@@ -93,8 +93,9 @@ describe('production start-up', () => {
   });
 
   it('still refuses when only one development setting is left', async () => {
-    const strong = (): string =>
-      'k'.repeat(8) + Math.random().toString(36).slice(2) + 'Zq9'.repeat(12);
+    // Fixed values, so a failing run can be replayed; the name keeps them distinct, as the
+    // configuration requires of the three signing secrets.
+    const strong = (name: string): string => 'k'.repeat(8) + name + 'Zq9'.repeat(12);
     const production: Record<string, string> = {
       ...devEnv,
       NODE_ENV: 'production',
@@ -105,10 +106,10 @@ describe('production start-up', () => {
       OIDC_REDIRECT_URI: 'https://portal.cms.example/api/auth/callback',
       OIDC_POST_LOGOUT_REDIRECT_URI: 'https://portal.cms.example/',
       OIDC_MFA_ACR_VALUES: 'mfa',
-      OIDC_CLIENT_SECRET: strong(),
-      SESSION_SECRET: strong(),
-      MEDIA_URL_HMAC_SECRET: strong(),
-      PAIRING_CLIENT_KEY_SECRET: strong(),
+      OIDC_CLIENT_SECRET: strong('oidc'),
+      SESSION_SECRET: strong('session'),
+      MEDIA_URL_HMAC_SECRET: strong('media'),
+      PAIRING_CLIENT_KEY_SECRET: strong('pairing'),
     };
     const cases: [string, Record<string, string>, string][] = [
       [

@@ -139,7 +139,9 @@ describe('player protocol', () => {
     });
 
     // Many reports racing each other: the stored state is always the highest sequence number.
-    const burst = Array.from({ length: 20 }, (_, i) => 11 + i).sort(() => Math.random() - 0.5);
+    // 11 to 30 in a fixed scrambled order (a stride of 7 over 20 visits each once), so a
+    // failing order can be replayed; the requests still race each other.
+    const burst = Array.from({ length: 20 }, (_, i) => 11 + ((i * 7) % 20));
     await Promise.all(burst.map((seq) => heartbeat(player, playing(seq, seq % 3))));
     view = await status(display.id);
     expect(view.active).toEqual({ publicationId, itemIndex: 30 % 3 });
