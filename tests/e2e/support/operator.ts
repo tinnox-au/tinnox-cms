@@ -151,6 +151,26 @@ export interface StatusView {
   readonly errors: readonly { code: string; publicationId: string | null }[];
 }
 
+/**
+ * Asserts that a list endpoint answers 200 with an `items` array, and only then that the
+ * answer mentions none of `absent` (U-17). An absence read from a refusal or an error page
+ * would pass for any id, so the status and the shape are the positive control.
+ */
+export async function expectListedWithout(
+  api: OperatorApi,
+  path: string,
+  absent: readonly string[],
+): Promise<void> {
+  const response = await api.get(path);
+  const text = await response.text();
+  expect(response.status(), `GET ${path}: ${text}`).toBe(200);
+  const body = JSON.parse(text) as { items?: unknown };
+  expect(Array.isArray(body.items), `GET ${path} answers a list of items`).toBe(true);
+  for (const value of absent) {
+    expect(text, `GET ${path} must not mention ${value}`).not.toContain(value);
+  }
+}
+
 /** Calls the API through the portal origin, as the signed-in browser context. */
 export class OperatorApi {
   readonly #context: BrowserContext;

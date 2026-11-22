@@ -82,7 +82,8 @@ async function open(path: string, heading: string | RegExp): Promise<void> {
   const page = operator.page;
   await page.goto(`${PORTAL_URL}${path}`);
   await expect(pageHeading(page, heading)).toBeVisible();
-  await page.waitForLoadState('networkidle').catch(() => undefined);
+  // A page that never settles fails here rather than being scanned half-loaded.
+  await page.waitForLoadState('networkidle');
   await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
 }
 

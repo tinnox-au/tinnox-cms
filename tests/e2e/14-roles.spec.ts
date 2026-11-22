@@ -17,7 +17,7 @@ import { expect, test, type APIResponse, type Page, type Request } from '@playwr
 import { inviteReference, type InviteDto, type MemberDto, type Role } from '@tinnox/contracts';
 import { encodePng } from '../support/png.ts';
 import { operatorSession, type OperatorSession } from './support/contexts.ts';
-import { reauthenticate, type OperatorApi } from './support/operator.ts';
+import { expectListedWithout, reauthenticate, type OperatorApi } from './support/operator.ts';
 import {
   addToPlaylist,
   assignFromEditor,
@@ -197,16 +197,15 @@ test.beforeAll(async ({ browser }) => {
 });
 
 test.afterAll(async () => {
+  // A restore that fails fails the run: later specs and the next run would meet changed roles
+  // in the shared E2E database (adoption plan section 4.1). The contexts close either way.
   try {
     await restoreSeededState();
-  } catch (error) {
-    console.warn(
-      `could not restore the seeded roles: ${error instanceof Error ? error.message : 'unknown'}`,
-    );
-  }
-  // beforeAll may have failed before every person signed in.
-  for (const session of [owner, admin, editor, viewer] as (OperatorSession | undefined)[]) {
-    await session?.context.close();
+  } finally {
+    // beforeAll may have failed before every person signed in.
+    for (const session of [owner, admin, editor, viewer] as (OperatorSession | undefined)[]) {
+      await session?.context.close();
+    }
   }
 });
 
@@ -317,9 +316,7 @@ test('a Viewer sees no control that changes anything, and the API refuses their 
     }),
     'POST /api/invites',
   );
-  expect(await (await viewer.api.get('/api/playlists')).text()).not.toContain(
-    `E2E refused ${runId}`,
-  );
+  await expectListedWithout(viewer.api, '/api/playlists', [`E2E refused ${runId}`]);
   const kept = (await (await viewer.api.get(`/api/playlists/${viewPlaylistId}`)).json()) as {
     name: string;
     items: unknown[];

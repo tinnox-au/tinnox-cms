@@ -85,6 +85,24 @@ Before either suite: `npm run setup`, `npm run infra:up`, and for E2E also
 `npm run db:migrate` and `npm run db:seed -- --second-org`. For E2E the API (4000), the
 portal (5173) and the player (5174) must **not** be running: Playwright starts them.
 
+## A run is green only when every test ran
+
+A skipped, todo or focused test is a red run (U-15): the lint refuses the declared forms, and
+two checks catch what happens at run time. `vitest.config.ts` adds
+`scripts/vitest-results-reporter.ts` to the reporters, which fails a unit, component or
+integration run that reports a test skipped, todo or never started (`ctx.skip()` included; a
+run filtered with `-t` is not checked). When every file of a project ran, the reporter also
+fails it below its floor under `"vitest"` in `test-counts.json` (a describe or a loop that
+lost its tests); raise the floor as the project grows. After the browser suite, `npm run check:test-results`
+reads `tests/.run/e2e-results.json` and fails on a test skipped at run time
+(`testInfo.skip()`), one that did not run behind a failure in a serial file, a flaky one, a
+failure, an error outside any test (such as a global teardown that could not sign a session
+out), and a spec file whose number of tests is not the one in `test-counts.json`: change that
+count in the same change that adds or deletes a test. `skip-allowlist.json` may excuse a test
+that did not run or was flaky until its review date, with an owner and a reason; a skip has no
+entry. The CI e2e job runs the check whether the suite passed or failed, and keeps the result
+file. Run the check on a full run: a run of some spec files fails the counts.
+
 ## What is substituted, and where
 
 - `integration/`: operator sessions are created through the same `sec.session_create`

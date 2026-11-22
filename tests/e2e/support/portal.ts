@@ -418,6 +418,24 @@ export async function pushFromHeader(page: Page, screenIds: readonly string[]): 
   return text;
 }
 
+/**
+ * Closes the push dialog without pushing. Its closing button depends on every screen of the
+ * organisation, not only the one under test: "Cancel" (`push-cancel`) while any listed screen
+ * has a change waiting, else a single "Close" or "Done" (`push-done`, PushDialog's `done`).
+ * Clicking `push-cancel` after a push therefore passed only while another spec had left a
+ * screen waiting (LYX-05). Use this only where no screen under test has a change waiting
+ * (after a push); while one has, click `push-cancel` itself, which also proves the dialog
+ * saw the waiting change.
+ */
+export async function closePushDialog(page: Page): Promise<void> {
+  const body = page.getByTestId('push-dialog-body');
+  await expect(body).toBeVisible();
+  await expect(body.getByTestId('push-loading')).toHaveCount(0);
+  // The dialog renders exactly one of the two.
+  await page.getByTestId('push-cancel').or(page.getByTestId('push-done')).click();
+  await expect(body).toBeHidden();
+}
+
 /** Opens the push dialog from the header and returns one screen's row, without pushing. */
 export async function pushRow(page: Page, screenId: string): Promise<Locator> {
   await page.getByTestId('push-button').click();

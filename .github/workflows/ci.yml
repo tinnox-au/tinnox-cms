@@ -127,8 +127,14 @@ jobs:
       - run: npm run db:seed -- --second-org
       # Playwright builds the portal and the player and starts them and the API itself.
       - run: npm run test:e2e
+      # Playwright exits 0 with a test skipped at run time or a spec file missing. The gate reads
+      # its result file whether the suite passed or failed, so it also names the tests that did
+      # not run behind a failure (U-15, scripts/check-test-results.ts, tests/test-counts.json).
+      - name: Every expected test ran once and passed
+        if: ${{ !cancelled() }}
+        run: npm run check:test-results
       - name: Keep the result file (test names and outcomes only; traces and videos are off)
-        if: ${{ failure() }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: e2e-results
