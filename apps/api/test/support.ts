@@ -42,7 +42,7 @@ import sharp from 'sharp';
 import { runDisplayAlerts, type DisplayAlertDeps, type DisplayAlertResult } from '../src/alerts.ts';
 import { buildApp } from '../src/app.ts';
 import { IdentityProviderError, type IdentityProvider } from '../src/auth/oidc.ts';
-import { loadConfig, type AppConfig } from '../src/config.ts';
+import { loadConfig, RUNTIME_ENV_NAMES, type AppConfig } from '../src/config.ts';
 import type { AppContext } from '../src/context.ts';
 import type { MailMessage, Mailer } from '../src/mail.ts';
 import { MediaPipeline } from '../src/media/pipeline.ts';
@@ -61,6 +61,17 @@ function need(name: string): string {
     throw new Error(`${name} is not set; run "npm run setup" and "npm run infra:up"`);
   }
   return value;
+}
+
+/**
+ * The names of `env` that the API reads (RUNTIME_ENV_NAMES in src/config.ts). A test that starts
+ * a real entry point gives it this, never the whole root .env: that file also holds the
+ * administrator credentials, which loadConfig refuses in the process environment (D5).
+ */
+export function apiEnvironment(env: Readonly<Record<string, string>>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(env).filter(([name]) => RUNTIME_ENV_NAMES.includes(name)),
+  );
 }
 
 export const PORTAL_ORIGIN = 'http://localhost:5173';

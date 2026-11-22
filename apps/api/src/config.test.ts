@@ -1,5 +1,17 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { LIMIT_ENV_VARS } from '@tinnox/contracts';
 import { describe, expect, it } from 'vitest';
-import { ConfigError, loadConfig, REVIEWED_SMTP_HOSTS, type LoadConfigOptions } from './config.ts';
+import {
+  ConfigError,
+  isAdministratorName,
+  loadConfig,
+  REPO_ROOT,
+  REVIEWED_SMTP_HOSTS,
+  RUNTIME_ENV_NAMES,
+  runtimeEnv,
+  type LoadConfigOptions,
+} from './config.ts';
 
 const strong = (label: string): string => `${label}-9f2c7a1d4b8e6035a7c1d9e2f4b6a8c0e1d3f5a7`;
 
@@ -322,6 +334,187 @@ describe('production mail host (D23, DEC-13)', () => {
         ).toEqual([]);
       }
     }
+  });
+});
+
+describe('the allow-listed configuration input (D5, AG-1.9, AG-1.17)', () => {
+  // The names .env.example sets: what `npm run setup` writes into the root .env. Read line by
+  // line: parseEnv of Node 23.10 takes a last commented line (`# NAME=value`) for a name.
+  const documented = [
+    ...readFileSync(join(REPO_ROOT, '.env.example'), 'utf8').matchAll(/^([A-Z][A-Z0-9_]*)=/gm),
+  ]
+    .map((match) => match[1] ?? '')
+    .sort();
+  const administratorNames = documented.filter(isAdministratorName);
+  // Made up here: nothing may print them.
+  const credential = (name: string): string => `value-of-${name.toLowerCase()}-7c1d9e2f4b6a8c0e`;
+
+  it('reads the keys of EnvSchema and the LIMIT_ names, and no administrator name', () => {
+    for (const name of ['DATABASE_URL', 'SESSION_SECRET', 'SMTP_PASSWORD', 'TRUST_PROXY']) {
+      expect(RUNTIME_ENV_NAMES).toContain(name);
+    }
+    for (const name of Object.values(LIMIT_ENV_VARS)) expect(RUNTIME_ENV_NAMES).toContain(name);
+    expect(RUNTIME_ENV_NAMES.filter(isAdministratorName)).toEqual([]);
+  });
+
+  it('finds every administrator name of .env.example, and none is a name the API reads', () => {
+    expect(administratorNames).toEqual([
+      'DATABASE_MIGRATOR_URL',
+      'KC_BOOTSTRAP_ADMIN_PASSWORD',
+      'POSTGRES_SUPERUSER_PASSWORD',
+      'PROVISION_IDP_CLIENT_ID',
+      'PROVISION_IDP_CLIENT_SECRET',
+      'TEST_DATABASE_MIGRATOR_URL',
+      'TINNOX_MIGRATOR_PASSWORD',
+    ]);
+    for (const name of administratorNames) expect(RUNTIME_ENV_NAMES).not.toContain(name);
+    // The optional one that .env.example only mentions in a comment.
+    expect(isAdministratorName('PROVISION_IDP_ISSUER')).toBe(true);
+  });
+
+  it("has a decision for every name of .env.example: read by the API, refused, or another tool's", () => {
+    // Names of the containers, the seed and the tests. They hold no administrator credential,
+    // and the API does not read them. A new name in .env.example belongs in EnvSchema (the API
+    // reads it), in the administrator names of config.ts (the API refuses it) or here.
+    const otherTools = [
+      'DEV_ADMIN_OIDC_SUB',
+      'DEV_EDITOR_OIDC_SUB',
+      'DEV_OPERATOR_OIDC_SUB',
+      'DEV_SECOND_ORG_OIDC_SUB',
+      'DEV_VIEWER_OIDC_SUB',
+      'KC_BOOTSTRAP_ADMIN_USERNAME',
+      'POSTGRES_HOST_PORT',
+      'TEST_DATABASE_URL',
+      'TINNOX_APP_PASSWORD',
+    ];
+    expect(
+      documented.filter((name) => !RUNTIME_ENV_NAMES.includes(name) && !isAdministratorName(name)),
+    ).toEqual(otherTools);
+  });
+
+  it.each(['development', 'test', 'production'])(
+    'refuses each administrator name in %s, by name and without its value',
+    (mode) => {
+      const base = mode === 'production' ? production : { ...development, NODE_ENV: mode };
+      expect(problems(base)).toEqual([]);
+      for (const name of [...administratorNames, 'PROVISION_IDP_ISSUER']) {
+        const found = problems({ ...base, [name]: credential(name) });
+        expect(found, name).toHaveLength(1);
+        expect(found[0], name).toMatch(new RegExp(`^${name} is set in the environment`));
+        expect(found[0], name).toContain(
+          'Start the process with its own environment, not the whole root .env',
+        );
+        expect(found[0], name).toContain('RUNTIME_ENV_NAMES in apps/api/src/config.ts');
+        expect(found[0], name).not.toContain(credential(name));
+      }
+    },
+  );
+
+  it('names every administrator name at once, beside the other problems', () => {
+    const whole = Object.fromEntries(administratorNames.map((name) => [name, credential(name)]));
+    const found = problems({ ...development, ...whole, DATABASE_URL: undefined });
+    expect(found).toHaveLength(2);
+    expect(found[0]).toMatch(new RegExp(`^${administratorNames.join(', ')} are set in`));
+    expect(found[1]).toContain('DATABASE_URL');
+    for (const name of administratorNames) {
+      expect(found.join(' ')).not.toContain(credential(name));
+    }
+  });
+
+  it('treats a blank administrator name as not set, like every other name', () => {
+    expect(
+      problems({ ...development, DATABASE_MIGRATOR_URL: '', PROVISION_IDP_ISSUER: ' ' }),
+    ).toEqual([]);
+  });
+
+  it('builds the same configuration whatever other names the environment holds', () => {
+    const others = {
+      PATH: '/usr/bin',
+      TEST_DATABASE_URL: 'postgres://tinnox_app:other@127.0.0.1:1/other_test',
+      TINNOX_APP_PASSWORD: 'other',
+      DEV_OPERATOR_OIDC_SUB: '00000000-0000-4000-8000-000000000000',
+      MAX_UPLOAD_BYTES: '1',
+    };
+    expect(loadConfig({ ...development, ...others })).toEqual(loadConfig(development));
+  });
+
+  describe('runtimeEnv', () => {
+    const file = {
+      ...development,
+      LOG_LEVEL: 'debug',
+      SMTP_HOST: '127.0.0.1',
+      MAIL_FROM: 'alerts@tinnox-dev.invalid',
+      LIMIT_MAX_PLAYLIST_ITEMS: '50',
+      TEST_DATABASE_URL: 'postgres://tinnox_app:other@127.0.0.1:1/other_test',
+      ...Object.fromEntries(administratorNames.map((name) => [name, credential(name)])),
+    };
+
+    it('takes the names the API reads from the root .env, and nothing else', () => {
+      const env = runtimeEnv({}, file);
+      expect(Object.keys(env).sort()).toEqual(
+        [
+          ...Object.keys(development),
+          'LIMIT_MAX_PLAYLIST_ITEMS',
+          'LOG_LEVEL',
+          'MAIL_FROM',
+          'SMTP_HOST',
+        ].sort(),
+      );
+      // The whole development file, administrator credentials included, starts the API.
+      const config = loadConfig(env);
+      expect(config.logLevel).toBe('debug');
+      expect(config.limits.maxPlaylistItems).toBe(50);
+      expect(config.mail?.host).toBe('127.0.0.1');
+    });
+
+    it('lets the process environment win, even with an empty value', () => {
+      const env = runtimeEnv({ LOG_LEVEL: 'warn', SMTP_HOST: '', PATH: '/usr/bin' }, file);
+      expect(env['LOG_LEVEL']).toBe('warn');
+      expect(env['SMTP_HOST']).toBe('');
+      expect(env['PATH']).toBe('/usr/bin');
+      const config = loadConfig(env);
+      expect(config.logLevel).toBe('warn');
+      expect(config.mail).toBeNull();
+    });
+
+    it('passes an administrator name of the process environment on, so loadConfig refuses it', () => {
+      const name = 'DATABASE_MIGRATOR_URL';
+      const found = problems(runtimeEnv({ [name]: credential(name) }, file));
+      expect(found).toHaveLength(1);
+      expect(found[0]).toMatch(/^DATABASE_MIGRATOR_URL is set in the environment/);
+    });
+
+    it('is the process environment alone where there is no root .env (a deployment)', () => {
+      expect(runtimeEnv(production, {})).toEqual(production);
+    });
+  });
+});
+
+describe('DATABASE_URL start-up settings', () => {
+  it.each(['options', 'statement_timeout', 'lock_timeout', 'idle_in_transaction_session_timeout'])(
+    "refuses %s in the query, which pg would put in place of createPool's own",
+    (parameter) => {
+      const marker = 'value-that-must-not-be-printed';
+      for (const base of [development, production]) {
+        const found = problems({
+          ...base,
+          DATABASE_URL: `${base['DATABASE_URL']}?${parameter}=${marker}`,
+        });
+        expect(found).toHaveLength(1);
+        expect(found[0]).toMatch(new RegExp(`^DATABASE_URL sets ${parameter} in its query`));
+        expect(found[0]).toContain('remove that parameter from the connection string');
+        expect(found[0]).not.toContain(marker);
+      }
+    },
+  );
+
+  it('leaves other query parameters alone', () => {
+    expect(
+      problems({
+        ...production,
+        DATABASE_URL: `${production['DATABASE_URL']}?sslmode=verify-full`,
+      }),
+    ).toEqual([]);
   });
 });
 

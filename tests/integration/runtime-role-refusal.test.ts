@@ -8,7 +8,13 @@
  */
 import pg from 'pg';
 import { describe, expect, it } from 'vitest';
-import { developmentEnv, freePort, listening, runApiEntryPoint } from './support.ts';
+import {
+  apiEnvironment,
+  developmentEnv,
+  freePort,
+  listening,
+  runApiEntryPoint,
+} from './support.ts';
 
 function need(name: string): string {
   const value = process.env[name];
@@ -36,7 +42,8 @@ function loginBehindAppUrl(user: string, password: string): string {
 }
 
 describe('start-up refuses a database session that is not the runtime role (AG-1.3)', () => {
-  const devEnv = developmentEnv();
+  // The names the API reads: it refuses the administrator credentials the whole file holds (D5).
+  const devEnv = apiEnvironment(developmentEnv());
   const migrator = new URL(need('TEST_DATABASE_MIGRATOR_URL'));
   const migratorPassword = decodeURIComponent(migrator.password);
   const superuserPassword = need('POSTGRES_SUPERUSER_PASSWORD');

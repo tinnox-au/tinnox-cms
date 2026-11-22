@@ -32,6 +32,8 @@ npm run verify:oidc                 # optional: proves the Keycloak sign-in (PKC
 
 `npm run setup` creates random development secrets (all start with `dev-`) in `.env` and `infra/.generated/`. Both are gitignored; never commit them. The API refuses to start with them when `NODE_ENV=production`.
 
+The same `.env` also holds the credentials of the migration role, the PostgreSQL superuser, the Keycloak administrator and the provisioning script. The API and its alert job (`npm run dev`, `npm run start -w @tinnox/api`, `npm run alerts:once -w @tinnox/api`) are not started with that file: they read from it only the names in `RUNTIME_ENV_NAMES` (`apps/api/src/config.ts`), and a variable set in the shell wins. In every mode they refuse to start when one of those administrator credentials is in their process environment, so do not export `.env` into the shell that starts them.
+
 ### Start
 
 ```sh

@@ -4,7 +4,13 @@
  * and tests/integration/runtime-role-refusal.test.ts starts both entry points against it.
  */
 import { describe, expect, it } from 'vitest';
-import { RuntimeRoleError, runtimeRoleProblems, type RuntimeRoleFacts } from './pool.ts';
+import {
+  createPool,
+  RuntimeRoleError,
+  runtimeRoleProblems,
+  startupSettingsProblem,
+  type RuntimeRoleFacts,
+} from './pool.ts';
 
 const RUNTIME: RuntimeRoleFacts = {
   currentUser: 'tinnox_app',
@@ -79,5 +85,62 @@ describe('runtimeRoleProblems (AG-1.3)', () => {
     const error = new RuntimeRoleError(['one', 'two']);
     expect(error.problems).toEqual(['one', 'two']);
     expect(error.message).toBe('one; two');
+  });
+});
+
+describe('startupSettingsProblem: a connection string must not replace what createPool sends', () => {
+  // Made up, and plainly a placeholder so the secret scan does not take it for a real one:
+  // no problem text may carry it.
+  const PASSWORD = 'not-a-real-one';
+  const BASE = `postgres://tinnox_app:${PASSWORD}@127.0.0.1:5432/tinnox`;
+
+  it('accepts a connection string with no query, or with transport parameters only', () => {
+    for (const url of [
+      BASE,
+      `${BASE}?sslmode=verify-full`,
+      `${BASE}?application_name=other&ssl=true`,
+      // A socket directory and a database name: pg reads no query from this form.
+      '/var/run/postgresql tinnox',
+    ]) {
+      expect(startupSettingsProblem(url)).toBeNull();
+    }
+  });
+
+  it.each(['options', 'statement_timeout', 'lock_timeout', 'idle_in_transaction_session_timeout'])(
+    'refuses %s, names it and says what to do, without the connection string or the value',
+    (parameter) => {
+      const problem = startupSettingsProblem(`${BASE}?sslmode=require&${parameter}=marker-0`);
+      expect(problem).toMatch(
+        new RegExp(`^the database connection string sets ${parameter} in its query`),
+      );
+      expect(problem).toContain('remove that parameter from the connection string');
+      expect(problem).not.toContain(PASSWORD);
+      expect(problem).not.toContain('marker-0');
+    },
+  );
+
+  it('names every parameter found, and the variable when the caller gives one', () => {
+    const problem = startupSettingsProblem(
+      `${BASE}?lock_timeout=0&options=-c%20row_security%3Doff`,
+      'DATABASE_URL',
+    );
+    expect(problem).toMatch(/^DATABASE_URL sets options, lock_timeout in its query/);
+    expect(problem).toContain('remove those parameters from the connection string');
+  });
+
+  it('reads the query as pg does: an encoded name, a URL without a host, a socket URL', () => {
+    for (const url of [
+      `${BASE}?%6Fptions=-c%20role%3Dtinnox_definer`,
+      `postgres://tinnox_app:${PASSWORD}@/tinnox?options=-c%20row_security%3Doff`,
+      'socket:/var/run/postgresql?db=tinnox&options=-c%20row_security%3Doff',
+    ]) {
+      expect(startupSettingsProblem(url), url.replace(PASSWORD, '***')).toMatch(/ sets options /);
+    }
+  });
+
+  it('createPool refuses such a connection string when the pool is created, before any connection', () => {
+    expect(() =>
+      createPool({ connectionString: `${BASE}?options=-c%20row_security%3Doff` }),
+    ).toThrow(/^the database connection string sets options in its query/);
   });
 });

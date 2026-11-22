@@ -3,12 +3,20 @@
  * and the development configuration, must exit without ever listening.
  */
 import { describe, expect, it } from 'vitest';
-import { developmentEnv, freePort, listening, runApiEntryPoint } from './support.ts';
+import {
+  apiEnvironment,
+  developmentEnv,
+  freePort,
+  listening,
+  runApiEntryPoint,
+} from './support.ts';
 
 const runApi = (env: Record<string, string>) => runApiEntryPoint('src/main.ts', env);
 
 describe('production start-up', () => {
-  const devEnv = developmentEnv();
+  // The names the API reads; the whole file would be refused for another reason (D5,
+  // administrator-credential-refusal.test.ts).
+  const devEnv = apiEnvironment(developmentEnv());
 
   it('has a generated development configuration to test with', () => {
     expect(devEnv['SESSION_SECRET'] ?? '').toMatch(/^dev-/);
@@ -31,15 +39,18 @@ describe('production start-up', () => {
     ]) {
       expect(result.output).toContain(expected);
     }
-    for (const name of [
+    const secrets: [string, string][] = [
       'SESSION_SECRET',
       'MEDIA_URL_HMAC_SECRET',
       'PAIRING_CLIENT_KEY_SECRET',
       'OIDC_CLIENT_SECRET',
-      'TINNOX_APP_PASSWORD',
-    ]) {
-      const value = devEnv[name] ?? '';
-      expect(value.length).toBeGreaterThan(8);
+    ].map((name) => [name, devEnv[name] ?? '']);
+    secrets.push([
+      'the DATABASE_URL password',
+      decodeURIComponent(new URL(devEnv['DATABASE_URL'] ?? '').password),
+    ]);
+    for (const [name, value] of secrets) {
+      expect(value.length, name).toBeGreaterThan(8);
       expect(result.output, `${name} must not be printed`).not.toContain(value);
     }
   });

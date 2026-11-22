@@ -117,9 +117,9 @@ const NO_OUTBOUND_GLOBAL_DESTRUCTURING = [
 
 // Configuration is read once, at an entry point, and passed down (apps/api/src/config.ts), so a
 // test can give any module its own values. The entry points and config modules named here are
-// the only readers: the API's two entry points (loadConfig(process.env)), the media worker's
-// entry point, and scripts/lib/env.ts (requireEnv) for the offline tools, whose top-level
-// scripts are entry points and outside this rule.
+// the only readers: the API's two entry points (loadConfig(runtimeEnv(process.env)), D5), the
+// media worker's entry point, and scripts/lib/env.ts (requireEnv) for the offline tools, whose
+// top-level scripts are entry points and outside this rule.
 const ENV_FILES = [
   'apps/*/src/**/*.{ts,tsx}',
   'packages/*/src/**/*.{ts,tsx}',
@@ -305,8 +305,7 @@ const textMatching = (regex) =>
   ].join(', ');
 
 // AG-1.9, AG-1.17 (D5): product code never names the migrator, superuser or provisioning
-// credentials. Step 12 adds loadConfig's refusal of these names, and with it the one override,
-// apps/api/src/config.ts; until then nothing may name them.
+// credentials. The one override is CREDENTIAL_NAME_REFUSERS below.
 const NO_CREDENTIAL_NAMES = [
   {
     selector: textMatching(
@@ -315,6 +314,15 @@ const NO_CREDENTIAL_NAMES = [
     message:
       'Product code never names the migrator, superuser or provisioning credentials (AG-1.9, AG-1.17): they must never reach the API, the media worker or the player. Use AppConfig.databaseUrl, which connects as tinnox_app; offline tools connect as tinnox_migrator through connectMigrator in scripts/.',
   },
+];
+
+// D5: the files that may spell those names, and why. A file joins only to refuse a name, never to
+// read its value.
+const CREDENTIAL_NAME_REFUSERS = [
+  // loadConfig refuses, in every mode, an environment that holds an administrator credential, and
+  // its message must say which name it found (isAdministratorName). It reads no value of one: the
+  // configuration is built from RUNTIME_ENV_NAMES only.
+  'apps/api/src/config.ts',
 ];
 
 // D4: the migrator URL is read only by the offline tools that connect as tinnox_migrator. Test
@@ -1105,6 +1113,17 @@ export default tseslint.config(
       'no-restricted-syntax': ['error', ...API_SYNTAX, ...outboundSyntax('apps/api', name)],
     },
   })),
+  {
+    // D5: the rest of the API's list is unchanged for the files that refuse the credential names.
+    files: CREDENTIAL_NAME_REFUSERS,
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...API_SYNTAX.filter((entry) => !NO_CREDENTIAL_NAMES.includes(entry)),
+        ...outboundSyntax('apps/api', null),
+      ],
+    },
+  },
   {
     // Scripts, the untyped .mjs ones included (this rule reads syntax only), but the offline tools
     // that connect as the migrator. Test files are outside, as everywhere (D4).

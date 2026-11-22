@@ -620,24 +620,51 @@ describe('credential names (AG-1.9, AG-1.17, D4, D5)', () => {
     /^Product code never names the migrator, superuser or provisioning credentials/;
   const MIGRATOR = /^Only the offline tools in MIGRATOR_URL_READERS of eslint\.config\.js/;
 
+  const NAMES = [
+    "requireEnv('DATABASE_MIGRATOR_URL');",
+    'const p = env.TINNOX_MIGRATOR_PASSWORD;',
+    "const s = 'POSTGRES_SUPERUSER_PASSWORD';",
+    'const k = `PROVISION_IDP_CLIENT_SECRET`;',
+  ];
+
   it.each([
     'apps/api/src/fixture.ts',
-    // No override yet: step 12 adds it with loadConfig's refusal (D5).
-    'apps/api/src/config.ts',
+    // The files beside the one override: the entry points that call it, and its neighbours.
+    'apps/api/src/config-fixture.ts',
+    'apps/api/src/alerts-once.ts',
+    'apps/api/src/mail.ts',
+    'apps/api/src/auth/oidc.ts',
     'apps/api/src/main.ts',
     'apps/media-worker/src/main.ts',
     'apps/portal/src/features/fixture.tsx',
     'apps/player-web/sw/sw.ts',
     'packages/db/src/migrate.ts',
   ])('flags them in %s', async (path) => {
-    for (const code of [
-      "requireEnv('DATABASE_MIGRATOR_URL');",
-      'const p = env.TINNOX_MIGRATOR_PASSWORD;',
-      "const s = 'POSTGRES_SUPERUSER_PASSWORD';",
-      'const k = `PROVISION_IDP_CLIENT_SECRET`;',
-    ]) {
+    for (const code of NAMES) {
       await expectOne(path, code, CREDENTIAL);
     }
+  });
+
+  it('allows them in apps/api/src/config.ts only, whose refusal names them (D5)', async () => {
+    const path = 'apps/api/src/config.ts';
+    for (const code of NAMES) {
+      expect(await flagged(path, code)).toEqual([]);
+    }
+  });
+
+  it('keeps the other API selectors and the process.env rule in apps/api/src/config.ts', async () => {
+    const path = 'apps/api/src/config.ts';
+    // The clock, a non-null assertion, an inline cast, an organisation id from the request, an
+    // outbound import() and loadConfig's test-only argument.
+    const messages = await flagged(
+      path,
+      [
+        'const t = Date.now(); const n = v!.a; const c = (e as { a: 1 }).a;',
+        "const o = request.body.orgId; await import('node:http'); loadConfig(env, options);",
+      ].join('\n'),
+    );
+    expect(messages).toHaveLength(6);
+    await expectOne(path, "const u = process.env['DATABASE_MIGRATOR_URL'];", /^'process\.env' is/);
   });
 
   it.each(['apps/api/src/config.test.ts', 'packages/db/test/support.ts'])(

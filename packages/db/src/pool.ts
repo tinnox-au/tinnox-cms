@@ -43,17 +43,21 @@ export interface CreatePoolOptions {
  * query or checkout that asked for it. A pool opens connections lazily, so a check made once
  * at creation would not cover the later ones. The cost is one round trip per new connection,
  * not per checkout. As in connectMigrator, current_user and session_user must both be
- * tinnox_app, so the superuser or the migrator acting as tinnox_app (-c role=) is refused.
+ * tinnox_app, so the superuser or the migrator acting as tinnox_app (a role default set with
+ * ALTER ROLE ... SET role) is refused.
  *
  * The timeouts and row security are sent as connection startup parameters, which take
  * precedence over role and database defaults. tinnox_app can change its own role
  * defaults (ALTER ROLE ... SET; PostgreSQL always allows that), so the API does not rely
  * on the defaults set in infra/postgres/init/01-roles.sh (review round 3, SCU-02).
+ * A connection string whose query would replace one of them is refused (startupSettingsProblem).
  */
 export function createPool(options: CreatePoolOptions): Pool {
   if (typeof options.connectionString !== 'string' || options.connectionString === '') {
     throw new Error('database connection string is not configured');
   }
+  const replaced = startupSettingsProblem(options.connectionString);
+  if (replaced !== null) throw new Error(replaced);
   const config: RuntimePoolConfig = {
     connectionString: options.connectionString,
     application_name: options.applicationName ?? 'tinnox',
@@ -71,6 +75,52 @@ export function createPool(options: CreatePoolOptions): Pool {
   // pg removes it from the pool and the next query gets a fresh connection.
   pool.on('error', () => undefined);
   return pool;
+}
+
+// The connection parameters createPool sends itself. `options` carries `-c name=value` for any
+// setting, search_path and row_security included.
+const STARTUP_SETTINGS = [
+  'options',
+  'statement_timeout',
+  'lock_timeout',
+  'idle_in_transaction_session_timeout',
+];
+
+/** The query of a connection string as pg-connection-string reads it, or null when it has none. */
+function queryOf(connectionString: string): URLSearchParams | null {
+  // A socket path and a database name: pg reads no query from this form.
+  if (connectionString.startsWith('/')) return null;
+  for (const text of [connectionString, connectionString.replace('@/', '@___DUMMY___/')]) {
+    try {
+      return new URL(text, 'postgres://base').searchParams;
+    } catch {
+      // pg tries the second form too (no host); a string neither parses is refused by pg itself.
+    }
+  }
+  return null;
+}
+
+/**
+ * Why `connectionString` cannot be a runtime connection string, or null. pg copies every query
+ * parameter of a connection string over the options a pool is created with, so
+ * `?options=-c row_security=off` would silently replace createPool's `-c row_security=on` (and
+ * may set any other setting), and `?statement_timeout=0` its timeout
+ * (packages/db/test/rls.integration.test.ts shows pg doing it). The text names the parameters
+ * and `what` only, never the connection string or a value.
+ */
+export function startupSettingsProblem(
+  connectionString: string,
+  what = 'the database connection string',
+): string | null {
+  const query = queryOf(connectionString);
+  const found = STARTUP_SETTINGS.filter((name) => query?.has(name) === true);
+  if (found.length === 0) return null;
+  return (
+    `${what} sets ${found.join(', ')} in its query, which would replace what createPool ` +
+    '(@tinnox/db) sends at connection start-up (row security on, and the statement, lock and ' +
+    `idle-in-transaction timeouts): remove ${found.length === 1 ? 'that parameter' : 'those parameters'} ` +
+    "from the connection string; the statement timeout of a pool is createPool's statementTimeoutMs"
+  );
 }
 
 /**

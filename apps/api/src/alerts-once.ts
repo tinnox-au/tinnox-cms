@@ -1,19 +1,20 @@
 /**
  * Runs the e-mail alert check once and exits: `npm run alerts:once -w @tinnox/api`, for a cloud
- * scheduler after deployment. Same configuration and role as the API (config.ts). Exits non-zero
- * when the configuration or the database role is refused, e-mail is not configured, the run
- * fails or an e-mail is refused. Safe beside running API instances (alerts.ts).
+ * scheduler after deployment. Same configuration, read the same way, and same role as the API
+ * (config.ts). Exits non-zero when the configuration or the database role is refused, e-mail is
+ * not configured, the run fails or an e-mail is refused. Safe beside running API instances
+ * (alerts.ts).
  */
 import { assertConnectionRole, assertRuntimeRole, createPool, RuntimeRoleError } from '@tinnox/db';
 import { runDisplayAlerts } from './alerts.ts';
-import { ConfigError, loadConfig } from './config.ts';
+import { ConfigError, loadConfig, runtimeEnv } from './config.ts';
 import { createLogger } from './logger.ts';
 import { createMailer } from './mail.ts';
 
 async function main(): Promise<number> {
   let config;
   try {
-    config = loadConfig(process.env);
+    config = loadConfig(runtimeEnv(process.env));
     assertConnectionRole(config.databaseUrl, 'tinnox_app');
   } catch (error) {
     // Problem text names variables only, never values.

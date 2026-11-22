@@ -76,7 +76,14 @@ export async function waitFor(
   }
 }
 
-/** Starts the API from source with the repository .env. Fails if something already listens on its port. */
+/**
+ * Starts the API from source. The process gets PATH and the settings below, and nothing else of
+ * this process's environment: global-setup.ts loaded the whole root .env into it for the
+ * database set-up, administrator credentials included, and the API refuses to start with one
+ * in its environment (D5 of the poteto pyramid plan). The API reads the other names it needs
+ * from the root .env itself (runtimeEnv in apps/api/src/config.ts), as `npm run start
+ * -w @tinnox/api` does. Fails if something already listens on its port.
+ */
 export async function startApi(): Promise<void> {
   mkdirSync(runDir, { recursive: true });
   if (await apiListening()) {
@@ -85,33 +92,29 @@ export async function startApi(): Promise<void> {
     );
   }
   const out = openSync(apiLog, 'a');
-  const child = spawn(
-    process.execPath,
-    ['--env-file=../../.env', '--import', 'tsx', 'src/main.ts'],
-    {
-      cwd: join(repoRoot, 'apps', 'api'),
-      detached: true,
-      stdio: ['ignore', out, out],
-      env: {
-        ...process.env,
-        // Its own database and media directory (support/database.ts). Variables set here
-        // win over ../../.env, which Node's --env-file never overrides.
-        DATABASE_URL: e2eUrls().app,
-        MEDIA_ROOT: e2eMediaRoot,
-        // One address creates every pairing session in this run; the limit itself is
-        // covered by the integration tests.
-        LIMIT_PAIRING_MAX_SESSIONS_PER_IP: '500',
-        // Always the local Mailpit (15-alerts.spec.ts reads it), whatever .env or the shell
-        // says. The empty values blank out inherited credentials (loadConfig treats '' as unset).
-        SMTP_HOST: '127.0.0.1',
-        SMTP_PORT: '1025',
-        SMTP_SECURE: 'false',
-        SMTP_USER: '',
-        SMTP_PASSWORD: '',
-        MAIL_FROM: 'alerts@tinnox-dev.invalid',
-      },
+  const child = spawn(process.execPath, ['--import', 'tsx', 'src/main.ts'], {
+    cwd: join(repoRoot, 'apps', 'api'),
+    detached: true,
+    stdio: ['ignore', out, out],
+    env: {
+      PATH: process.env['PATH'] ?? '',
+      // Its own database and media directory (support/database.ts). A variable set here wins
+      // over the root .env, even an empty one.
+      DATABASE_URL: e2eUrls().app,
+      MEDIA_ROOT: e2eMediaRoot,
+      // One address creates every pairing session in this run; the limit itself is
+      // covered by the integration tests.
+      LIMIT_PAIRING_MAX_SESSIONS_PER_IP: '500',
+      // Always the local Mailpit (15-alerts.spec.ts reads it), whatever .env says. The empty
+      // values blank out credentials set there (loadConfig treats '' as unset).
+      SMTP_HOST: '127.0.0.1',
+      SMTP_PORT: '1025',
+      SMTP_SECURE: 'false',
+      SMTP_USER: '',
+      SMTP_PASSWORD: '',
+      MAIL_FROM: 'alerts@tinnox-dev.invalid',
     },
-  );
+  });
   child.unref();
   if (child.pid === undefined) throw new Error('the API process did not start');
   writeFileSync(pidFile, String(child.pid));

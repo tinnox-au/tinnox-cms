@@ -2,7 +2,16 @@
  * Configuration loader. Reads the environment once, validates it with zod and
  * refuses unsafe combinations (prototype-m0.md D19, brief section 6).
  *
+ * The configuration is built from RUNTIME_ENV_NAMES (the keys of EnvSchema and the LIMIT_
+ * overrides) and from nothing else. The entry points pass runtimeEnv(process.env): the process
+ * environment, and under it those names, and only those, from the root .env (D5 of the poteto
+ * pyramid plan).
+ *
  * Rules that hold in every mode:
+ *   - no administrator credential (migrator, database superuser, Keycloak administrator,
+ *     provisioning) is in the environment the process was started with (AG-1.9, AG-1.17, D5);
+ *   - DATABASE_URL connects as tinnox_app and its query replaces none of createPool's start-up
+ *     settings;
  *   - plain http origins are accepted only for loopback hosts;
  *   - portal and player must be different origins (D7);
  *   - the redirect URI must be the callback route on the portal or API origin.
@@ -15,10 +24,19 @@
  *   - an MFA evidence requirement (acr or amr) must be configured;
  *   - SMTP_HOST, when set, must be in REVIEWED_SMTP_HOSTS (DEC-13, D23 of the poteto pyramid plan).
  */
+import { existsSync, readFileSync } from 'node:fs';
 import { isIP } from 'node:net';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { limitsFromEnv, ROUTES, SESSION_COOKIE, type Limits } from '@tinnox/contracts';
+import { parseEnv } from 'node:util';
+import {
+  LIMIT_ENV_VARS,
+  limitsFromEnv,
+  ROUTES,
+  SESSION_COOKIE,
+  type Limits,
+} from '@tinnox/contracts';
+import { startupSettingsProblem } from '@tinnox/db';
 import { z } from 'zod';
 
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
@@ -126,6 +144,83 @@ const EnvSchema = z.object({
     )
     .optional(),
 });
+
+/** An environment as a process or a .env file gives it. */
+export type Env = Readonly<Record<string, string | undefined>>;
+
+/**
+ * Every name the API and the alert job read: the keys of EnvSchema and the LIMIT_ overrides
+ * (D5 of the poteto pyramid plan). loadConfig builds the configuration from these names and
+ * ignores the rest of the map it is given; runtimeEnv takes no other name from the root .env.
+ */
+export const RUNTIME_ENV_NAMES: readonly string[] = Object.freeze([
+  ...Object.keys(EnvSchema.shape),
+  ...Object.values(LIMIT_ENV_VARS),
+]);
+
+// The credentials of the offline tools and the administrators (AG-1.9, AG-1.17, D5): the
+// migrator's connection strings and password, the database superuser's password, the Keycloak
+// administrator's password, and everything the provisioning script reads.
+const ADMINISTRATOR_NAMES: ReadonlySet<string> = new Set([
+  'DATABASE_MIGRATOR_URL',
+  'TEST_DATABASE_MIGRATOR_URL',
+  'TINNOX_MIGRATOR_PASSWORD',
+  'POSTGRES_SUPERUSER_PASSWORD',
+  'KC_BOOTSTRAP_ADMIN_PASSWORD',
+]);
+const PROVISIONING_PREFIX = 'PROVISION_';
+
+/**
+ * True for a name that must never be in the environment of the API or the alert job. A deny-list
+ * can only refuse the names it knows: what keeps a new administrator variable out of the
+ * configuration is RUNTIME_ENV_NAMES, which it is not on.
+ */
+export function isAdministratorName(name: string): boolean {
+  return ADMINISTRATOR_NAMES.has(name) || name.startsWith(PROVISIONING_PREFIX);
+}
+
+/** The refusal of an environment that holds administrator names; it carries names, never a value. */
+function administratorNamesProblem(names: readonly string[]): string | null {
+  const found = names.filter(isAdministratorName).sort();
+  if (found.length === 0) return null;
+  const one = found.length === 1;
+  return (
+    `${found.join(', ')} ${one ? 'is' : 'are'} set in the environment of this process. ` +
+    `${one ? 'It belongs' : 'They belong'} to the migrator, the database superuser, the Keycloak ` +
+    'administrator or the provisioning script, and must never reach the API or the alert job ' +
+    '(AG-1.9, AG-1.17). Start the process with its own environment, not the whole root .env: do ' +
+    'not export that file into the shell or pass it with --env-file. The entry points read the ' +
+    'names they need (RUNTIME_ENV_NAMES in apps/api/src/config.ts) from it themselves, and a ' +
+    'deployment sets only those'
+  );
+}
+
+const ROOT_ENV_FILE = join(REPO_ROOT, '.env');
+
+/** The root .env as `npm run setup` writes it on a development machine; empty when there is none. */
+function readRootEnvFile(): Env {
+  return existsSync(ROOT_ENV_FILE) ? parseEnv(readFileSync(ROOT_ENV_FILE, 'utf8')) : {};
+}
+
+/**
+ * The environment an entry point gives loadConfig: the process environment, and under it the
+ * RUNTIME_ENV_NAMES that the root .env sets. A name the process environment holds wins, even
+ * when it is empty (as with Node's --env-file, which the npm scripts used before D5), so a
+ * caller can blank a value of the file. Nothing else is read from the file: on a development
+ * machine it also holds the administrator credentials, which therefore never enter the process.
+ * The process environment passes through whole, so that loadConfig can refuse one that holds
+ * such a credential.
+ */
+export function runtimeEnv(processEnv: Env, file: Env = readRootEnvFile()): Env {
+  const env: Record<string, string | undefined> = {};
+  for (const name of RUNTIME_ENV_NAMES) {
+    if (file[name] !== undefined) env[name] = file[name];
+  }
+  for (const [name, value] of Object.entries(processEnv)) {
+    if (value !== undefined) env[name] = value;
+  }
+  return env;
+}
 
 export interface AppConfig {
   readonly nodeEnv: 'development' | 'test' | 'production';
@@ -261,7 +356,7 @@ function absoluteFromRepo(path: string): string {
  * every problem found; error text names variables, never their values.
  */
 export function loadConfig(
-  env: Readonly<Record<string, string | undefined>>,
+  env: Env,
   { reviewedSmtpHosts = REVIEWED_SMTP_HOSTS }: LoadConfigOptions = {},
 ): AppConfig {
   // Treat empty strings as "not set" so defaults apply.
@@ -269,16 +364,20 @@ export function loadConfig(
   for (const [key, value] of Object.entries(env)) {
     if (typeof value === 'string' && value.trim() !== '') cleaned[key] = value.trim();
   }
+  // In every mode, and first, so it is reported whatever else is wrong (D5).
+  const problems: string[] = [];
+  const administrator = administratorNamesProblem(Object.keys(cleaned));
+  if (administrator !== null) problems.push(administrator);
   const parsed = EnvSchema.safeParse(cleaned);
   if (!parsed.success) {
-    throw new ConfigError(
-      parsed.error.issues.map(
+    throw new ConfigError([
+      ...problems,
+      ...parsed.error.issues.map(
         (issue) => `${issue.path.join('.') || 'environment'} ${issue.message}`,
       ),
-    );
+    ]);
   }
   const e = parsed.data;
-  const problems: string[] = [];
   const production = e.NODE_ENV === 'production';
 
   let limits: Limits | undefined;
@@ -340,6 +439,9 @@ export function loadConfig(
     if (decodeURIComponent(db.username) !== 'tinnox_app') {
       problems.push('DATABASE_URL must connect as the runtime role tinnox_app');
     }
+    // createPool refuses it too; here it is reported with every other problem.
+    const startup = startupSettingsProblem(e.DATABASE_URL, 'DATABASE_URL');
+    if (startup !== null) problems.push(startup);
   } catch {
     problems.push('DATABASE_URL is not a valid URL');
   }

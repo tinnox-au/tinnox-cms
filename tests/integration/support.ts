@@ -209,8 +209,10 @@ export function freePort(): Promise<number> {
 
 /**
  * Runs a real entry point of the API (`src/main.ts`, `src/alerts-once.ts`) as a child process
- * with exactly `env` (and PATH), and resolves with its exit code and output. Rejects if it is
- * still running after 20 s: every caller expects it to refuse and exit.
+ * with exactly `env` (and PATH) as its environment, and resolves with its exit code and output.
+ * The entry point also reads the names it knows from the root `.env`, where `env` does not set
+ * them (runtimeEnv in apps/api/src/config.ts). Rejects if it is still running after 20 s: every
+ * caller expects it to refuse and exit.
  */
 export function runApiEntryPoint(
   script: string,
@@ -246,7 +248,10 @@ export async function listening(port: number): Promise<boolean> {
   }
 }
 
-/** The root `.env` (the generated development configuration), or nothing when it is missing. */
+/**
+ * The root `.env` (the generated development configuration), or nothing when it is missing.
+ * It holds the administrator credentials too: give an entry point `apiEnvironment` of it.
+ */
 export function developmentEnv(): Record<string, string> {
   const envFile = join(repoRoot, '.env');
   return existsSync(envFile)

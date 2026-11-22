@@ -1,6 +1,8 @@
 /**
- * API entry point. Start with `npm run dev -w @tinnox/api` (or `npm run start`),
- * which load ../../.env. Refuses to start on unsafe configuration (config.ts).
+ * API entry point. Start with `npm run dev -w @tinnox/api` (or `npm run start`). It reads its
+ * configuration from the process environment and, for the names config.ts lists, from the root
+ * .env; it is never started with that whole file (D5 of the poteto pyramid plan). Refuses to
+ * start on unsafe configuration (config.ts).
  */
 import { assertConnectionRole, assertRuntimeRole, createPool, RuntimeRoleError } from '@tinnox/db';
 import { createDeliveryRegistry } from '@tinnox/delivery';
@@ -8,7 +10,7 @@ import { LocalObjectStorage } from '@tinnox/storage';
 import { runDisplayAlerts } from './alerts.ts';
 import { buildApp } from './app.ts';
 import { createIdentityProvider } from './auth/oidc.ts';
-import { ConfigError, loadConfig, type AppConfig } from './config.ts';
+import { ConfigError, loadConfig, runtimeEnv, type AppConfig } from './config.ts';
 import type { AppContext } from './context.ts';
 import { runHousekeeping } from './housekeeping.ts';
 import { createLogger } from './logger.ts';
@@ -21,7 +23,7 @@ const ALERT_INTERVAL_MS = 60 * 1000;
 async function main(): Promise<void> {
   let config: AppConfig;
   try {
-    config = loadConfig(process.env);
+    config = loadConfig(runtimeEnv(process.env));
     assertConnectionRole(config.databaseUrl, 'tinnox_app');
   } catch (error) {
     // Problem text names variables only, never values.
