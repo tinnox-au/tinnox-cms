@@ -11,12 +11,31 @@
  *
  * The registers it compares with are in ./catalogue: grants.json, sec-functions.ts,
  * null-passing-checks.ts and member-references.ts.
+ *
+ * The rules the migration runner enforces on every database (the sec.* hardening, what
+ * tinnox_app and tinnox_definer own, forced row-level security, the tenant policy and enabled
+ * triggers: plan section 3.3, EAX-12) are not written here: they and their reader are
+ * packages/db/src/schema-invariants.ts, and this file calls them, so the check at deploy time
+ * and this test are one source.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { withOrg, type Pool } from '../src/index.ts';
+// Not part of the package's interface: only the runner and this file read them.
+import {
+  ownershipProblems as runnerOwnershipProblems,
+  readSchemaFacts,
+  rowSecurityProblems,
+  schemaInvariantProblems,
+  secFunctionProblems,
+  tenantOrgColumn as orgColumn,
+  tenantPolicy,
+  tenantPolicyProblems,
+  triggerProblems,
+  type TableFacts,
+} from '../src/schema-invariants.ts';
 import { MEMBER_REFERENCES } from './catalogue/member-references.ts';
 import { NULL_PASSING_CHECKS } from './catalogue/null-passing-checks.ts';
 import { SEC_FUNCTIONS } from './catalogue/sec-functions.ts';
@@ -30,12 +49,6 @@ const HERE = 'packages/db/test/catalogue.integration.test.ts';
 
 /** Every schema that is not PostgreSQL's own; `n` is a pg_namespace row. */
 const OURS = `n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'`;
-
-/**
- * The runner's own table (packages/db/src/migrate.ts creates it before the first migration):
- * no row-level security and no grant, and it is not a tenant table.
- */
-const RUNNER_TABLE = 'public.schema_migrations';
 
 /**
  * Tables with no organisation policy, each with its reason. Row-level security is forced on
@@ -61,11 +74,6 @@ const FOREIGN_KEYS_WITHOUT_ORG: Readonly<Record<string, string>> = {
   'public.pairing_claim_failure.pairing_claim_failure_membership_id_fkey':
     'pairing_claim_failure has no org_id (0001, merged): a row is a count for one member, read by sec.pairing_claim only after it has checked that the member belongs to the current organisation, and it points at no other tenant row.',
 };
-
-const orgColumn = (table: string): string => (table === 'public.organization' ? 'id' : 'org_id');
-const tenantPolicy = (table: string): string =>
-  `tenant_isolation FOR ALL PERMISSIVE TO {public} USING (${orgColumn(table)} = public.app_org_id()) ` +
-  `WITH CHECK (${orgColumn(table)} = public.app_org_id())`;
 
 /** The three roles of infra/postgres/init/01-roles.sh, attribute by attribute (AG-1.1, AG-1.11). */
 const ROLES = [
@@ -179,43 +187,30 @@ function roleMemberships(db: pg.Client): Promise<pg.QueryResultRow[]> {
 
 // -------------------------------------------------------------- ownership
 
-/** AG-1.4, AG-1.8, AG-1.12: who owns what, and where SECURITY DEFINER functions live. */
+/**
+ * AG-1.4, AG-1.8, AG-1.12: who owns what, and where SECURITY DEFINER functions live. What
+ * tinnox_app and tinnox_definer own, and a definer function outside sec, are the runner's rules.
+ * That tinnox_migrator owns the rest is checked here only: a database with an object of the
+ * administrator's in it is not one the runner should refuse to migrate.
+ */
 async function ownershipProblems(db: pg.Client): Promise<string[]> {
-  // pg_shdepend records the owner of every kind of object, so nothing has to be listed here.
-  const owned = await rows<{ owner: string; object: string; sec_function: boolean }>(
+  const expected = await rows<{ object: string; owner: string }>(
     db,
-    `SELECT r.rolname AS owner, pg_describe_object(d.classid, d.objid, d.objsubid) AS object,
-            EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-                    WHERE d.classid = 'pg_proc'::regclass AND p.oid = d.objid AND n.nspname = 'sec'
-                   ) AS sec_function
-     FROM pg_shdepend d JOIN pg_roles r ON r.oid = d.refobjid
-     WHERE d.refclassid = 'pg_authid'::regclass AND d.deptype = 'o'
-       AND r.rolname IN ('tinnox_app', 'tinnox_definer')
-       AND d.dbid IN (0, (SELECT oid FROM pg_database WHERE datname = current_database()))
-     ORDER BY 1, 2`,
-  );
-  const expected = await rows<{ object: string; owner: string; expected: string }>(
-    db,
-    `SELECT object, owner, expected FROM (
-       SELECT 'database ' || d.datname AS object, pg_get_userbyid(d.datdba) AS owner, 'tinnox_migrator' AS expected
+    `SELECT object, owner FROM (
+       SELECT 'database ' || d.datname AS object, pg_get_userbyid(d.datdba) AS owner
        FROM pg_database d WHERE d.datname = current_database()
        UNION ALL
-       SELECT 'schema ' || n.nspname, pg_get_userbyid(n.nspowner), 'tinnox_migrator'
+       SELECT 'schema ' || n.nspname, pg_get_userbyid(n.nspowner)
        FROM pg_namespace n WHERE ${OURS}
        UNION ALL
-       SELECT 'relation ' || c.oid::regclass::text, pg_get_userbyid(c.relowner), 'tinnox_migrator'
+       SELECT 'relation ' || c.oid::regclass::text, pg_get_userbyid(c.relowner)
        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE ${OURS}
        UNION ALL
-       SELECT 'function ' || p.oid::regprocedure::text, pg_get_userbyid(p.proowner),
-              CASE WHEN n.nspname = 'sec' THEN 'tinnox_definer' ELSE 'tinnox_migrator' END
-       FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE ${OURS}
-     ) AS o WHERE owner <> expected ORDER BY 1`,
-  );
-  const misplaced = await rows<{ name: string; definer: boolean; in_sec: boolean }>(
-    db,
-    `SELECT p.oid::regprocedure::text AS name, p.prosecdef AS definer, n.nspname = 'sec' AS in_sec
-     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-     WHERE ${OURS} AND p.prosecdef <> (n.nspname = 'sec') ORDER BY 1`,
+       -- The owner of a function in sec is the runner's rule (secFunctionProblems).
+       SELECT 'function ' || p.oid::regprocedure::text, pg_get_userbyid(p.proowner)
+       FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+       WHERE ${OURS} AND n.nspname <> 'sec'
+     ) AS o WHERE owner <> 'tinnox_migrator' ORDER BY 1`,
   );
   const schemas = await rows<{ name: string }>(
     db,
@@ -223,26 +218,10 @@ async function ownershipProblems(db: pg.Client): Promise<string[]> {
      WHERE ${OURS} AND n.nspname NOT IN ('public', 'sec') ORDER BY 1`,
   );
   return [
-    ...owned
-      .filter((o) => o.owner === 'tinnox_app')
-      .map(
-        (o) =>
-          `tinnox_app owns ${o.object}: the runtime role owns nothing. Create it in a migration, which runs as tinnox_migrator, and grant tinnox_app only what the feature needs.`,
-      ),
-    ...owned
-      .filter((o) => o.owner === 'tinnox_definer' && !o.sec_function)
-      .map(
-        (o) =>
-          `tinnox_definer owns ${o.object}: it owns only the functions in schema sec. Create anything else outside the SET LOCAL ROLE tinnox_definer block of the migration.`,
-      ),
+    ...runnerOwnershipProblems(await readSchemaFacts(db)),
     ...expected.map(
       (o) =>
-        `${o.object} is owned by ${o.owner}, not ${o.expected}: tinnox_migrator owns the schema and tinnox_definer the functions in sec (create those between SET LOCAL ROLE tinnox_definer and RESET ROLE, as db/migrations/0014_display_alerts.sql does).`,
-    ),
-    ...misplaced.map((f) =>
-      f.definer
-        ? `${f.name} is SECURITY DEFINER outside schema sec: only the narrow sec.* functions run with their owner's rights. Make it SECURITY INVOKER, or move it to sec and register it in ${SEC_FILE}.`
-        : `${f.name} is in schema sec and is not SECURITY DEFINER: sec holds only the definer functions; put a helper in public.`,
+        `${o.object} is owned by ${o.owner}, not tinnox_migrator: tinnox_migrator owns the schema and tinnox_definer the functions in sec (create those between SET LOCAL ROLE tinnox_definer and RESET ROLE, as db/migrations/0014_display_alerts.sql does).`,
     ),
     ...schemas.map(
       (s) =>
@@ -452,32 +431,9 @@ function grantLimitProblems(actual: readonly Privilege[]): string[] {
 
 // ---------------------------------------------------------- tenant tables
 
-interface TableShape {
-  readonly name: string;
-  readonly forced: boolean;
-  readonly policies: readonly string[];
-}
-
-function readTables(db: pg.Client): Promise<TableShape[]> {
-  return rows<TableShape>(
-    db,
-    `SELECT c.oid::regclass::text AS name,
-            c.relrowsecurity AND c.relforcerowsecurity AS forced,
-            ARRAY(
-              SELECT format('%s FOR %s %s TO %s USING %s WITH CHECK %s', p.polname,
-                            CASE p.polcmd WHEN '*' THEN 'ALL' WHEN 'r' THEN 'SELECT' WHEN 'a' THEN 'INSERT'
-                                          WHEN 'w' THEN 'UPDATE' WHEN 'd' THEN 'DELETE' END,
-                            CASE WHEN p.polpermissive THEN 'PERMISSIVE' ELSE 'RESTRICTIVE' END,
-                            ARRAY(SELECT CASE WHEN r = 0 THEN 'public' ELSE pg_get_userbyid(r)::text END
-                                  FROM unnest(p.polroles) AS r ORDER BY 1)::text,
-                            coalesce(pg_get_expr(p.polqual, p.polrelid), 'none'),
-                            coalesce(pg_get_expr(p.polwithcheck, p.polrelid), 'none'))
-              FROM pg_policy p WHERE p.polrelid = c.oid ORDER BY p.polname
-            ) AS policies
-     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-     WHERE ${OURS} AND c.relkind IN ('r', 'p') AND c.oid::regclass::text <> '${RUNNER_TABLE}'
-     ORDER BY 1`,
-  );
+/** Every table but the runner's own, as the runner's reader gives them. */
+async function readTables(db: pg.Client): Promise<readonly TableFacts[]> {
+  return (await readSchemaFacts(db)).tables;
 }
 
 /** Every table but the runner's own and those of NOT_TENANT: derived, never typed (AG-2.8). */
@@ -485,16 +441,15 @@ async function tenantTables(db: pg.Client): Promise<string[]> {
   return (await readTables(db)).map((t) => t.name).filter((name) => !(name in NOT_TENANT));
 }
 
-/** AG-2.5: forced row-level security everywhere, and one policy per tenant table. */
+/**
+ * AG-2.5: forced row-level security everywhere, and one policy per tenant table. The runner's
+ * two rules say which tables those are by what tinnox_app is granted; NOT_TENANT says it by
+ * name and with a reason, and the two must agree.
+ */
 async function policyProblems(db: pg.Client): Promise<string[]> {
-  const tables = await readTables(db);
-  const problems: string[] = [];
-  for (const table of tables) {
-    if (!table.forced) {
-      problems.push(
-        `${table.name} is without forced row-level security: add ALTER TABLE ${table.name} ENABLE ROW LEVEL SECURITY and FORCE ROW LEVEL SECURITY to its migration.`,
-      );
-    }
+  const facts = await readSchemaFacts(db);
+  const problems = [...rowSecurityProblems(facts), ...tenantPolicyProblems(facts)];
+  for (const table of facts.tables) {
     const found = table.policies.length === 0 ? 'none' : table.policies.join('; ');
     if (table.name in NOT_TENANT) {
       if (table.policies.length > 0) {
@@ -502,13 +457,14 @@ async function policyProblems(db: pg.Client): Promise<string[]> {
           `${table.name} is listed in NOT_TENANT (${HERE}) and has a policy (${found}): a table read before the organisation is known has none, so that only tinnox_definer reads it. Drop the policy, or take the table out of NOT_TENANT.`,
         );
       }
-    } else if (found !== tenantPolicy(table.name)) {
+    } else if (table.runtimePrivileges.length === 0 && found !== tenantPolicy(table.name)) {
+      // With a grant, the runner's rule above has said so already.
       problems.push(
         `${table.name} must have exactly one policy, "${tenantPolicy(table.name)}", and has: ${found}. Copy the CREATE POLICY tenant_isolation block of db/migrations/0014_display_alerts.sql; a table that is read before the organisation is known gets no policy and an entry with its reason in NOT_TENANT (${HERE}).`,
       );
     }
   }
-  const names = tables.map((t) => t.name);
+  const names = facts.tables.map((t) => t.name);
   for (const stale of difference(Object.keys(NOT_TENANT), names)) {
     problems.push(`${stale} is in NOT_TENANT (${HERE}) and is not a table: remove the entry.`);
   }
@@ -945,8 +901,42 @@ describe('the sec functions', () => {
     expect(await secRegisterProblems(catalogue)).toEqual([]);
   });
 
+  it('are SECURITY DEFINER, owned by tinnox_definer, pin their search_path and are executable by tinnox_app alone (AG-1.13, AG-1.15, EAX-12)', async () => {
+    const facts = await readSchemaFacts(catalogue);
+    expect(secFunctionProblems(facts)).toEqual([]);
+    // Not vacuous: the runner's reader found every function of the register, under its name.
+    expect(facts.secFunctions.map((fn) => fn.name).sort()).toEqual(
+      Object.keys(SEC_FUNCTIONS).sort(),
+    );
+  });
+
   it('never name member_invite (AG-1.19)', async () => {
     expect(await inviteReaderProblems(catalogue)).toEqual([]);
+  });
+});
+
+describe('the invariants the migration runner enforces on every database (plan section 3.3)', () => {
+  it('all hold after the migrations: the list runMigrations checks before each COMMIT (EAX-12)', async () => {
+    const facts = await readSchemaFacts(catalogue);
+    expect(schemaInvariantProblems(facts)).toEqual([]);
+    // Not vacuous: the reader found the tables, and the runner's own table is not one of them.
+    expect(facts.tables.length).toBeGreaterThan(20);
+    expect(facts.tables.map((table) => table.name)).not.toContain('public.schema_migrations');
+  });
+
+  it('no trigger is left disabled', async () => {
+    expect(triggerProblems(await readSchemaFacts(catalogue))).toEqual([]);
+  });
+
+  it('refuses to read with another search_path, which would print names without their schema', async () => {
+    const reader = await migratorClient();
+    try {
+      await expect(readSchemaFacts(reader)).rejects.toThrow(
+        /readSchemaFacts needs search_path = pg_catalog/,
+      );
+    } finally {
+      await reader.end();
+    }
   });
 });
 
@@ -1045,10 +1035,8 @@ describe('each rule fails when its subject is wrong (every change is rolled back
         [/^public\.probe\(\) is SECURITY DEFINER outside schema sec/],
       ],
       [
-        asDefiner(
-          'CREATE FUNCTION sec.probe() RETURNS integer LANGUAGE sql SET search_path = pg_catalog, pg_temp AS $$ SELECT 1 $$',
-        ),
-        [/^sec\.probe\(\) is in schema sec and is not SECURITY DEFINER/],
+        ['ALTER FUNCTION public.app_org_id() OWNER TO postgres'],
+        [/^function public\.app_org_id\(\) is owned by postgres, not tinnox_migrator/],
       ],
       [['CREATE SCHEMA probe AUTHORIZATION tinnox_migrator'], [/^schema probe is new/]],
     ];
@@ -1249,6 +1237,147 @@ describe('each rule fails when its subject is wrong (every change is rolled back
     ).toEqual([
       expect.stringMatching(/^sec\.pairing_purge\(integer\) is in .* and not in schema sec/),
     ]);
+  });
+
+  it('a sec function that is not hardened: no SET clause, another owner, not a definer, or executable by anyone else (AG-1.13, AG-1.15, EAX-12)', async () => {
+    const hardening = async (db: pg.Client): Promise<string[]> =>
+      secFunctionProblems(await readSchemaFacts(db));
+    const fn = 'sec.display_alert_orgs()';
+    const cases: [string[], RegExp[]][] = [
+      // EAX-12 itself: created with no SET clause, so proconfig is NULL. The guard pasted into
+      // 0002 to 0013 let this through.
+      [
+        asDefiner(
+          'CREATE FUNCTION sec.probe() RETURNS integer LANGUAGE sql SECURITY DEFINER AS $$ SELECT 1 $$',
+          'REVOKE ALL ON FUNCTION sec.probe() FROM PUBLIC',
+          'GRANT EXECUTE ON FUNCTION sec.probe() TO tinnox_app',
+        ),
+        [/^sec\.probe\(\) does not pin its search_path \(its SET clauses: none\)/],
+      ],
+      [
+        [`ALTER FUNCTION ${fn} SET search_path = public, pg_temp`],
+        [
+          /^sec\.display_alert_orgs\(\) does not pin its search_path \(its SET clauses: search_path=public, pg_temp\)/,
+        ],
+      ],
+      [
+        [`ALTER FUNCTION ${fn} OWNER TO tinnox_migrator`],
+        [/^sec\.display_alert_orgs\(\) is owned by tinnox_migrator, not tinnox_definer/],
+      ],
+      [
+        [`ALTER FUNCTION ${fn} SECURITY INVOKER`],
+        [/^sec\.display_alert_orgs\(\) is in schema sec and is not SECURITY DEFINER/],
+      ],
+      [
+        asDefiner(
+          'CREATE FUNCTION sec.probe() RETURNS integer LANGUAGE sql SET search_path = pg_catalog, pg_temp AS $$ SELECT 1 $$',
+        ),
+        [
+          /^sec\.probe\(\) is in schema sec and is not SECURITY DEFINER/,
+          // No GRANT or REVOKE at all: its ACL is NULL, which means PostgreSQL's default.
+          /^sec\.probe\(\) is executable by PUBLIC, not by tinnox_app alone/,
+        ],
+      ],
+      [
+        [`GRANT EXECUTE ON FUNCTION ${fn} TO PUBLIC`],
+        [
+          /^sec\.display_alert_orgs\(\) is executable by PUBLIC, tinnox_app, not by tinnox_app alone/,
+        ],
+      ],
+      // A named role, which a check against PUBLIC alone never saw (AG-1.15).
+      [
+        [`GRANT EXECUTE ON FUNCTION ${fn} TO tinnox_migrator`],
+        [
+          /^sec\.display_alert_orgs\(\) is executable by tinnox_app, tinnox_migrator, not by tinnox_app alone/,
+        ],
+      ],
+      [
+        [`GRANT EXECUTE ON FUNCTION ${fn} TO tinnox_app WITH GRANT OPTION`],
+        [
+          /^sec\.display_alert_orgs\(\) is executable by tinnox_app WITH GRANT OPTION, not by tinnox_app alone/,
+        ],
+      ],
+      [
+        [`REVOKE EXECUTE ON FUNCTION ${fn} FROM tinnox_app`],
+        [
+          /^sec\.display_alert_orgs\(\) is executable by nobody but its owner, not by tinnox_app alone/,
+        ],
+      ],
+    ];
+    for (const [statements, messages] of cases) {
+      expect(await caused(statements, hardening), statements.join('; ')).toEqual(
+        messages.map((message): unknown => expect.stringMatching(message)),
+      );
+    }
+  });
+
+  it('the list the migration runner checks has every one of its rules in it (plan section 3.3)', async () => {
+    const runner = async (db: pg.Client): Promise<string[]> =>
+      schemaInvariantProblems(await readSchemaFacts(db));
+    const cases: [string, RegExp][] = [
+      [
+        'ALTER FUNCTION sec.display_alert_orgs() RESET ALL',
+        /^sec\.display_alert_orgs\(\) does not pin its search_path/,
+      ],
+      [
+        'ALTER SCHEMA sec OWNER TO tinnox_app',
+        /^tinnox_app owns schema sec: the runtime role owns nothing/,
+      ],
+      [
+        'ALTER FUNCTION public.app_org_id() SECURITY DEFINER',
+        /^public\.app_org_id\(\) is SECURITY DEFINER outside schema sec/,
+      ],
+      [
+        'ALTER TABLE public.session NO FORCE ROW LEVEL SECURITY',
+        /^public\.session is without forced row-level security/,
+      ],
+      [
+        'DROP POLICY tenant_isolation ON public.app',
+        /^public\.app must have exactly one policy, .* and has: none\. tinnox_app holds /,
+      ],
+      // The tenant policy follows the grant: one column is enough to need it.
+      [
+        'GRANT SELECT (expires_at) ON public.session TO tinnox_app',
+        /^public\.session must have exactly one policy, .* and has: none\. tinnox_app holds SELECT \(expires_at\) on it/,
+      ],
+      // A grant to PUBLIC reaches tinnox_app too, on the table or on one column, and so does a
+      // grant to a role it is a member of, inherited or not (it could SET ROLE).
+      [
+        'GRANT SELECT ON public.session TO PUBLIC',
+        /^public\.session must have exactly one policy, .* and has: none\. tinnox_app holds SELECT through PUBLIC on it/,
+      ],
+      [
+        'GRANT UPDATE (expires_at) ON public.session TO PUBLIC',
+        /^public\.session must have exactly one policy, .* tinnox_app holds UPDATE \(expires_at\) through PUBLIC on it/,
+      ],
+      [
+        'CREATE ROLE catalogue_probe; GRANT catalogue_probe TO tinnox_app; GRANT SELECT ON public.session TO catalogue_probe',
+        /^public\.session must have exactly one policy, .* tinnox_app holds SELECT through catalogue_probe on it/,
+      ],
+      [
+        'CREATE ROLE catalogue_probe; GRANT catalogue_probe TO tinnox_app WITH INHERIT FALSE; GRANT DELETE ON public.session TO catalogue_probe',
+        /^public\.session must have exactly one policy, .* tinnox_app holds DELETE through catalogue_probe on it/,
+      ],
+      // With an open policy as well, tinnox_app would read every organisation's sessions.
+      [
+        'CREATE POLICY open ON public.session USING (true); GRANT SELECT ON public.session TO PUBLIC',
+        /^public\.session must have exactly one policy, .* and has: open FOR ALL PERMISSIVE TO \{public\} USING true WITH CHECK none\. tinnox_app holds SELECT through PUBLIC on it/,
+      ],
+      [
+        'ALTER TABLE public.display DISABLE TRIGGER display_set_updated_at',
+        /^trigger public\.display\.display_set_updated_at \[tgenabled = D\] does not fire in an ordinary session/,
+      ],
+      // Fires on a replica only, so not in the API's sessions either.
+      [
+        'ALTER TABLE public.membership ENABLE REPLICA TRIGGER membership_guard',
+        /^trigger public\.membership\.membership_guard \[tgenabled = R\] does not fire/,
+      ],
+    ];
+    for (const [statement, message] of cases) {
+      expect(await caused([statement], runner), statement).toEqual([
+        expect.stringMatching(message),
+      ]);
+    }
   });
 
   it('a CHECK that passes on NULL', async () => {

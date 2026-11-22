@@ -3,6 +3,11 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import pg from 'pg';
 import type { Pool } from './pool.ts';
+import {
+  SchemaInvariantError,
+  assertSchemaInvariants,
+  schemaProblemsInTransaction,
+} from './schema-invariants.ts';
 
 const MIGRATOR_ROLE = 'tinnox_migrator';
 
@@ -122,6 +127,19 @@ export function migrationNameMessage(problem: MigrationNameProblem): string {
  * partial migration. The directory is checked against the recorded history first:
  * an applied file that is missing or changed, or a new file numbered before an
  * applied one, is an error and nothing is applied.
+ *
+ * The runner owns the schema invariants (./schema-invariants.ts; plan section 3.3, EAX-12), so
+ * no migration pastes a guard for them. It checks them after each file and before that file's
+ * COMMIT: a file that leaves the schema outside them is rolled back with its history row, the
+ * files before it in the same run stay applied (each passed the check), and the run fails
+ * naming every object and what to do. The next run starts at the same file. A run with nothing
+ * pending checks once, so a database changed by hand is refused too, with nothing altered.
+ * Either way the run ends in the `finally` below, which gives the advisory lock back.
+ *
+ * A problem that was there before the run refuses the first pending file as well, unless that
+ * file repairs it: no file is committed on a schema outside the invariants, as the guards pasted
+ * into 0001 to 0014 never let one. So a repair is a migration that is the first one pending, or
+ * is made by hand; a repair that sorts after another pending file is never reached.
  */
 export async function runMigrations(options: MigrationOptions): Promise<MigrationResult> {
   const log = options.log ?? (() => undefined);
@@ -183,6 +201,18 @@ export async function runMigrations(options: MigrationOptions): Promise<Migratio
       }
     }
 
+    // What is already wrong before this run touches anything. With files pending this read
+    // refuses nothing by itself, because the first of them may be the repair. Only the first:
+    // the check after each file refuses every problem, the older ones included. The list lets
+    // that failure say which problems the file did not make, and how to get past them.
+    await client.query('BEGIN');
+    let knownBefore: string[];
+    try {
+      knownBefore = await schemaProblemsInTransaction(client);
+    } finally {
+      await client.query('ROLLBACK');
+    }
+
     for (const { name, sql, digest } of pending) {
       log(`applying ${name}`);
       await client.query('BEGIN');
@@ -192,13 +222,24 @@ export async function runMigrations(options: MigrationOptions): Promise<Migratio
           name,
           digest,
         ]);
+        await assertSchemaInvariants(client, knownBefore);
         await client.query('COMMIT');
       } catch (error) {
         await client.query('ROLLBACK');
         const message = error instanceof Error ? error.message : String(error);
-        throw new Error(`migration ${name} failed: ${message}`, { cause: error });
+        throw new Error(`migration ${name} failed and was rolled back: ${message}`, {
+          cause: error,
+        });
       }
       applied.push(name);
+    }
+    if (pending.length === 0 && knownBefore.length > 0) {
+      throw new SchemaInvariantError(
+        knownBefore,
+        'No migration was pending and this run changed nothing: the database was changed ' +
+          'outside the migrations, or these rules are newer than it. Put it right in a new ' +
+          'migration, or by hand as the database administrator, and run again.',
+      );
     }
   } finally {
     await client.query('SELECT pg_advisory_unlock($1)', [ADVISORY_LOCK_KEY]).catch(() => undefined);
