@@ -3,7 +3,7 @@ contract: status/v2
 repo: tinnox-au/tinnox-cms
 initiative: TINNOX CMS
 key: CMS
-next_id: 27
+next_id: 28
 phase: Not written yet: one sentence on what this project is and where it stands
 gate: -
 seeded: 17 Nov 2026 by status init
@@ -35,6 +35,7 @@ None.
 | CMS-20 | Self-service sign-up with payment (like Yodeck): new customers sign up and pay, invites complete without TINNOX | proposed | - | 19 Nov |
 | CMS-25 | Fix the open layouts review findings LYX-01 to LYX-05 (round 4); each closes with its poteto plan step | proposed | - | 22 Nov |
 | CMS-26 | Ruleset on main: no force push or deletion, merge or squash only, pull requests and the three CI jobs required (poteto D12, D14); Michael creates it | proposed | - | 22 Nov |
+| CMS-27 | Ask TINNOX whether DEC-13 (data stays in Australia) allows alert e-mails to mailboxes outside Australia (poteto D23) | proposed | - | 22 Nov |
 
 ## To do
 
@@ -197,3 +198,6 @@ from: CMS-23
 
 ### CMS-26
 from: CMS-24
+
+### CMS-27
+from: CMS-23
