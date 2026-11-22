@@ -122,6 +122,28 @@ describe('the runtime role itself', () => {
     expect(functions.rowCount).toBe(0);
   });
 
+  it('is a member of no role, and the migrator only of tinnox_definer, without inherit (D4)', async () => {
+    // infra/postgres/init/01-roles.sh. The incident scripts and the sec.* model both rely on
+    // it: tinnox_app cannot SET ROLE tinnox_definer, and the migrator holds none of its rights.
+    const { rows } = await pool.query<Record<string, string | boolean>>(
+      `SELECT m.rolname AS member, r.rolname AS role, a.inherit_option, a.set_option, a.admin_option
+       FROM pg_auth_members a
+       JOIN pg_roles r ON r.oid = a.roleid
+       JOIN pg_roles m ON m.oid = a.member
+       WHERE m.rolname IN ('tinnox_app', 'tinnox_migrator')
+       ORDER BY 1, 2`,
+    );
+    expect(rows).toEqual([
+      {
+        member: 'tinnox_migrator',
+        role: 'tinnox_definer',
+        inherit_option: false,
+        set_option: true,
+        admin_option: false,
+      },
+    ]);
+  });
+
   it('every table in public has row-level security enabled and forced', async () => {
     const { rows } = await pool.query<{
       relname: string;

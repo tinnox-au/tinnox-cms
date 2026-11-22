@@ -290,12 +290,18 @@ export async function asDefiner<R extends pg.QueryResultRow>(
   }
 }
 
-/** The database administrator (superuser), as in the runbook. Bypasses row-level security. */
-export async function asSuperuser<T>(work: (client: pg.Client) => Promise<T>): Promise<T> {
+/** Connection string of the integration-test database (or `database`) for the superuser. */
+export function superuserUrl(database?: string): string {
   const url = new URL(migratorUrl());
   url.username = 'postgres';
   url.password = encodeURIComponent(need('POSTGRES_SUPERUSER_PASSWORD'));
-  const client = new pg.Client({ connectionString: url.toString() });
+  if (database !== undefined) url.pathname = `/${database}`;
+  return url.toString();
+}
+
+/** The database administrator (superuser), as in the runbook. Bypasses row-level security. */
+export async function asSuperuser<T>(work: (client: pg.Client) => Promise<T>): Promise<T> {
+  const client = new pg.Client({ connectionString: superuserUrl() });
   await client.connect();
   try {
     return await work(client);

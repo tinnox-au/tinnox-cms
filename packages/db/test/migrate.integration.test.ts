@@ -2,15 +2,17 @@
  * The migration runner refuses a directory that does not fit the database's recorded
  * history before it applies anything (backend review round 1, CX-03). Each case offers
  * the fully migrated test database a directory with one fault and a harmless new
- * migration, and checks that the new migration was not applied.
+ * migration, and checks that the new migration was not applied. connectMigrator, which
+ * the runner and the test reset connect through, refuses every login but tinnox_migrator
+ * (poteto adoption plan, D4).
  */
 import { appendFile, copyFile, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
-import { runMigrations } from '../src/index.ts';
-import { migratorClient, migratorUrl } from './support.ts';
+import { connectMigrator, resetTestDatabase, runMigrations } from '../src/index.ts';
+import { migratorClient, migratorUrl, superuserUrl } from './support.ts';
 
 const MIGRATIONS = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -110,6 +112,65 @@ describe('migration history is checked before anything is applied', () => {
       } finally {
         await client.end();
       }
+    }
+  });
+});
+
+/** `url` with a role set at connection start, as `SET ROLE` would. */
+function actingAs(url: string, role: string): string {
+  const parsed = new URL(url);
+  parsed.searchParams.set('options', `-c role=${role}`);
+  return parsed.toString();
+}
+
+const REFUSED = /must log in and act as role tinnox_migrator/;
+
+describe('connectMigrator (D4)', () => {
+  const wrongLogins = (): [string, string][] => [
+    ['the runtime role', process.env['TEST_DATABASE_URL'] ?? ''],
+    ['the superuser', superuserUrl()],
+    // current_user would pass, session_user does not: the runner's old check let this through.
+    ['the superuser acting as the migrator', actingAs(superuserUrl(), 'tinnox_migrator')],
+    // session_user would pass, current_user does not.
+    ['the migrator acting as the definer', actingAs(migratorUrl(), 'tinnox_definer')],
+  ];
+
+  it('connects as tinnox_migrator, logged in and acting', async () => {
+    const pool = await connectMigrator(migratorUrl(), { applicationName: 'tinnox-test-connect' });
+    try {
+      const { rows } = await pool.query('SELECT current_user, session_user');
+      expect(rows[0]).toEqual({ current_user: 'tinnox_migrator', session_user: 'tinnox_migrator' });
+    } finally {
+      await pool.end();
+    }
+  });
+
+  it('refuses the runtime role and the superuser, even acting as the migrator', async () => {
+    for (const [who, url] of wrongLogins()) {
+      await expect(
+        connectMigrator(url, { applicationName: 'tinnox-test-connect' }),
+        who,
+      ).rejects.toThrow(REFUSED);
+    }
+  });
+
+  it('makes the runner refuse them before it applies anything', async () => {
+    for (const [who, url] of wrongLogins()) {
+      await expect(
+        runMigrations({ connectionString: url, directory: MIGRATIONS }),
+        who,
+      ).rejects.toThrow(REFUSED);
+    }
+  });
+
+  it('makes the test reset refuse them before it reads the database name', async () => {
+    // Pointed at a database the reset would refuse by name, so a reset that skipped the role
+    // check fails with the name message here and drops nothing.
+    for (const url of [
+      superuserUrl('postgres'),
+      actingAs(superuserUrl('postgres'), 'tinnox_migrator'),
+    ]) {
+      await expect(resetTestDatabase(url)).rejects.toThrow(REFUSED);
     }
   });
 });

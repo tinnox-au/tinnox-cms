@@ -16,8 +16,9 @@ export interface CreatePoolOptions {
 }
 
 /**
- * Creates a connection pool for the runtime role tinnox_app (DATABASE_URL). Migrations
- * and the seed connect as tinnox_migrator with their own clients, never through this.
+ * Creates a connection pool for the runtime role tinnox_app (DATABASE_URL). The offline
+ * tools (migration runner and test reset, seed, provisioning) connect as tinnox_migrator
+ * through connectMigrator (migrate.ts), never through this.
  * int8 values (bigint ids, seq, bytes) are returned as strings by pg; convert deliberately.
  *
  * The timeouts and row security are sent as connection startup parameters, which take

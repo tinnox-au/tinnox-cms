@@ -2,9 +2,59 @@ import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import pg from 'pg';
+import type { Pool } from './pool.ts';
+
+const MIGRATOR_ROLE = 'tinnox_migrator';
+
+declare const migratorBrand: unique symbol;
+/**
+ * A pool that connectMigrator has checked: it logs in and acts as tinnox_migrator. Only
+ * connectMigrator makes one, so a function that takes it cannot be handed the runtime pool
+ * or a superuser connection.
+ */
+export type MigratorPool = Pool & { readonly [migratorBrand]: true };
+
+/**
+ * The one way to connect as tinnox_migrator: the runner, the test reset, the seed and
+ * provisioning all come through here (poteto adoption plan, decision D4). Refuses unless current_user and
+ * session_user are both tinnox_migrator, so neither the runtime role nor the superuser
+ * (even after SET ROLE tinnox_migrator, whose writes the 0013 exemptions would not cover)
+ * can run them. The pool holds one connection, kept while idle, so every statement runs on
+ * the connection that was checked.
+ */
+export async function connectMigrator(
+  connectionString: string,
+  options: { readonly applicationName: string },
+): Promise<MigratorPool> {
+  const pool = new pg.Pool({
+    connectionString,
+    application_name: options.applicationName,
+    max: 1,
+    idleTimeoutMillis: 0,
+  });
+  // As createPool: a lost idle connection must not crash the tool.
+  pool.on('error', () => undefined);
+  try {
+    const { rows } = await pool.query<{ current_user: string; session_user: string }>(
+      'SELECT current_user, session_user',
+    );
+    const who = rows[0];
+    if (who?.current_user !== MIGRATOR_ROLE || who.session_user !== MIGRATOR_ROLE) {
+      throw new Error(
+        `this tool must log in and act as role ${MIGRATOR_ROLE}, but the connection logs in as ` +
+          `${who?.session_user ?? 'unknown'} and acts as ${who?.current_user ?? 'unknown'}; ` +
+          `use the ${MIGRATOR_ROLE} connection string without a role setting`,
+      );
+    }
+  } catch (error) {
+    await pool.end().catch(() => undefined);
+    throw error;
+  }
+  return pool as MigratorPool;
+}
 
 export interface MigrationOptions {
-  /** Connection string for role tinnox_migrator. */
+  /** Connection string for role tinnox_migrator; connectMigrator refuses any other. */
   readonly connectionString: string;
   /** Directory holding NNNN_name.sql files. */
   readonly directory: string;
@@ -65,18 +115,17 @@ export async function runMigrations(options: MigrationOptions): Promise<Migratio
   const [problem] = validateMigrationNames(names);
   if (problem !== undefined) throw new Error(migrationNameMessage(problem));
 
-  const client = new pg.Client({
-    connectionString: options.connectionString,
-    application_name: 'tinnox-migrate',
+  const pool = await connectMigrator(options.connectionString, {
+    applicationName: 'tinnox-migrate',
   });
-  await client.connect();
+  // One session for the whole run: the advisory lock below is held by it.
+  const client = await pool.connect().catch(async (error: unknown) => {
+    await pool.end().catch(() => undefined);
+    throw error;
+  });
   const applied: string[] = [];
   const alreadyApplied: string[] = [];
   try {
-    const who = await client.query<{ current_user: string }>('SELECT current_user');
-    if (who.rows[0]?.current_user !== 'tinnox_migrator') {
-      throw new Error('migrations must run as role tinnox_migrator');
-    }
     await client.query('SELECT pg_advisory_lock($1)', [ADVISORY_LOCK_KEY]);
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.schema_migrations (
@@ -136,7 +185,8 @@ export async function runMigrations(options: MigrationOptions): Promise<Migratio
     }
   } finally {
     await client.query('SELECT pg_advisory_unlock($1)', [ADVISORY_LOCK_KEY]).catch(() => undefined);
-    await client.end();
+    client.release();
+    await pool.end();
   }
   return { applied, alreadyApplied };
 }
@@ -147,18 +197,17 @@ export async function runMigrations(options: MigrationOptions): Promise<Migratio
  * not end in `_test`.
  */
 export async function resetTestDatabase(connectionString: string): Promise<void> {
-  const client = new pg.Client({ connectionString, application_name: 'tinnox-test-reset' });
-  await client.connect();
+  const pool = await connectMigrator(connectionString, { applicationName: 'tinnox-test-reset' });
   try {
-    const db = await client.query<{ name: string }>('SELECT current_database() AS name');
+    const db = await pool.query<{ name: string }>('SELECT current_database() AS name');
     const name = db.rows[0]?.name ?? '';
     if (!name.endsWith('_test')) {
       throw new Error(`refusing to reset database "${name}": only *_test databases may be reset`);
     }
-    await client.query('DROP SCHEMA IF EXISTS sec CASCADE');
-    await client.query('DROP SCHEMA public CASCADE');
-    await client.query('CREATE SCHEMA public');
+    await pool.query('DROP SCHEMA IF EXISTS sec CASCADE');
+    await pool.query('DROP SCHEMA public CASCADE');
+    await pool.query('CREATE SCHEMA public');
   } finally {
-    await client.end();
+    await pool.end();
   }
 }
