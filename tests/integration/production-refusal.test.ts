@@ -26,6 +26,8 @@ describe('production start-up', () => {
       'OIDC_ISSUER points at the development realm tinnox-dev',
       'must use https in production',
       'production requires MFA evidence',
+      // npm run setup always points SMTP_HOST at the development Mailpit, 127.0.0.1 (D23).
+      'SMTP_HOST is not a reviewed mail host',
     ]) {
       expect(result.output).toContain(expected);
     }
@@ -60,6 +62,8 @@ describe('production start-up', () => {
       SESSION_SECRET: strong('session'),
       MEDIA_URL_HMAC_SECRET: strong('media'),
       PAIRING_CLIENT_KEY_SECRET: strong('pairing'),
+      // No e-mail: no host is reviewed yet (D23), so the development Mailpit would be refused too.
+      SMTP_HOST: '',
     };
     const cases: [string, Record<string, string>, string][] = [
       [
@@ -82,6 +86,16 @@ describe('production start-up', () => {
         'a development SMTP password',
         { SMTP_USER: 'alerts', SMTP_PASSWORD: 'dev-smtp-password' },
         'SMTP_PASSWORD is a development or placeholder value',
+      ],
+      [
+        'the development Mailpit host (D23)',
+        { SMTP_HOST: '127.0.0.1' },
+        'SMTP_HOST is not a reviewed mail host',
+      ],
+      [
+        'a public mail host nobody reviewed (D23)',
+        { SMTP_HOST: 'smtp.unreviewed.example' },
+        'SMTP_HOST is not a reviewed mail host',
       ],
     ];
     for (const [what, override, message] of cases) {

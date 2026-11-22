@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ConfigError, loadConfig } from './config.ts';
+import { ConfigError, loadConfig, REVIEWED_SMTP_HOSTS, type LoadConfigOptions } from './config.ts';
 
 const strong = (label: string): string => `${label}-9f2c7a1d4b8e6035a7c1d9e2f4b6a8c0e1d3f5a7`;
 
@@ -36,9 +36,15 @@ const production: Record<string, string> = {
   OIDC_MFA_AMR_VALUES: 'otp, mfa',
 };
 
-function problems(env: Record<string, string | undefined>): string[] {
+/** A test-only stand-in for REVIEWED_SMTP_HOSTS, so no real host is listed for a test. */
+const reviewed: LoadConfigOptions = { reviewedSmtpHosts: ['smtp.reviewed.example'] };
+
+function problems(
+  env: Record<string, string | undefined>,
+  options: LoadConfigOptions = {},
+): string[] {
   try {
-    loadConfig(env);
+    loadConfig(env, options);
   } catch (error) {
     if (error instanceof ConfigError) return [...error.problems];
     throw error;
@@ -133,6 +139,8 @@ describe('loadConfig in production (D19)', () => {
     expect(config.loginCookieName).toBe('__Host-tinnox_login');
     expect(config.oidc.allowInsecureRequests).toBe(false);
     expect(config.oidc.mfaAmrValues).toEqual(['otp', 'mfa']);
+    // No SMTP_HOST, no e-mail: production starts without alerts.
+    expect(config.mail).toBeNull();
   });
 
   it('refuses the whole development configuration, naming every reason', () => {
@@ -227,13 +235,16 @@ describe('e-mail (SMTP)', () => {
   });
 
   it('refuses a development SMTP password in production, without printing it', () => {
-    const found = problems({
-      ...production,
-      SMTP_HOST: 'email-smtp.ap-southeast-2.amazonaws.com',
-      MAIL_FROM: 'alerts@signage.example',
-      SMTP_USER: 'AKIAEXAMPLE',
-      SMTP_PASSWORD: 'dev-smtp-password',
-    });
+    const found = problems(
+      {
+        ...production,
+        SMTP_HOST: 'smtp.reviewed.example',
+        MAIL_FROM: 'alerts@signage.example',
+        SMTP_USER: 'AKIAEXAMPLE',
+        SMTP_PASSWORD: 'dev-smtp-password',
+      },
+      reviewed,
+    );
     expect(found).toEqual(['SMTP_PASSWORD is a development or placeholder value']);
     expect(found.join(' ')).not.toContain('dev-smtp-password');
   });
@@ -241,13 +252,76 @@ describe('e-mail (SMTP)', () => {
   it('accepts a provider over STARTTLS or implicit TLS in production', () => {
     const smtp = {
       ...production,
-      SMTP_HOST: 'email-smtp.ap-southeast-2.amazonaws.com',
+      SMTP_HOST: 'smtp.reviewed.example',
       MAIL_FROM: 'alerts@signage.example',
       SMTP_USER: 'AKIAEXAMPLE',
       SMTP_PASSWORD: strong('smtp'),
     };
-    expect(loadConfig(smtp).mail?.secure).toBe(false);
-    expect(loadConfig({ ...smtp, SMTP_PORT: '465', SMTP_SECURE: 'true' }).mail?.secure).toBe(true);
+    expect(loadConfig(smtp, reviewed).mail?.secure).toBe(false);
+    expect(
+      loadConfig({ ...smtp, SMTP_PORT: '465', SMTP_SECURE: 'true' }, reviewed).mail?.secure,
+    ).toBe(true);
+  });
+});
+
+describe('production mail host (D23, DEC-13)', () => {
+  const smtp = {
+    ...production,
+    MAIL_FROM: 'alerts@signage.example',
+    SMTP_USER: 'AKIAEXAMPLE',
+    SMTP_PASSWORD: strong('smtp'),
+  };
+  const refusal = 'SMTP_HOST is not a reviewed mail host';
+
+  it('lists no host until the provider review names an Australian endpoint', () => {
+    expect(REVIEWED_SMTP_HOSTS).toEqual([]);
+    expect(
+      problems({ ...smtp, SMTP_HOST: 'email-smtp.ap-southeast-2.amazonaws.com' }).join(' '),
+    ).toContain(refusal);
+  });
+
+  it('accepts a listed host', () => {
+    expect(loadConfig({ ...smtp, SMTP_HOST: 'smtp.reviewed.example' }, reviewed).mail?.host).toBe(
+      'smtp.reviewed.example',
+    );
+  });
+
+  it.each([
+    ['an unlisted public mail host', 'smtp.unreviewed.example'],
+    ['a loopback address, which could relay anywhere', '127.0.0.1'],
+    ['a loopback name', 'localhost'],
+    ['a subdomain of a listed host (no wildcard)', 'eu.smtp.reviewed.example'],
+    ['a listed host with a suffix', 'smtp.reviewed.example.attacker.example'],
+  ])('refuses %s, saying what to do and never printing the host', (_what, host) => {
+    const found = problems({ ...smtp, SMTP_HOST: host }, reviewed);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toContain(refusal);
+    expect(found[0]).toContain('REVIEWED_SMTP_HOSTS (apps/api/src/config.ts)');
+    expect(found[0]).toContain('DEC-13');
+    expect(found[0]).not.toContain(host);
+  });
+
+  it('compares lower-cased, so a case variant of a listed host is that host; nothing else is', () => {
+    expect(problems({ ...smtp, SMTP_HOST: 'SMTP.Reviewed.EXAMPLE' }, reviewed)).toEqual([]);
+    // Matched exactly: not even the same name with the root's trailing dot.
+    expect(problems({ ...smtp, SMTP_HOST: 'SMTP.REVIEWED.EXAMPLE.' }, reviewed)).toEqual([
+      expect.stringContaining(refusal),
+    ]);
+  });
+
+  it('leaves development and the test suites free to use Mailpit or any host', () => {
+    for (const mode of ['development', 'test']) {
+      for (const host of ['127.0.0.1', 'smtp.unreviewed.example']) {
+        expect(
+          problems({
+            ...development,
+            NODE_ENV: mode,
+            SMTP_HOST: host,
+            MAIL_FROM: 'alerts@tinnox-dev.invalid',
+          }),
+        ).toEqual([]);
+      }
+    }
   });
 });
 

@@ -12,7 +12,8 @@
  *   - no secret may be a development value (prefix "dev-") or a placeholder (SMTP_PASSWORD too);
  *   - issuer, origins and redirect URIs must be https;
  *   - the development realm is refused;
- *   - an MFA evidence requirement (acr or amr) must be configured.
+ *   - an MFA evidence requirement (acr or amr) must be configured;
+ *   - SMTP_HOST, when set, must be in REVIEWED_SMTP_HOSTS (DEC-13, D23 of the poteto pyramid plan).
  */
 import { isIP } from 'node:net';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
@@ -172,6 +173,24 @@ export interface AppConfig {
   } | null;
 }
 
+/**
+ * The SMTP hosts whose provider has passed the data-location review under DEC-13 (contract,
+ * sub-processors, support location: item 4 of the pre-customer-release checklist in
+ * docs/security/operations-and-release-checklist.md). Production refuses any other SMTP_HOST
+ * (D23 of the poteto pyramid plan). Empty until that review names an Australian endpoint, so
+ * production sends no e-mail until then. Exact host names, compared lower-cased: no wildcards,
+ * and no loopback exemption, because a local relay can forward mail anywhere.
+ */
+export const REVIEWED_SMTP_HOSTS: readonly string[] = Object.freeze([]);
+
+export interface LoadConfigOptions {
+  /**
+   * Unit tests only: a stand-in for REVIEWED_SMTP_HOSTS, so no real host is listed for a test.
+   * Lint (NO_LOADCONFIG_OPTIONS in eslint.config.js) refuses it in product code.
+   */
+  readonly reviewedSmtpHosts?: readonly string[];
+}
+
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 
 function isLoopback(url: URL): boolean {
@@ -241,7 +260,10 @@ function absoluteFromRepo(path: string): string {
  * Builds the configuration from an environment map. Throws ConfigError with
  * every problem found; error text names variables, never their values.
  */
-export function loadConfig(env: Readonly<Record<string, string | undefined>>): AppConfig {
+export function loadConfig(
+  env: Readonly<Record<string, string | undefined>>,
+  { reviewedSmtpHosts = REVIEWED_SMTP_HOSTS }: LoadConfigOptions = {},
+): AppConfig {
   // Treat empty strings as "not set" so defaults apply.
   const cleaned: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
@@ -349,6 +371,17 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): A
     if (e.OIDC_MFA_ACR_VALUES.length === 0 && e.OIDC_MFA_AMR_VALUES.length === 0) {
       problems.push(
         'production requires MFA evidence: set OIDC_MFA_ACR_VALUES or OIDC_MFA_AMR_VALUES',
+      );
+    }
+    // Alert e-mails carry screen, site and organisation names, so where the provider keeps them
+    // is a DEC-13 question. Without SMTP_HOST there is no e-mail and nothing to refuse.
+    const smtpHost = e.SMTP_HOST?.toLowerCase();
+    if (
+      smtpHost !== undefined &&
+      !reviewedSmtpHosts.some((host) => host.toLowerCase() === smtpHost)
+    ) {
+      problems.push(
+        'SMTP_HOST is not a reviewed mail host: production sends e-mail only through a host listed in REVIEWED_SMTP_HOSTS (apps/api/src/config.ts), and a host joins that list only once its provider passes the data-location review under DEC-13; get the host reviewed and added there, or leave SMTP_HOST unset to run without e-mail alerts',
       );
     }
   }

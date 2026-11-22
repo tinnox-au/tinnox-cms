@@ -790,6 +790,49 @@ describe('the organisation id from the request (AG-2.3)', () => {
   });
 });
 
+describe("loadConfig's reviewed-host stand-in outside its test (D23, DEC-13)", () => {
+  const OPTIONS = /^Call loadConfig\(env\) with the environment only, under its own name \(D23\)/;
+
+  it.each([
+    'apps/api/src/main.ts',
+    'apps/api/src/alerts-once.ts',
+    'apps/api/src/fixture.ts',
+    'apps/api/src/mail.ts',
+    'packages/db/src/fixture.ts',
+  ])('flags a second argument, a namespace call and a renamed import in %s', async (path) => {
+    for (const code of [
+      "const c = loadConfig(env, { reviewedSmtpHosts: ['smtp.example'] });",
+      'const c = loadConfig(env, options);',
+      'const c = config.loadConfig(env, {});',
+      "import { loadConfig as load } from './config.ts';",
+    ]) {
+      await expectOne(path, code, OPTIONS);
+    }
+  });
+
+  it('names REVIEWED_SMTP_HOSTS and the provider review', async () => {
+    const [message] = await flagged('apps/api/src/main.ts', 'loadConfig(env, options);');
+    expect(message).toContain('add the host to REVIEWED_SMTP_HOSTS in apps/api/src/config.ts');
+    expect(message).toContain('data-location review under DEC-13');
+  });
+
+  it('leaves a call with the environment only alone', async () => {
+    const code = [
+      "import { loadConfig } from './config.ts';",
+      'const a = loadConfig(env);',
+      'const b = config.loadConfig(env);',
+    ].join('\n');
+    expect(await flagged('apps/api/src/alerts-once.ts', code)).toEqual([]);
+  });
+
+  it.each(['apps/api/src/config.test.ts', 'apps/api/test/support.ts'])(
+    'leaves the test %s alone',
+    async (path) => {
+      expect(await flagged(path, 'const c = loadConfig(env, reviewed);')).toEqual([]);
+    },
+  );
+});
+
 describe('warning comments (LINT-10, PLAN-6)', () => {
   it.each([
     ['apps/api/src/fixture.ts', '// TODO: later'],

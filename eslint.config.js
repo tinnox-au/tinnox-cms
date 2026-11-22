@@ -280,6 +280,22 @@ const NO_CLOCK = [
   },
 ];
 
+// D23, DEC-13: loadConfig's second argument stands in for REVIEWED_SMTP_HOSTS so the config tests
+// need no real host on the list. Passed from product code, it would let production send mail
+// through a host the provider review never saw, without the diff to the list that review gates.
+// config.test.ts is a test file, outside the product blocks this joins. A renamed import is
+// reported too, so the call cannot hide under another name.
+const NO_LOADCONFIG_OPTIONS = [
+  {
+    selector: [
+      "CallExpression[arguments.length>1]:matches([callee.name='loadConfig'], [callee.property.name='loadConfig'])",
+      "ImportSpecifier[imported.name='loadConfig'][local.name!='loadConfig']",
+    ].join(', '),
+    message:
+      'Call loadConfig(env) with the environment only, under its own name (D23): its second argument replaces REVIEWED_SMTP_HOSTS and is for apps/api/src/config.test.ts. To send mail through a new host, get its provider through the data-location review under DEC-13 and add the host to REVIEWED_SMTP_HOSTS in apps/api/src/config.ts.',
+  },
+];
+
 /** Selectors for a string, template text or name in code that matches `regex` (selector syntax). */
 const textMatching = (regex) =>
   [
@@ -598,8 +614,9 @@ const OUTBOUND_SOURCES = [
 const OUTBOUND_CLIENTS = {
   // The identity provider (DEC-13): discovery, token exchange and logout, behind IdentityProvider.
   'openid-client': 'apps/api/src/auth/oidc.ts',
-  // Alert e-mail over SMTP (DEC-37), to the host of SMTP_HOST. Step 12 makes production refuse a
-  // host that is not in REVIEWED_SMTP_HOSTS (D23).
+  // Alert e-mail over SMTP (DEC-37), to the host of SMTP_HOST. In production that host must be in
+  // REVIEWED_SMTP_HOSTS (apps/api/src/config.ts), which only the provider review under DEC-13
+  // adds to (D23).
   nodemailer: 'apps/api/src/mail.ts',
 };
 
@@ -870,6 +887,7 @@ const PRODUCT_SYNTAX = [
   ...NO_CREDENTIAL_NAMES,
   ...NO_HTML_SINK_CALLS,
   ...NO_GLOBAL_PROCESS_ENV,
+  ...NO_LOADCONFIG_OPTIONS,
 ];
 const API_SYNTAX = [
   ...NO_NON_NULL,
@@ -879,6 +897,7 @@ const API_SYNTAX = [
   ...NO_CLOCK,
   ...NO_ORG_FROM_REQUEST,
   ...NO_GLOBAL_PROCESS_ENV,
+  ...NO_LOADCONFIG_OPTIONS,
 ];
 
 export default tseslint.config(
