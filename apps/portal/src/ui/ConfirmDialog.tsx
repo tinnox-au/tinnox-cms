@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { Button } from './Button.tsx';
-import { Dialog } from './Dialog.tsx';
+import { Dialog, type ReturnFocus } from './Dialog.tsx';
 
 export interface ConfirmDialogProps {
   readonly open: boolean;
@@ -19,8 +19,13 @@ export interface ConfirmDialogProps {
   readonly onCancel: () => void;
   /** `data-testid` of the dialog; the buttons get `<testId>-cancel` and `<testId>-confirm`. */
   readonly testId?: string;
-  /** Passed to `Dialog`: where focus goes when the opener is gone after the action. */
-  readonly returnFocus?: () => HTMLElement | null;
+  /**
+   * Passed to `Dialog`: where focus goes when the opener is gone after the action (EAX-14).
+   * Required, so every dialog decides: a dialog that removes a row passes the finder of
+   * `useRowFocusReturn` (the next row, else the previous, else the page's primary action);
+   * one that removes nothing the opener sits in passes `'opener'`.
+   */
+  readonly returnFocus: ReturnFocus;
 }
 
 /**

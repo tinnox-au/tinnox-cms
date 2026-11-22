@@ -3,7 +3,7 @@ import { isApiRequestError } from '../../api/client.ts';
 import { api } from '../../api/index.ts';
 import { refusalNames, screenWording } from '../../lib/playlistsListActions.ts';
 import { Banner, ConfirmDialog, ErrorNotice } from '../../ui/index.ts';
-import { InUseList } from '../shared/index.ts';
+import { InUseList, useRowFocusReturn, type RowFocusSource } from '../shared/index.ts';
 
 /** What the dialog needs of a schedule: a list row and the editor's schedule both fit. */
 export interface ScheduleToDelete {
@@ -17,6 +17,11 @@ export interface DeleteScheduleDialogProps {
   readonly onClose: () => void;
   /** After the server deleted it; the dialog has closed. */
   readonly onDeleted: (schedule: ScheduleToDelete) => void;
+  /**
+   * Where focus goes once the deleted row has left the list (EAX-14); `'opener'` where no
+   * list shows it (the editor, which leaves the page after a delete). Read when it opens.
+   */
+  readonly rowFocus: RowFocusSource | 'opener';
 }
 
 /**
@@ -24,7 +29,17 @@ export interface DeleteScheduleDialogProps {
  * (`schedule_in_use`); the dialog then names those screens, so the operator knows where to
  * assign other content first. Any other refusal is shown with its error code.
  */
-export function DeleteScheduleDialog({ schedule, onClose, onDeleted }: DeleteScheduleDialogProps) {
+export function DeleteScheduleDialog({
+  schedule,
+  onClose,
+  onDeleted,
+  rowFocus,
+}: DeleteScheduleDialogProps) {
+  const returnFocus = useRowFocusReturn(
+    schedule !== null,
+    schedule === null ? [] : [schedule.id],
+    rowFocus,
+  );
   // The schedule as it was when the dialog opened; it also stays while the dialog fades out.
   const [shown, setShown] = useState<ScheduleToDelete | null>(schedule);
   // The prop as last seen, null included, so reopening for the same schedule starts afresh.
@@ -71,6 +86,7 @@ export function DeleteScheduleDialog({ schedule, onClose, onDeleted }: DeleteSch
       onConfirm={confirm}
       onCancel={onClose}
       testId="schedules-delete-dialog"
+      returnFocus={returnFocus}
     >
       <p>
         The schedule is removed for good. Screens that already show it keep it until their next

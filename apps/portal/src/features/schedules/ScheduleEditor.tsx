@@ -513,6 +513,7 @@ export function ScheduleEditor({ initial, playlists }: ScheduleEditorProps) {
           void navigate('/schedules');
           toast.success(`${schedule.name} deleted`);
         }}
+        rowFocus="opener"
       />
     </EditorPage>
   );

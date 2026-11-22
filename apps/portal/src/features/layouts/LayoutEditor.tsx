@@ -419,6 +419,7 @@ export function LayoutEditor({ initial, playlists }: LayoutEditorProps) {
           void navigate('/layouts');
           toast.success(`${layout.name} deleted`);
         }}
+        rowFocus="opener"
       />
     </EditorPage>
   );

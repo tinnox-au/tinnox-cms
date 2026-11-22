@@ -50,6 +50,7 @@ export function useLeaveGuard(
   const dialog = (
     <ConfirmDialog
       open={blocker.state === 'blocked'}
+      returnFocus="opener"
       title="Leave without saving?"
       confirmLabel="Leave and discard changes"
       cancelLabel="Stay on this page"

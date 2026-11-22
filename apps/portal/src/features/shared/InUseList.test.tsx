@@ -71,6 +71,7 @@ const DIALOGS: readonly {
         layout={{ id: ID(1), name: 'Menu band' }}
         onClose={close}
         onDeleted={close}
+        rowFocus="opener"
       />
     ),
   },
@@ -84,6 +85,7 @@ const DIALOGS: readonly {
         schedule={{ id: ID(2), name: 'Opening hours' }}
         onClose={close}
         onDeleted={close}
+        rowFocus="opener"
       />
     ),
   },
@@ -92,7 +94,7 @@ const DIALOGS: readonly {
     testId: 'apps-delete-dialog',
     list: 'apps-delete-playlists',
     refuse: () => deleteApp.mockRejectedValueOnce(inUse('app_in_use', 'playlist')),
-    dialog: <DeleteAppDialog app={app(3)} onClose={close} onDeleted={close} />,
+    dialog: <DeleteAppDialog app={app(3)} onClose={close} onDeleted={close} rowFocus="opener" />,
   },
 ];
 

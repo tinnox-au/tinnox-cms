@@ -181,8 +181,9 @@ interface DialogProps {
   busy?: boolean; // cannot be dismissed while true
   flush?: boolean; // no body padding
   className?: string;
-  returnFocus?: () => HTMLElement | null; // focus target when the opener has gone (see below)
+  returnFocus?: ReturnFocus; // where focus goes when the opener has gone (see below); default 'opener'
 }
+type ReturnFocus = 'opener' | (() => HTMLElement | null);
 ```
 
 ```tsx
@@ -195,7 +196,7 @@ interface DialogProps {
 </Dialog>
 ```
 
-Accessibility: a native `<dialog>` opened with `showModal()`, so it has the dialog role, the page behind is inert and Tab stays inside. It is labelled by its title. Focus on open goes to the element marked `data-autofocus`, else the first control in the body, else the first footer button; on close it returns to the element that opened it. When that element has gone, at once or when the list is read again a moment later (a deleted row's "Actions" button, a selection bar that empties), focus goes to `returnFocus()` if given, else to the page's `main` landmark, never to `<body>` (`focusReturn.ts`; it never takes focus from a control the person chose, and stops at the first pointer press). A list that deletes rows should pass `returnFocus` that finds the next row's "Actions" button, else the previous row's, else the page's primary action. Keep the component mounted and toggle `open`; do not render it conditionally, or the exit transition and the focus return are lost.
+Accessibility: a native `<dialog>` opened with `showModal()`, so it has the dialog role, the page behind is inert and Tab stays inside. It is labelled by its title. Focus on open goes to the element marked `data-autofocus`, else the first control in the body, else the first footer button; on close it returns to the element that opened it. When that element has gone, at once or when the list is read again a moment later (a deleted row's "Actions" button, a selection bar that empties), focus goes to `returnFocus()` if it is a function, else to the page's `main` landmark, never to `<body>` (`focusReturn.ts`; it never takes focus from a control the person chose, and stops at the first pointer press). A list that deletes rows passes `returnFocus` that finds the next row's "Actions" button, else the previous row's, else the page's primary action (`useRowFocusReturn` in `features/shared`); `ConfirmDialog` requires the prop, so each confirmation decides (EAX-14). Keep the component mounted and toggle `open`; do not render it conditionally, or the exit transition and the focus return are lost.
 
 Look (restyle 2026-11): a borderless `--surface` card with a 24 px radius and `--shadow-3` over the `--scrim` backdrop; the title is the card title (21 px / 600). The footer has no rule while the body fits; when the body scrolls, a `--line` hairline appears above the footer (scroll-driven, so browsers without scroll timelines show none). Footer buttons are the standard pills. Under 560 px the dialog is a sheet on the bottom edge with only its top corners rounded, and its footer buttons share the width.
 
@@ -213,18 +214,19 @@ interface ConfirmDialogProps {
   onConfirm: () => void;
   onCancel: () => void;
   testId?: string; // on the dialog; the buttons get `<testId>-cancel` and `<testId>-confirm`
-  returnFocus?: () => HTMLElement | null; // passed to Dialog
+  returnFocus: ReturnFocus; // required: useRowFocusReturn's finder when a row goes, else 'opener'
 }
 ```
 
 ```tsx
 <ConfirmDialog open={target !== null} title="Delete this file?" confirmLabel="Delete file"
-  tone="danger" busy={deleting} onConfirm={doDelete} onCancel={() => setTarget(null)}>
+  tone="danger" busy={deleting} onConfirm={doDelete} onCancel={() => setTarget(null)}
+  returnFocus={returnFocus /* from useRowFocusReturn */}>
   <p><strong>{target?.name}</strong> will be removed from the library.</p>
 </ConfirmDialog>
 ```
 
-Accessibility: `getByRole('dialog')` finds it. Focus starts on Cancel, so Enter never confirms by accident. Show a server refusal inside the dialog body or in a `Banner` on the page, as text.
+Accessibility: `getByRole('dialog')` finds it. Focus starts on Cancel, so Enter never confirms by accident. `returnFocus` has no default: a dialog that removes a row passes the finder of `useRowFocusReturn`, so focus lands on the next row, else the previous one, else the page's primary action; one that removes nothing the opener sits in (sign out, revoke, leave, discard) passes `'opener'`. Show a server refusal inside the dialog body or in a `Banner` on the page, as text.
 
 ## Toast: ToastProvider, useToast
 

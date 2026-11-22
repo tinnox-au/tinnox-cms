@@ -469,9 +469,13 @@ interface RowFocusSource {
   order: readonly string[]; // ids of the rows or tiles on view, in the order shown
   row: (id: string) => Element | null; // the row or tile of an id
   primary: () => HTMLElement | null; // the page's primary add or new button
+  button?: string; // the control in a row to focus, as a selector; "Actions for …" by default
 }
-function useRowFocusReturn(open: boolean, deletedIds: readonly string[], source?: RowFocusSource):
-  (() => HTMLElement | null) | undefined; // pass to Dialog or ConfirmDialog as returnFocus
+function useRowFocusReturn(
+  open: boolean,
+  deletedIds: readonly string[],
+  source: RowFocusSource | 'opener' | undefined, // 'opener': no list shows the item (an editor)
+): ReturnFocus; // pass to Dialog or ConfirmDialog as returnFocus
 function rowByTestId(...prefixes: string[]): (id: string) => Element | null;
 function elementByTestId(testId: string): () => HTMLElement | null;
 ```
@@ -483,7 +487,7 @@ function elementByTestId(testId: string): () => HTMLElement | null;
     primary: elementByTestId('media-library-add') }} />
 ```
 
-For delete dialogs (media, playlists, tags). The order is read when the dialog opens. When the control that opened it has gone, focus goes to the "Actions for …" button of the row after the deleted one, else the row before, else `primary()`; after a bulk delete to the first remaining row's actions button, else the select-all checkbox, else `primary()`. The choice of neighbour is `rowFocusCandidates` in `lib/rowFocus.ts` (unit-tested).
+For delete dialogs (media, playlists, tags, layouts, schedules, apps, folders, alert addresses, members, invites). The order is read when the dialog opens. When the control that opened it has gone, focus goes to the "Actions for …" button of the row after the deleted one, else the row before, else `primary()`; after a bulk delete to the first remaining row's actions button, else the select-all checkbox, else `primary()`. The choice of neighbour is `rowFocusCandidates` in `lib/rowFocus.ts` (unit-tested).
 
 ## InUseList
 

@@ -356,6 +356,7 @@ export function PlaylistEditor({ initial }: PlaylistEditorProps) {
 
       <ConfirmDialog
         open={confirmDiscard}
+        returnFocus="opener"
         title="Discard your changes?"
         confirmLabel="Discard changes"
         tone="danger"

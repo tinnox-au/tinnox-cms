@@ -23,7 +23,7 @@ import {
   SkeletonGroup,
   VisuallyHidden,
 } from '../../../ui/index.ts';
-import type { FoldersResource } from '../../shared/index.ts';
+import type { FoldersResource, RowFocusSource } from '../../shared/index.ts';
 import './mediaLibrary.css';
 
 /** Folder chips shown before the rest move into the "More folders" menu. */
@@ -42,6 +42,27 @@ export interface FolderChipsProps {
   readonly onRename?: (folder: FolderDto) => void;
   /** "Delete folder" in the chosen folder's menu; left out, the item is hidden. */
   readonly onDelete?: (folder: FolderDto) => void;
+}
+
+/**
+ * Where focus goes once a folder has been deleted from the chosen folder's menu, whose button
+ * leaves with it (EAX-14): the chip of the next folder in `folders` (the order the chips are
+ * in), else of the previous one, else "New folder", else "All". A folder in the "More
+ * folders" menu has no chip and is passed over.
+ */
+export function folderChipFocus(folders: readonly FolderDto[]): RowFocusSource {
+  return {
+    mode: 'row',
+    order: folders.map((folder) => folder.id),
+    row: (id) =>
+      document.querySelector(
+        `[data-testid="media-library-folder"][data-folder-id="${CSS.escape(id)}"]`,
+      ),
+    button: 'button[aria-pressed]',
+    primary: () =>
+      document.querySelector<HTMLElement>('[data-testid="media-library-folder-new"]') ??
+      document.querySelector<HTMLElement>('[data-testid="media-library-folder-all"] button'),
+  };
 }
 
 /**

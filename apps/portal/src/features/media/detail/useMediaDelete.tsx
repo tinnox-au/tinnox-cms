@@ -73,6 +73,7 @@ export function useMediaDelete({
   const dialog = (
     <ConfirmDialog
       open={state.open}
+      returnFocus="opener"
       title="Delete this file?"
       confirmLabel="Delete file"
       tone="danger"

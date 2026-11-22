@@ -38,6 +38,7 @@ import {
   useToast,
   type DataTableColumn,
 } from '../../ui/index.ts';
+import { elementByTestId, rowByTestId } from '../shared/index.ts';
 import { CreateScheduleDialog } from './CreateScheduleDialog.tsx';
 import { DeleteScheduleDialog } from './DeleteScheduleDialog.tsx';
 import './schedules.css';
@@ -209,6 +210,12 @@ export function SchedulesPage() {
         onDeleted={(schedule) => {
           reload();
           toast.success(`${schedule.name} deleted`);
+        }}
+        rowFocus={{
+          mode: 'row',
+          order: rows.map((schedule) => schedule.id),
+          row: rowByTestId('schedules-row-'),
+          primary: elementByTestId('schedules-create'),
         }}
       />
     </>

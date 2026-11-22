@@ -12,7 +12,8 @@ import {
   TextInput,
   useToast,
 } from '../../../ui/index.ts';
-import type { FoldersResource } from '../../shared/index.ts';
+import { useRowFocusReturn, type FoldersResource } from '../../shared/index.ts';
+import { folderChipFocus } from './FolderChips.tsx';
 import './mediaLibrary.css';
 
 /** What the folder name dialog is doing: making a folder, or renaming one. */
@@ -159,6 +160,12 @@ export function DeleteFolderDialog({
   onDeleted,
 }: DeleteFolderDialogProps) {
   const toast = useToast();
+  // The menu that asked for the delete goes with the folder: focus moves to a neighbour's chip.
+  const returnFocus = useRowFocusReturn(
+    folder !== null,
+    folder === null ? [] : [folder.id],
+    folderChipFocus(folders.folders),
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [held, setHeld] = useState<FolderDto | null>(folder);
@@ -199,6 +206,7 @@ export function DeleteFolderDialog({
         void confirm();
       }}
       onCancel={onClose}
+      returnFocus={returnFocus}
     >
       <div className="tx-stack" data-testid="media-library-folder-delete">
         <p className="tx-break">

@@ -727,6 +727,7 @@ export function AppEditor({ initial }: AppEditorProps) {
           void navigate('/apps');
           toast.success(`${app.name} deleted`);
         }}
+        rowFocus="opener"
       />
     </EditorPage>
   );
