@@ -47,6 +47,10 @@ import type { AppContext } from '../src/context.ts';
 import type { MailMessage, Mailer } from '../src/mail.ts';
 import { MediaPipeline } from '../src/media/pipeline.ts';
 
+// Tests outside apps/api reach the harness only as '@tinnox/api/test-support' (the package's
+// one export), so the types they need are re-exported here.
+export type { IdentityProvider };
+
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const envFile = join(repoRoot, '.env');
 if (existsSync(envFile)) process.loadEnvFile(envFile);

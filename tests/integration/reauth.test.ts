@@ -11,7 +11,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { sessionRevokeMembership, withOrg } from '@tinnox/db';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { IdentityProvider } from '../../apps/api/src/auth/oidc.ts';
+import type { IdentityProvider } from '@tinnox/api/test-support';
 import {
   addMember,
   arrangeAsDefiner,

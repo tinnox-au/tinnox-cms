@@ -7,7 +7,7 @@ import {
 import { describe, expect, it } from 'vitest';
 import { mfaSatisfied } from './auth/oidc.ts';
 import { sniffMediaType } from './media/sniff.ts';
-import { displayNameFromUpload } from './routes/media.ts';
+import { displayNameFromUpload } from './media/upload-name.ts';
 import {
   buildMediaUrl,
   pairingClientKey,

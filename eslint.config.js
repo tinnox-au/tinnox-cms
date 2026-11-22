@@ -95,6 +95,265 @@ const NO_MODULE_MOCK = ['mock', 'doMock', 'importMock', 'stubGlobal'].map((prope
 /** Files that match a glob of `outer` and a glob of `inner` (an inner array means "all of"). */
 const both = (outer, inner) => outer.flatMap((o) => inner.map((i) => [o, i]));
 
+// Import boundaries (adoption plan section 3.1, step 7). One row per workspace of the root
+// package.json, plus scripts: the @tinnox packages its files may import. It records the real
+// graph; scripts/lib/import-boundaries-lint.test.ts fails when a workspace has no row.
+// No package imports an app, and no app imports another app.
+export const IMPORT_LAYERS = {
+  'packages/contracts': [],
+  'packages/storage': [],
+  // Step 17 adds a type-only @tinnox/contracts import here (D19).
+  'packages/db': [],
+  'packages/domain': ['contracts'],
+  'packages/app-render': ['contracts'],
+  'packages/delivery': ['contracts', 'domain'],
+  'apps/api': ['contracts', 'db', 'storage', 'domain', 'delivery'],
+  // Not declared in its package.json yet; the manifest check of step 9 adds it.
+  'apps/media-worker': ['contracts'],
+  'apps/portal': ['contracts', 'domain', 'app-render'],
+  'apps/player-web': ['contracts', 'domain', 'app-render'],
+  // The API's test harness is the one app entry anything may import (apps/api/package.json).
+  tests: ['contracts', 'db', 'domain', 'app-render', 'api/test-support'],
+  scripts: ['contracts', 'db', 'domain'],
+};
+
+// Every file ESLint parses as code. A glob without an extension would make ESLint lint JSON,
+// Markdown and SQL as JavaScript.
+const CODE_FILES = '**/*.{ts,tsx,js,mjs,cjs}';
+
+// The @tinnox names that are apps, never libraries: every workspace under apps/, and tests.
+const APP_PACKAGES = [
+  ...Object.keys(IMPORT_LAYERS)
+    .filter((dir) => dir.startsWith('apps/'))
+    .map((dir) => dir.slice('apps/'.length)),
+  'tests',
+];
+
+/** A regular expression that matches any of `names` as a whole specifier or its subpath. */
+const anyOf = (names) => `(${names.map((name) => name.replace(/[.+]/g, '\\$&')).join('|')})(/|$)`;
+
+// The last segment of every workspace under apps/ or packages/. A relative path between two
+// workspaces with the same parent ('../../api/src/app.ts' from apps/portal/src) names no apps/ or
+// packages/ segment, only `../` steps and the sibling's directory name.
+const WORKSPACE_LEAVES = Object.keys(IMPORT_LAYERS)
+  .filter((dir) => dir.includes('/'))
+  .map((dir) => dir.slice(dir.indexOf('/') + 1));
+
+// The top-level folders of a workspace that hold code (src, test, player-web's sw and build). A
+// relative path must name one after the workspace, so a portal feature folder called apps or api
+// ('../../api/client.ts', '../../apps/AppPreview.tsx') is not a workspace.
+const WORKSPACE_CODE = '/(src|test|sw|build)(/|$)';
+
+/** The patterns every file of the workspace `dir` gets. */
+function layerPatterns(dir) {
+  const allowed = IMPORT_LAYERS[dir];
+  const allowedApps = allowed.filter((name) => APP_PACKAGES.includes(name.split('/')[0]));
+  const packages = allowed.filter((name) => !allowedApps.includes(name));
+  const browser = dir === 'apps/portal' || dir === 'apps/player-web';
+  return [
+    {
+      // An allowed package, or an app (the next entry's message), is not this entry's to report.
+      regex: `^@tinnox/(?!${anyOf([...packages, ...APP_PACKAGES])})`,
+      message:
+        packages.length === 0
+          ? `${dir} is a bottom layer and imports no @tinnox package. Take what you need as a parameter, or move the code into this package.`
+          : `${dir} may import only ${packages.map((name) => `@tinnox/${name}`).join(', ')} from @tinnox/* (adoption plan section 3.1). ${
+              browser
+                ? 'This file is bundled for the browser: call the API through apps/portal/src/api or apps/player-web/src/platform/api.ts.'
+                : 'Take what you need as a parameter, or move the shared code into a package both may import.'
+            }`,
+    },
+    {
+      regex: `^@tinnox/${allowedApps.length === 0 ? '' : `(?!${anyOf(allowedApps)})`}${anyOf(APP_PACKAGES)}`,
+      message:
+        "Apps are not libraries. Move the shared code into a package under packages/ and import that; tests reach the API's harness only as '@tinnox/api/test-support'.",
+    },
+    {
+      // An app's files are the previous entry's to report.
+      regex: `^@tinnox/(?!${anyOf(APP_PACKAGES)})[a-z-]+/(src|test)(/|$)`,
+      message:
+        "Do not import a file inside another package. Import its entry ('@tinnox/<name>', or a path its package.json exports) and export what you need from its src/index.ts.",
+    },
+    {
+      // Through apps/ or packages/ (from tests or scripts, or across the two parents), or straight
+      // to a sibling with the same parent.
+      regex: `^\\.{1,2}/(.*/)?(apps|packages)/[a-z-]+${WORKSPACE_CODE}|^(\\.\\./)+(${WORKSPACE_LEAVES.join('|')})${WORKSPACE_CODE}`,
+      message:
+        "Do not reach into another workspace by relative path. Import '@tinnox/<name>' and export what you need from its src/index.ts (or its package.json exports).",
+    },
+    // Rule (g): only apps/api serves HTTP, tests included.
+    ...(dir === 'apps/api'
+      ? []
+      : [
+          {
+            regex: '^(fastify|fastify-plugin|@fastify/[^/]+)(/|$)',
+            message:
+              'Only apps/api serves HTTP. Add the route under apps/api/src/routes and call it over HTTP; shared request and response shapes go in @tinnox/contracts.',
+          },
+        ]),
+  ];
+}
+
+// Node builtins that only make sense on a server (files, processes, sockets, the host): rule (f)
+// bans their bare names as well as every node: specifier. A fixed list, so lint does not change
+// with the Node version that runs it.
+const NODE_ONLY_MODULES = [
+  'child_process',
+  'cluster',
+  'dgram',
+  'dns',
+  'fs',
+  'http',
+  'http2',
+  'https',
+  'net',
+  'os',
+  'readline',
+  'tls',
+  'worker_threads',
+];
+
+// Extra patterns for a subset of the files: each facet adds its patterns (or the patterns it
+// gives for the workspace) to the workspace's own.
+// `only` and `except` name the workspaces a facet can touch, and facets of one `group` match
+// disjoint files, so the generator makes no block that can match nothing.
+const IMPORT_FACETS = [
+  {
+    // Non-test files. Rule (h): they import no test code. Rule (g), D25: outside packages/db they
+    // import no pg, scripts included; test files and test support may (they arrange data with
+    // their own clients).
+    files: [CODE_FILES],
+    ignores: TEST_FILES,
+    patterns: (dir) => [
+      {
+        regex: '(^|/)tests?/|\\.test(-support)?\\.tsx?$',
+        message:
+          'Product code does not import test code. Move what both need into a module that is not a test file, and import it from the test.',
+      },
+      ...(dir === 'packages/db'
+        ? []
+        : [
+            {
+              regex: '^pg(/|$)',
+              message:
+                'Only packages/db talks to PostgreSQL. Use createPool and withOrg from @tinnox/db (connectMigrator for an offline tool); a direct pg client skips the tinnox_app role check and the row_security and timeout start-up parameters.',
+            },
+          ]),
+    ],
+  },
+  {
+    // Rule (f): browser source, without its tests and the Vite configuration (both run in Node).
+    only: ['apps/portal', 'apps/player-web', 'packages/app-render'],
+    files: BROWSER_FILES,
+    ignores: [...TEST_FILES, '**/vite.config.ts'],
+    patterns: [
+      {
+        // Every node: specifier (the plan's rule), and the bare names of the server-only modules.
+        // The other bare builtin names (buffer, events, url, util, process, path, assert, ...) are
+        // also npm packages that browsers use as polyfills, so they stay allowed.
+        regex: `^(node:|${anyOf(NODE_ONLY_MODULES)})`,
+        message:
+          'This file is bundled for the browser, where Node modules do not exist. Call the API through apps/portal/src/api or apps/player-web/src/platform/api.ts, and use web APIs (crypto.subtle, URL, TextEncoder).',
+      },
+    ],
+  },
+  {
+    // Rule (d): replaces the old deny-list of Node modules and frameworks with an allow-list.
+    only: ['packages/domain'],
+    files: ['packages/domain/src/**'],
+    ignores: TEST_FILES,
+    patterns: [
+      {
+        regex: '^(?!@tinnox/|\\./)',
+        message:
+          'packages/domain is pure: it imports only @tinnox/contracts and its own files. Take time, ids and I/O results as parameters (prototype-m0.md section 3).',
+      },
+    ],
+  },
+  {
+    // Rule (e).
+    only: ['packages/contracts'],
+    files: ['packages/contracts/src/**'],
+    ignores: TEST_FILES,
+    patterns: [
+      {
+        regex: '^(?!zod(/|$)|@tinnox/|\\./)',
+        message:
+          'packages/contracts holds schemas and types: it imports only zod and its own files. Put code that needs anything else in the package that uses it.',
+      },
+    ],
+  },
+  {
+    // Rule (i), D6: a route file imports no other route file. The rule compares the specifier
+    // text and never resolves it, so it needs both halves: './media.ts' and '../routes/media.ts'.
+    only: ['apps/api'],
+    group: 'api-routes',
+    files: ['apps/api/src/routes/**'],
+    patterns: [
+      {
+        regex: '^\\./|(^|/)routes/',
+        message:
+          'A route file imports no other route file (D6). Move the shared code to a module outside routes/ (as display-state.ts, media/rows.ts, tags.ts or publishing.ts) and import it from there.',
+      },
+    ],
+  },
+  {
+    // Rule (i), D6: only app.ts registers the routes; tests included.
+    only: ['apps/api'],
+    group: 'api-routes',
+    files: ['apps/api/**'],
+    ignores: ['apps/api/src/app.ts', 'apps/api/src/routes/**'],
+    patterns: [
+      {
+        regex: '(^|/)routes/',
+        message:
+          'Only apps/api/src/app.ts imports from routes/ (D6). Import the shared module instead (as display-state.ts, media/rows.ts, tags.ts or publishing.ts); if the code is still in a route file, move it out of routes/ first.',
+      },
+    ],
+  },
+];
+
+/** Every combination of the facets in `list` that can meet, the empty one first, longer ones later. */
+const combinations = (list) =>
+  list
+    .reduce((sets, item) => [...sets, ...sets.map((set) => [...set, item])], [[]])
+    .filter((set) => set.every((a) => !set.some((b) => a !== b && a.group && a.group === b.group)))
+    .sort((a, b) => a.length - b.length);
+
+/**
+ * The no-restricted-imports blocks: for each workspace, one block per combination of the facets
+ * that apply to it, each with the complete pattern list (a later block replaces the options of
+ * an earlier one, so a file always gets the block of exactly the facets it matches).
+ */
+function importBoundaryBlocks() {
+  return Object.keys(IMPORT_LAYERS).flatMap((dir) => {
+    const facets = IMPORT_FACETS.filter(
+      (facet) => (facet.only?.includes(dir) ?? true) && !facet.except?.includes(dir),
+    );
+    return combinations(facets).map((set) => ({
+      // All of: the workspace and one glob of each facet in the set.
+      files: set.reduce(
+        (paths, facet) => paths.flatMap((path) => facet.files.map((glob) => [...path, glob])),
+        [[`${dir}/${CODE_FILES}`]],
+      ),
+      ignores: set.flatMap((facet) => facet.ignores ?? []),
+      rules: {
+        'no-restricted-imports': [
+          'error',
+          {
+            patterns: [
+              ...layerPatterns(dir),
+              ...set.flatMap((facet) =>
+                typeof facet.patterns === 'function' ? facet.patterns(dir) : facet.patterns,
+              ),
+            ],
+          },
+        ],
+      },
+    }));
+  });
+}
+
 export default tseslint.config(
   {
     ignores: [
@@ -150,30 +409,13 @@ export default tseslint.config(
     ],
     languageOptions: { globals: { ...globals.node } },
   },
+  ...importBoundaryBlocks(),
   {
-    // The domain must stay free of platform code (prototype-m0.md section 3).
+    // The domain must stay free of platform code (prototype-m0.md section 3); its imports are
+    // held by the import-boundary blocks above.
     files: ['packages/domain/src/**/*.ts'],
     ignores: ['**/*.test.ts', '**/*.test-support.ts'],
     rules: {
-      'no-restricted-imports': [
-        'error',
-        {
-          patterns: [
-            {
-              group: ['node:*', 'fs', 'path', 'crypto', 'http', 'https', 'net'],
-              message: 'packages/domain must not use Node APIs.',
-            },
-            {
-              group: ['@tinnox/*', '!@tinnox/contracts'],
-              message: 'packages/domain may depend only on @tinnox/contracts.',
-            },
-            {
-              group: ['react', 'react-dom', 'fastify', 'pg', 'idb'],
-              message: 'packages/domain must stay framework-free.',
-            },
-          ],
-        },
-      ],
       'no-restricted-globals': [
         'error',
         'window',

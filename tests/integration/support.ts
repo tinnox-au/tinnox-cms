@@ -9,9 +9,9 @@ import { chmodSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
-import type { PairedPlayer, TestApp } from '../../apps/api/test/support.ts';
+import type { PairedPlayer, TestApp } from '@tinnox/api/test-support';
 
-export * from '../../apps/api/test/support.ts';
+export * from '@tinnox/api/test-support';
 
 export const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 export const fixturesDir = join(repoRoot, 'apps', 'api', 'test-fixtures', 'out');

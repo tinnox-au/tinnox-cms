@@ -7,7 +7,6 @@
  */
 import {
   ABSOLUTE,
-  AppContentSchema,
   AppCreateSchema,
   AppPatchSchema,
   IdParamSchema,
@@ -17,41 +16,11 @@ import {
 } from '@tinnox/contracts';
 import { auditScoped, withOrg, type Tx } from '@tinnox/db';
 import type { FastifyInstance } from 'fastify';
+import { APP_COLUMNS, toAppDto, type AppRow } from '../app-rows.ts';
 import { withOrgAllowed } from '../auth/permissions.ts';
 import { operatorOf } from '../auth/session.ts';
 import type { AppContext } from '../context.ts';
-import { bigintToNumber, iso } from '../db-helpers.ts';
 import { HttpError, notFound, parseInput, pgErrorCode } from '../errors.ts';
-
-export interface AppRow {
-  id: string;
-  type: string;
-  name: string;
-  description: string | null;
-  settings: unknown;
-  created_at: Date;
-  updated_at: Date;
-  usage_count: string;
-}
-
-/** Select list for `app a`; the usage count is the number of live playlists containing it. */
-export const APP_COLUMNS = `a.id, a.type, a.name, a.description, a.settings, a.created_at, a.updated_at,
-  (SELECT count(DISTINCT i.playlist_id) FROM playlist_item i
-   JOIN playlist p ON p.id = i.playlist_id AND p.org_id = i.org_id
-   WHERE i.app_id = a.id AND i.org_id = a.org_id AND p.deleted_at IS NULL) AS usage_count`;
-
-/** Stored settings were validated on write, so a failure here is a server fault and throws. */
-export function toAppDto(row: AppRow): AppDto {
-  return {
-    id: row.id,
-    name: row.name,
-    description: row.description,
-    content: AppContentSchema.parse({ type: row.type, settings: row.settings }),
-    usageCount: bigintToNumber(row.usage_count),
-    createdAt: iso(row.created_at),
-    updatedAt: iso(row.updated_at),
-  };
-}
 
 async function loadApp(tx: Tx, id: string): Promise<AppDto | null> {
   const { rows } = await tx.query<AppRow>(

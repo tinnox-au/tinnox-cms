@@ -48,6 +48,12 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { AuthFailureGuard, clientKeyOf } from '../auth/failure-guard.ts';
 import { perMinute, type AppContext } from '../context.ts';
+import {
+  contentRectOf,
+  DELIVERY_COLUMNS,
+  reportedStateOf,
+  type DeliveryRow,
+} from '../display-state.ts';
 import { HttpError, notFound, parseInput } from '../errors.ts';
 import { serveObject } from '../media/serve.ts';
 import {
@@ -58,7 +64,6 @@ import {
   randomToken,
   verifyMediaUrl,
 } from '../security.ts';
-import { contentRectOf, DELIVERY_COLUMNS, reportedStateOf, type DeliveryRow } from './displays.ts';
 
 const PAIRING_POLL_INTERVAL_MS = 2_000;
 /** Failed device-credential lookups allowed per client address per window (scaled in tests). */
