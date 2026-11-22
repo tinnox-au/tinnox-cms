@@ -182,10 +182,13 @@ describe('AlertsPage', () => {
         fromApi: true,
       }),
     );
+    // Nothing was added, so the list is not read again. Counted from here: under StrictMode
+    // the page's first read runs twice on mount (the first cancelled), as in development.
+    const reads = listAlertRecipients.mock.calls.length;
     await email.fill('ops@example.com');
     await submit.click();
     await expect.element(screen.getByText('The address was not added')).toBeVisible();
-    expect(listAlertRecipients).toHaveBeenCalledTimes(1);
+    expect(listAlertRecipients).toHaveBeenCalledTimes(reads);
 
     addAlertRecipient.mockRejectedValueOnce(
       new ApiRequestError({

@@ -13,10 +13,24 @@ const IDLE: Data = { processing: false };
 const BUSY: Data = { processing: true };
 const pollWhileProcessing = (data: Data) => (data.processing ? POLL_MS : null);
 
+/** The reads that reached the server: their count and, in turn, their answers. */
 const load = vi.fn<(signal: AbortSignal) => Promise<Data>>();
 
+/**
+ * What the hook calls. A read it cancels before the request goes out never reaches `load`:
+ * under StrictMode (componentTests.setup.ts) the first mount starts a read and its cleanup
+ * cancels it at once, as in development, and that read must neither count nor take an
+ * answer. A read the hook forgot to cancel still reaches `load` and fails the counts.
+ */
+function read(signal: AbortSignal): Promise<Data> {
+  return Promise.resolve().then(() => {
+    signal.throwIfAborted();
+    return load(signal);
+  });
+}
+
 async function mount(poll: Poll) {
-  const hook = await renderHook(() => useLoad(load, poll));
+  const hook = await renderHook(() => useLoad(read, poll));
   await advance(hook, 0);
   return hook;
 }
