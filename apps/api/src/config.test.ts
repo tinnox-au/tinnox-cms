@@ -188,6 +188,28 @@ describe('loadConfig in production (D19)', () => {
     );
   });
 
+  it('judges the database password pg sends: one in the query wins over the authority (SEC-2)', () => {
+    const url = production['DATABASE_URL'] ?? '';
+    expect(problems({ ...production, DATABASE_URL: `${url}?password=dev-app-password` })).toEqual([
+      'DATABASE_URL password is a development or placeholder value',
+    ]);
+    // Of several ?password= pg sends the last one, so that is the one judged.
+    expect(
+      problems({
+        ...production,
+        DATABASE_URL: `${url}?password=${strong('db')}&password=dev-app-password`,
+      }),
+    ).toEqual(['DATABASE_URL password is a development or placeholder value']);
+    // pg falls back to the authority's password when the query's is empty.
+    expect(problems({ ...production, DATABASE_URL: `${url}?password=` })).toEqual([]);
+    expect(
+      problems({
+        ...production,
+        DATABASE_URL: `postgres://tinnox_app:dev-password@db.internal:5432/tinnox?password=${strong('db')}`,
+      }),
+    ).toEqual([]);
+  });
+
   it.each([
     ['API_PUBLIC_ORIGIN', 'http://api.signage.example'],
     ['PORTAL_ORIGIN', 'http://localhost:5173'],

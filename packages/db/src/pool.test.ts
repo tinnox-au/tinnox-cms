@@ -138,6 +138,34 @@ describe('startupSettingsProblem: a connection string must not replace what crea
     }
   });
 
+  it('refuses a string pg rewrites before it reads it, and says to write a plain URL (SEC-1)', () => {
+    // pg-connection-string runs encodeURI over a string with a space or a malformed percent
+    // sequence, then reads host, options and statement_timeout from these queries; new URL
+    // refuses the first two as they are. The last has no setting and is refused all the same:
+    // what pg reads from it is not what this check would read.
+    const query = 'host=127.0.0.1&options=-c%20row_security%3Doff&statement_timeout=0';
+    for (const url of [
+      `postgres://tinnox_app:${PASSWORD}@a b/tinnox?${query}`,
+      `postgres://tinnox_app:${PASSWORD}@local<host/tinnox?application_name=%zz&${query}`,
+      `postgres://tinnox_app:${PASSWORD}%zz@127.0.0.1:5432/tinnox`,
+    ]) {
+      const problem = startupSettingsProblem(url, 'DATABASE_URL');
+      expect(problem, url.replace(PASSWORD, '***')).toMatch(
+        /^DATABASE_URL cannot be read the way pg reads it: .* Write the connection string as a plain URL, postgres:\/\/user:password@host:port\/database, with every special character of the user name and password percent-encoded/,
+      );
+      expect(problem).not.toContain(PASSWORD);
+    }
+    expect(() =>
+      createPool({ connectionString: `postgres://tinnox_app:${PASSWORD}@a b/tinnox?${query}` }),
+    ).toThrow(/^the database connection string cannot be read the way pg reads it/);
+  });
+
+  it('refuses a string that is no URL in either form pg tries', () => {
+    expect(startupSettingsProblem('postgres://tinnox_app@local<host/tinnox')).toMatch(
+      /cannot be read the way pg reads it/,
+    );
+  });
+
   it('createPool refuses such a connection string when the pool is created, before any connection', () => {
     expect(() =>
       createPool({ connectionString: `${BASE}?options=-c%20row_security%3Doff` }),

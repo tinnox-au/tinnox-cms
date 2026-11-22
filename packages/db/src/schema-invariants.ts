@@ -26,6 +26,14 @@ const PINNED_SEARCH_PATH = 'search_path=pg_catalog, pg_temp';
 const READER_SEARCH_PATH = 'pg_catalog';
 /** Where an author finds the pattern to copy. */
 const EXAMPLE = 'db/migrations/0014_display_alerts.sql';
+/**
+ * The rules cover every schema but PostgreSQL's own, so they also meet objects no migration made
+ * (review findings SEC-4, BEH-1). No migration can repair those, so the text says what to do.
+ */
+const NOT_A_MIGRATION =
+  'If an extension or the database administrator created it, no migration can repair it: the ' +
+  "administrator removes it from this database (DROP EXTENSION for an extension's object), " +
+  'because the migration runner refuses it in any schema.';
 
 /** Every schema that is not PostgreSQL's own (temporary schemas are); `n` is a pg_namespace row. */
 const OURS = `n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'`;
@@ -90,7 +98,10 @@ export interface SchemaFacts {
   /** SECURITY DEFINER functions outside schema sec, as regprocedure prints them. */
   readonly definersOutsideSec: readonly string[];
   readonly tables: readonly TableFacts[];
-  /** User triggers that do not fire in an ordinary session, as `public.media.name [tgenabled = D]`. */
+  /**
+   * User triggers not in their ordinary enabled state (tgenabled O), as
+   * `public.media.name [tgenabled = D]`: disabled (D), replica only (R) or always (A).
+   */
   readonly disabledTriggers: readonly string[];
 }
 
@@ -156,7 +167,7 @@ export function ownershipProblems(facts: SchemaFacts): string[] {
       ),
     ...facts.definersOutsideSec.map(
       (name) =>
-        `${name} is SECURITY DEFINER outside schema sec: only the narrow sec.* functions run with their owner's rights. Make it SECURITY INVOKER, or move it to sec and register it in packages/db/test/catalogue/sec-functions.ts.`,
+        `${name} is SECURITY DEFINER outside schema sec: only the narrow sec.* functions run with their owner's rights. Make it SECURITY INVOKER, or move it to sec and register it in packages/db/test/catalogue/sec-functions.ts. ${NOT_A_MIGRATION}`,
     ),
   ];
 }
@@ -167,7 +178,7 @@ export function rowSecurityProblems(facts: SchemaFacts): string[] {
     .filter((table) => !(table.rowSecurity && table.forced))
     .map(
       (table) =>
-        `${table.name} is without forced row-level security: add ALTER TABLE ${table.name} ENABLE ROW LEVEL SECURITY and FORCE ROW LEVEL SECURITY to its migration. A migration that lifts FORCE for a backfill puts it back before it ends.`,
+        `${table.name} is without forced row-level security: add ALTER TABLE ${table.name} ENABLE ROW LEVEL SECURITY and FORCE ROW LEVEL SECURITY to its migration. A migration that lifts FORCE for a backfill puts it back before it ends. ${NOT_A_MIGRATION}`,
     );
 }
 
@@ -186,11 +197,14 @@ export function tenantPolicyProblems(facts: SchemaFacts): string[] {
     );
 }
 
-/** No trigger is left disabled: a migration that disables one for a backfill enables it again. */
+/**
+ * Every trigger is in its ordinary state, ENABLE (tgenabled O): a migration that disables one for
+ * a backfill enables it again. ENABLE ALWAYS (A) is refused as the pasted guards refused it.
+ */
 export function triggerProblems(facts: SchemaFacts): string[] {
   return facts.disabledTriggers.map(
     (trigger) =>
-      `trigger ${trigger} does not fire in an ordinary session: a migration that disables a trigger for a backfill ends with ALTER TABLE ... ENABLE TRIGGER for it.`,
+      `trigger ${trigger} is not in its ordinary enabled state (tgenabled = O; D is disabled, R fires only in a replica session, A fires in every session, replica ones included): a migration that changes how a trigger fires, for a backfill or otherwise, ends with ALTER TABLE ... ENABLE TRIGGER for it.`,
   );
 }
 
@@ -399,6 +413,8 @@ export async function assertSchemaInvariants(
       : "A problem that was so before this run is not this file's doing, but no file is " +
           'applied while it stands. Put it right by hand as the database administrator, or in a ' +
           'new migration when that migration is the first one pending (a repair behind another ' +
-          'pending file is never reached), and run again.',
+          'pending file is never reached). An object an extension or the administrator created ' +
+          'is removed from this database by the administrator instead (DROP EXTENSION for an ' +
+          "extension's object). Then run again.",
   );
 }

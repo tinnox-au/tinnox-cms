@@ -435,7 +435,14 @@ export function loadConfig(
     if (db.protocol !== 'postgres:' && db.protocol !== 'postgresql:') {
       problems.push('DATABASE_URL must be a postgres:// URL');
     }
-    databasePassword = decodeURIComponent(db.password);
+    // What pg sends: a non-empty ?password= in the query wins over the one in the authority
+    // (pg-connection-string), so the placeholder refusal below judges that one (SEC-2). pg
+    // copies the query one parameter at a time, so of several ?password= the last one wins.
+    // The user name is judged in the authority only: a ?user= that names another login is
+    // refused by createPool's session check when it connects, as runtime-role-refusal.test.ts
+    // shows.
+    const queryPassword = db.searchParams.getAll('password').at(-1) ?? '';
+    databasePassword = queryPassword !== '' ? queryPassword : decodeURIComponent(db.password);
     if (decodeURIComponent(db.username) !== 'tinnox_app') {
       problems.push('DATABASE_URL must connect as the runtime role tinnox_app');
     }

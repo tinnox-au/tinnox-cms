@@ -86,15 +86,26 @@ const STARTUP_SETTINGS = [
   'idle_in_transaction_session_timeout',
 ];
 
-/** The query of a connection string as pg-connection-string reads it, or null when it has none. */
+/**
+ * pg-connection-string runs encodeURI over a string that matches this before it parses it, so it
+ * reads a query from a string that new URL refuses as it is, such as one with a space in its host.
+ */
+const PG_REWRITES = / |%[^a-f0-9]|%[a-f0-9][^a-f0-9]/i;
+
+/**
+ * The query of a connection string as pg-connection-string reads it (empty when the form has
+ * none), or null when this cannot read it exactly as pg does.
+ */
 function queryOf(connectionString: string): URLSearchParams | null {
   // A socket path and a database name: pg reads no query from this form.
-  if (connectionString.startsWith('/')) return null;
+  if (connectionString.startsWith('/')) return new URLSearchParams();
+  // pg would read a rewritten string, not this one: fail closed rather than judge other text.
+  if (PG_REWRITES.test(connectionString)) return null;
   for (const text of [connectionString, connectionString.replace('@/', '@___DUMMY___/')]) {
     try {
       return new URL(text, 'postgres://base').searchParams;
     } catch {
-      // pg tries the second form too (no host); a string neither parses is refused by pg itself.
+      // pg tries the second form too (no host).
     }
   }
   return null;
@@ -105,15 +116,25 @@ function queryOf(connectionString: string): URLSearchParams | null {
  * parameter of a connection string over the options a pool is created with, so
  * `?options=-c row_security=off` would silently replace createPool's `-c row_security=on` (and
  * may set any other setting), and `?statement_timeout=0` its timeout
- * (packages/db/test/rls.integration.test.ts shows pg doing it). The text names the parameters
- * and `what` only, never the connection string or a value.
+ * (packages/db/test/rls.integration.test.ts shows pg doing it). A string whose query cannot be
+ * read exactly as pg reads it is refused too (review finding SEC-1). The text names the
+ * parameters and `what` only, never the connection string or a value.
  */
 export function startupSettingsProblem(
   connectionString: string,
   what = 'the database connection string',
 ): string | null {
   const query = queryOf(connectionString);
-  const found = STARTUP_SETTINGS.filter((name) => query?.has(name) === true);
+  if (query === null) {
+    return (
+      `${what} cannot be read the way pg reads it: it is not a URL, or it has a space or a ` +
+      'malformed percent sequence, which pg rewrites before it reads the query. Write the ' +
+      'connection string as a plain URL, postgres://user:password@host:port/database, with ' +
+      'every special character of the user name and password percent-encoded (%20 for a ' +
+      'space, %25 for a percent sign)'
+    );
+  }
+  const found = STARTUP_SETTINGS.filter((name) => query.has(name));
   if (found.length === 0) return null;
   return (
     `${what} sets ${found.join(', ')} in its query, which would replace what createPool ` +

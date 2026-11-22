@@ -24,7 +24,7 @@ import {
 } from '@tinnox/db';
 import type { FastifyInstance } from 'fastify';
 import { confirmationEmail, mailErrorCode } from '../alerts.ts';
-import { withOrgAllowed } from '../auth/permissions.ts';
+import { lockTimeoutAsUnavailable, withOrgAllowed } from '../auth/permissions.ts';
 import { operatorOf } from '../auth/session.ts';
 import { perMinute, type AppContext } from '../context.ts';
 import { iso } from '../db-helpers.ts';
@@ -189,7 +189,8 @@ export function registerAlertRecipientRoutes(app: FastifyInstance, ctx: AppConte
 /**
  * Public: the confirmation link's page posts the token from its fragment. Unknown, used and
  * expired tokens, and the token of an address whose adder has lost access since (D22), all get
- * the same 404. Rate-limited per client address.
+ * the same 404. A wait for a row lock past the pool's lock timeout answers 503 with
+ * Retry-After. Rate-limited per client address.
  */
 export function registerAlertConfirmRoute(app: FastifyInstance, ctx: AppContext): void {
   app.post(
@@ -198,6 +199,8 @@ export function registerAlertConfirmRoute(app: FastifyInstance, ctx: AppContext)
     async (request, reply) => {
       const { token } = parseInput(AlertRecipientConfirmSchema, request.body, 'link');
       const tokenHash = sha256(token);
+      // A member change that holds the adder's member row past lock_timeout answers 503, as
+      // every write does; nothing was confirmed or audited (SEC-3, BEH-3).
       const confirmed = await withResolvedOrg(ctx.pool, async (tx, enterOrg) => {
         const found = await alertRecipientByTokenHash(tx, tokenHash);
         if (found === null) return false;
@@ -235,6 +238,8 @@ export function registerAlertConfirmRoute(app: FastifyInstance, ctx: AppContext)
           detail: null,
         });
         return true;
+      }).catch((error: unknown) => {
+        throw lockTimeoutAsUnavailable(request, error);
       });
       if (!confirmed) throw new HttpError(404, 'not_found', 'This link is not valid any more.');
       return reply.code(204).send();

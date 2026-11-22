@@ -154,6 +154,38 @@ describe('the runner sends its own lock_timeout (AG-4.12)', () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it('says another run holds its lock when the wait passes the 30 s, keeping the cause (BEH-2)', async () => {
+    // Another run in progress: a session that holds the runner's advisory lock (migrate.ts).
+    const other = await migratorClient();
+    let failure: unknown;
+    try {
+      await other.query('SELECT pg_advisory_lock(7411660001)');
+      const started = Date.now();
+      failure = await runMigrations({ connectionString: migratorUrl(), directory: MIGRATIONS })
+        .then(() => 'the run did not wait')
+        .catch((error: unknown) => error);
+      expect(Date.now() - started).toBeGreaterThanOrEqual(29_000);
+    } finally {
+      await other.end();
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe(
+      "another migration run holds the runner's advisory lock and did not finish within 30s: " +
+        'wait for it to finish and run db:migrate again',
+    );
+    expect((failure as Error).cause).toMatchObject({ code: '55P03' });
+    // The refused run left nothing waiting on the lock: the next run would take it at once.
+    const next = await migratorClient();
+    try {
+      const taken = await next.query<{ ok: boolean }>(
+        'SELECT pg_try_advisory_lock(7411660001) AS ok',
+      );
+      expect(taken.rows[0]?.ok).toBe(true);
+    } finally {
+      await next.end();
+    }
+  }, 60_000);
 });
 
 describe('the runner owns the schema invariants (plan section 3.3, EAX-12)', () => {
@@ -267,7 +299,10 @@ describe('the runner owns the schema invariants (plan section 3.3, EAX-12)', () 
       );
       await expect(
         runMigrations({ connectionString: migratorUrl(), directory: MIGRATIONS }),
-      ).rejects.toThrow(/\nNo migration was pending and this run changed nothing: .*run again\.$/);
+      ).rejects.toThrow(
+        // The advice names the objects no migration can repair (SEC-4, BEH-1).
+        /\nNo migration was pending and this run changed nothing: .* An object an extension or the administrator created is removed from this database by the administrator instead \(DROP EXTENSION for an extension's object\)\. Then run again\.$/,
+      );
       expect(await advisoryLocks()).toBe(0);
       // A pending file is refused too, and told that the fault is older than it.
       const error = await runWith(async (directory) => {
@@ -338,7 +373,7 @@ describe('the runner owns the schema invariants (plan section 3.3, EAX-12)', () 
         /sec\.display_alert_orgs\(\) is executable by PUBLIC, tinnox_app.* \(It was so before this run: /,
       );
       expect(behind).toMatch(
-        /\nA problem that was so before this run is not this file's doing, but no file is applied while it stands\. .*the first one pending.*run again\.$/,
+        /\nA problem that was so before this run is not this file's doing, but no file is applied while it stands\. .*the first one pending.* An object an extension or the administrator created is removed from this database by the administrator instead \(DROP EXTENSION for an extension's object\)\. Then run again\.$/,
       );
       expect(await probeRows()).toBe(0);
       expect(await publicMayExecute()).toBe(true);

@@ -1365,12 +1365,18 @@ describe('each rule fails when its subject is wrong (every change is rolled back
       ],
       [
         'ALTER TABLE public.display DISABLE TRIGGER display_set_updated_at',
-        /^trigger public\.display\.display_set_updated_at \[tgenabled = D\] does not fire in an ordinary session/,
+        /^trigger public\.display\.display_set_updated_at \[tgenabled = D\] is not in its ordinary enabled state/,
       ],
       // Fires on a replica only, so not in the API's sessions either.
       [
         'ALTER TABLE public.membership ENABLE REPLICA TRIGGER membership_guard',
-        /^trigger public\.membership\.membership_guard \[tgenabled = R\] does not fire/,
+        /^trigger public\.membership\.membership_guard \[tgenabled = R\] is not in its ordinary enabled state/,
+      ],
+      // Fires in every session, replica ones included: refused as the pasted guards refused it,
+      // with a text that is true of it (BEH-1).
+      [
+        'ALTER TABLE public.display ENABLE ALWAYS TRIGGER display_set_updated_at',
+        /^trigger public\.display\.display_set_updated_at \[tgenabled = A\] is not in its ordinary enabled state \(.*A fires in every session/,
       ],
     ];
     for (const [statement, message] of cases) {

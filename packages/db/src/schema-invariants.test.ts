@@ -162,6 +162,13 @@ describe('ownership (AG-1.4, AG-1.12)', () => {
       expect.stringMatching(/^public\.lookup\(uuid\) is SECURITY DEFINER outside schema sec/),
     ]);
   });
+
+  it('says what to do with a definer function an extension or the administrator created (SEC-4)', () => {
+    const [problem] = ownershipProblems({ ...GOOD, definersOutsideSec: ['ext.hook()'] });
+    expect(problem).toContain(
+      "If an extension or the database administrator created it, no migration can repair it: the administrator removes it from this database (DROP EXTENSION for an extension's object), because the migration runner refuses it in any schema.",
+    );
+  });
 });
 
 describe('row-level security and the tenant policy (AG-1.5, AG-2.5)', () => {
@@ -171,6 +178,13 @@ describe('row-level security and the tenant policy (AG-1.5, AG-2.5)', () => {
         expect.stringMatching(/^public\.media is without forced row-level security/),
       ]);
     }
+  });
+
+  it('says what to do with a table an extension or the administrator created (SEC-4)', () => {
+    const [problem] = rowSecurityProblems(withTable({ name: 'ext.jobs', forced: false }));
+    expect(problem).toMatch(
+      /^ext\.jobs is without forced row-level security: .* If an extension or the database administrator created it, no migration can repair it: the administrator removes it from this database \(DROP EXTENSION for an extension's object\)/,
+    );
   });
 
   it('a table tinnox_app is granted anything on has exactly the tenant policy', () => {
@@ -241,9 +255,24 @@ describe('triggers', () => {
       }),
     ).toEqual([
       expect.stringMatching(
-        /^trigger public\.display\.display_set_updated_at \[tgenabled = D\] does not fire.*ENABLE TRIGGER/,
+        /^trigger public\.display\.display_set_updated_at \[tgenabled = D\] is not in its ordinary enabled state.*ENABLE TRIGGER/,
       ),
     ]);
+  });
+
+  it('the text is true of every state it refuses, ENABLE ALWAYS included, which does fire (BEH-1)', () => {
+    for (const state of ['D', 'R', 'A']) {
+      const [problem] = triggerProblems({
+        ...GOOD,
+        disabledTriggers: [`public.display.display_set_updated_at [tgenabled = ${state}]`],
+      });
+      expect(problem, state).toContain(
+        '[tgenabled = ' +
+          state +
+          '] is not in its ordinary enabled state (tgenabled = O; D is disabled, R fires only in a replica session, A fires in every session, replica ones included)',
+      );
+      expect(problem, state).not.toContain('does not fire');
+    }
   });
 });
 

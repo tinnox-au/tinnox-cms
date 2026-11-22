@@ -833,6 +833,44 @@ describe('alert addresses and the member who added them (D22)', () => {
     await expectDead(pending);
   });
 
+  it('D22: a member change that holds the adder’s row past lock_timeout answers 503 with retry-after, and the link works after it (SEC-3, BEH-3)', async () => {
+    const pending = await pendingFrom('adder-row-held@example.com');
+    // A sign out everywhere left open past tinnox_app's 5 s lock_timeout, then rolled back.
+    const ending = await appClient();
+    let held: Response;
+    let waitedMs: number;
+    try {
+      await ending.query('BEGIN');
+      await ending.query("SELECT set_config('app.org_id', $1, true)", [org.orgId]);
+      await ending.query('SELECT sec.session_revoke_membership($1)', [pending.member.membershipId]);
+      const started = Date.now();
+      held = await confirmAlertAddress(t, pending.token);
+      waitedMs = Date.now() - started;
+    } finally {
+      await ending.query('ROLLBACK');
+      await ending.end();
+    }
+    expect(waitedMs).toBeGreaterThanOrEqual(4_500);
+    expect(held.status).toBe(503);
+    expect(held.headers.get('retry-after')).toBe('2');
+    // The body withOrgAllowed gives a write that waited too long for a lock.
+    const body = (await held.json()) as { error: Record<string, unknown> };
+    expect({ ...body.error, requestId: null }).toEqual({
+      code: 'service_unavailable',
+      message: 'Another change is being saved. Try again in a moment.',
+      requestId: null,
+    });
+    // Nothing was confirmed or audited, and the link still confirms once the row is free.
+    expect(await statusOf(pending.id)).toBe('waiting');
+    expect(
+      (await auditEvents(owner, '&category=alert_recipient')).filter(
+        (e) => e.action === 'alert_recipient.confirm' && e.objectId === pending.id,
+      ),
+    ).toEqual([]);
+    expect((await confirmAlertAddress(t, pending.token)).status).toBe(204);
+    expect(await statusOf(pending.id)).toBe('confirmed');
+  }, 20_000);
+
   it('D22: a sign out everywhere that starts during a confirmation waits for it, and the address stays confirmed', async () => {
     const pending = await pendingFrom('confirmed-just-before@example.com');
     const held = holds.hold(isConfirmUpdate);

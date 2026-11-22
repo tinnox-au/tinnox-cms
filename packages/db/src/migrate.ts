@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import pg from 'pg';
+import { errorField } from './error-field.ts';
 import type { Pool } from './pool.ts';
 import {
   SchemaInvariantError,
@@ -89,6 +90,8 @@ const ADVISORY_LOCK_KEY = 7_411_660_001;
  * for ad-hoc sessions as tinnox_migrator.
  */
 export const MIGRATION_LOCK_TIMEOUT = '30s';
+/** SQLSTATE lock_not_available: a lock wait passed MIGRATION_LOCK_TIMEOUT. */
+const LOCK_NOT_AVAILABLE = '55P03';
 
 export type MigrationNameProblem =
   | { readonly kind: 'pattern'; readonly name: string }
@@ -161,7 +164,17 @@ export async function runMigrations(options: MigrationOptions): Promise<Migratio
     // Before the advisory lock, which a lock_timeout also bounds. Session level (is_local false):
     // each migration's BEGIN and ROLLBACK leave it alone.
     await client.query("SELECT set_config('lock_timeout', $1, false)", [MIGRATION_LOCK_TIMEOUT]);
-    await client.query('SELECT pg_advisory_lock($1)', [ADVISORY_LOCK_KEY]);
+    await client
+      .query('SELECT pg_advisory_lock($1)', [ADVISORY_LOCK_KEY])
+      .catch((error: unknown) => {
+        // PostgreSQL's own text does not say whose lock it waited for (review finding BEH-2).
+        if (errorField(error, 'code') !== LOCK_NOT_AVAILABLE) throw error;
+        throw new Error(
+          `another migration run holds the runner's advisory lock and did not finish within ` +
+            `${MIGRATION_LOCK_TIMEOUT}: wait for it to finish and run db:migrate again`,
+          { cause: error },
+        );
+      });
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.schema_migrations (
         name       text PRIMARY KEY,
@@ -238,7 +251,9 @@ export async function runMigrations(options: MigrationOptions): Promise<Migratio
         knownBefore,
         'No migration was pending and this run changed nothing: the database was changed ' +
           'outside the migrations, or these rules are newer than it. Put it right in a new ' +
-          'migration, or by hand as the database administrator, and run again.',
+          'migration, or by hand as the database administrator. An object an extension or the ' +
+          'administrator created is removed from this database by the administrator instead ' +
+          "(DROP EXTENSION for an extension's object). Then run again.",
       );
     }
   } finally {
