@@ -336,6 +336,60 @@ describe('pins', () => {
         `const DIGEST = 'sha256:${'a'.repeat(64)}'; spawnSync('docker', ['pull', 'x']);`,
       ),
     ).toEqual([]);
+    // A user and group, another container's namespace or volumes, and a shell comment have an
+    // image's shape too; the image beside them is still reported.
+    expect(
+      pins(
+        'scripts/x.sh',
+        'docker run --user node:node node:24',
+        'docker run -u node:node --network container:db --pid container:db node:22 true',
+        'docker run --rm --volumes-from db:ro --ipc=host postgres:17 # a:b',
+        // A quoted # starts no comment.
+        "docker run --rm -e 'A=b # c' alpine:3.20 true # e:f",
+        // A quoted value is the option's value as much as a bare one.
+        "docker run --user 'node:node' --user='node:node' node:20",
+        // A quoted word in a comment is still in the comment.
+        'docker run --rm postgres:16 # see \'a:b\' or "c:d"',
+        "# docker run 'e:f'",
+      ),
+    ).toEqual([
+      expect.stringMatching(/^scripts\/x\.sh:1 image node:24 is pinned by tag only/),
+      expect.stringMatching(/^scripts\/x\.sh:2 image node:22 is pinned by tag only/),
+      expect.stringMatching(/^scripts\/x\.sh:3 image postgres:17 is pinned by tag only/),
+      expect.stringMatching(/^scripts\/x\.sh:4 image alpine:3\.20 is pinned by tag only/),
+      expect.stringMatching(/^scripts\/x\.sh:5 image node:20 is pinned by tag only/),
+      expect.stringMatching(/^scripts\/x\.sh:6 image postgres:16 is pinned by tag only/),
+    ]);
+    // The same options as spawn arguments, on one line or one per line as prettier writes them.
+    expect(
+      pins(
+        'scripts/x.mjs',
+        "spawnSync('docker', ['run', '--user', 'node:node', '--net', 'container:db', 'node:24']);",
+        'spawnSync(',
+        "  'docker',",
+        '  [',
+        "    'run',",
+        "    '--user',",
+        "    'node:node',",
+        "    '--network',",
+        "    'container:db',",
+        "    'postgres:17',",
+        '  ],',
+        ');',
+      ),
+    ).toEqual([
+      expect.stringMatching(/^scripts\/x\.mjs:1 image node:24 is pinned by tag only/),
+      expect.stringMatching(/^scripts\/x\.mjs:10 image postgres:17 is pinned by tag only/),
+    ]);
+    // An option that ends a statement does not swallow the image on the next line.
+    expect(
+      pins(
+        'scripts/x.mjs',
+        "const flags = ['--rm', '-u'];",
+        "const IMAGE = 'node:24';",
+        "spawnSync('docker', ['run', ...flags, IMAGE]);",
+      ),
+    ).toEqual([expect.stringMatching(/^scripts\/x\.mjs:2 image node:24 is pinned by tag only/)]);
   });
 
   it('does not want a digest on an image a compose service builds here', () => {

@@ -379,21 +379,75 @@ function composeImages(lines: readonly string[]): ComposeImage[] {
   return images;
 }
 
-// Docker options whose value has an image's shape: host.docker.internal:host-gateway,
-// seccomp:unconfined.
-const VALUE_OPTIONS = new Set(['--add-host', '--security-opt']);
+// Docker options whose value can have an image's shape: host.docker.internal:host-gateway,
+// seccomp:unconfined, node:node (a user and group), container:db (another container's
+// namespace or volumes).
+const VALUE_OPTIONS = new Set([
+  '--add-host',
+  '--security-opt',
+  '-u',
+  '--user',
+  '--network',
+  '--net',
+  '--pid',
+  '--ipc',
+  '--uts',
+  '--volumes-from',
+]);
 
-/** The words of a docker command line or argument list that may be images. */
-function imageWords(words: readonly string[]): string[] {
-  return words.filter((word, index) => {
-    if (VALUE_OPTIONS.has(words[index - 1] ?? '')) return false;
-    // A port mapping or user id (8080:80, 1000:1000), a bare digest (sha256:...) and the
-    // host-gateway alias have the same shape.
-    if (/^[\d.]+:/.test(word) || word.startsWith('sha256:') || word.endsWith(':host-gateway')) {
-      return false;
+/** Whether a word of a docker command may be an image, given the word before it. */
+function isImageWord(word: string, before: string): boolean {
+  // `--user 'node:node'` and `--user='node:node'` set the option as `--user node:node` does.
+  if (VALUE_OPTIONS.has(before.replace(/=$/, ''))) return false;
+  // A port mapping or user id (8080:80, 1000:1000), a bare digest (sha256:...), the
+  // host-gateway alias and another container's namespace (container:db) have the same shape.
+  if (
+    /^[\d.]+:/.test(word) ||
+    word.startsWith('sha256:') ||
+    word.startsWith('container:') ||
+    word.endsWith(':host-gateway')
+  ) {
+    return false;
+  }
+  return IMAGE_WORD.test(word);
+}
+
+/** The words of a `docker run` shell line that may be images. */
+function shellImageWords(words: readonly string[]): string[] {
+  return words.filter((word, index) => isImageWord(word, words[index - 1] ?? ''));
+}
+
+/**
+ * The quoted words of a line that may be images, each judged by the shell word or quoted
+ * argument just before it. `carried` is that word for a quoted word that opens the line: spawn
+ * arguments that prettier puts one per line have an option on one line and its value on the
+ * next.
+ */
+function quotedImageWords(code: string, carried: string): string[] {
+  return [...code.matchAll(/(['"`])([^'"`\s$]+)\1/g)]
+    .filter((m) => {
+      const prefix = code.slice(0, m.index).replace(/[\s,[(]+$/, '');
+      const before =
+        /(['"`]?)([^\s,[('"`]+)\1$/.exec(prefix)?.[2] ?? (prefix === '' ? carried : '');
+      return isImageWord(m[2] ?? '', before);
+    })
+    .map((m) => m[2] ?? '');
+}
+
+/** A shell line up to its comment: an unquoted `#` at the start of a word. */
+function withoutShellComment(line: string): string {
+  let quote = '';
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (quote !== '') {
+      if (char === quote) quote = '';
+    } else if (char === "'" || char === '"') {
+      quote = char;
+    } else if (char === '#' && (index === 0 || /\s/.test(line[index - 1] ?? ''))) {
+      return line.slice(0, index);
     }
-    return IMAGE_WORD.test(word);
-  });
+  }
+  return line;
 }
 
 function unpinnedIn(doc: Doc, localImages: ReadonlySet<string>): Unpinned[] {
@@ -467,6 +521,7 @@ function unpinnedIn(doc: Doc, localImages: ReadonlySet<string>): Unpinned[] {
     });
   } else if (isScript(doc.path)) {
     const runsDocker = DOCKER_CALL.test(doc.text);
+    let carried = '';
     lines.forEach((text, index) => {
       const references = new Set<string>();
       for (const m of text.matchAll(SCRIPT_IMAGE)) {
@@ -477,12 +532,21 @@ function unpinnedIn(doc: Doc, localImages: ReadonlySet<string>): Unpinned[] {
       if (runsDocker) {
         // In a script that runs docker, an image without a registry host (node:24) is one too:
         // as a quoted argument or variable, or as a word of a `docker run` shell line.
-        // A module specifier (node:fs) has the same shape, so imports are left out.
-        const code = text.replace(/\b(?:from|import|require)\s*\(?\s*(['"`])[^'"`]*\1/g, '');
-        const quoted = [...code.matchAll(/(['"`])([^'"`\s$]+)\1/g)].map((m) => m[2] ?? '');
-        const call = DOCKER_CALL.exec(text);
-        const shell = call === null ? [] : text.slice(call.index + call[0].length).split(/\s+/);
-        for (const word of [...imageWords(quoted), ...imageWords(shell)]) references.add(word);
+        // A module specifier (node:fs) has the same shape, so imports are left out. A shell
+        // script's comment is not run, quoted words in it included; in JS and TS `#` starts none.
+        const live = doc.path.endsWith('.sh') ? withoutShellComment(text) : text;
+        const code = live.replace(/\b(?:from|import|require)\s*\(?\s*(['"`])[^'"`]*\1/g, '');
+        const call = DOCKER_CALL.exec(live);
+        const shell =
+          call === null
+            ? []
+            : withoutShellComment(live.slice(call.index + call[0].length)).split(/\s+/);
+        for (const word of [...quotedImageWords(code, carried), ...shellImageWords(shell)]) {
+          references.add(word);
+        }
+        // Only a line that is one argument of a list ('--user',) carries its word to the next
+        // line; a line that ends a statement carries nothing.
+        carried = /(['"`])([^'"`\s$]+)\1,$/.exec(code.trim())?.[2] ?? '';
       }
       for (const reference of references) {
         // An image a compose service builds here is local and has no digest to pin.

@@ -37,7 +37,7 @@
     "audit": "tsx scripts/audit.ts",
     "check:docs": "tsx scripts/check-docs.ts",
     "check:migrations": "tsx scripts/check-migrations.ts",
-    "scan:secrets": "node scripts/scan-secrets.mjs",
+    "scan:secrets": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/scan-secrets.mjs",
     "reset": "node scripts/reset-dev.mjs",
     "backup:verify": "bash scripts/backup-restore-check.sh",
     "verify:oidc": "node scripts/verify-oidc-login.mjs"
