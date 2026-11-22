@@ -36,7 +36,6 @@ None.
 | CMS-25 | Fix the open layouts review findings LYX-01 to LYX-05 (round 4); each closes with its poteto plan step | proposed | - | 22 Nov |
 | CMS-26 | Ruleset on main: no force push or deletion, merge or squash only, pull requests and the three CI jobs required (poteto D12, D14); Michael creates it | proposed | - | 22 Nov |
 | CMS-27 | Ask TINNOX whether DEC-13 (data stays in Australia) allows alert e-mails to mailboxes outside Australia (poteto D23) | proposed | - | 22 Nov |
-| CMS-28 | Poteto pyramid refactor, rest of group A: steps 3, 4, 6, 6a, 11, 12 and 12a to 12c of the adoption plan | proposed | - | 22 Nov |
 
 ## To do
 
@@ -44,7 +43,9 @@ None.
 
 ## In progress
 
-None.
+| Id | Card | Agreed | PR | Since |
+|---|---|---|---|---|
+| CMS-28 | Poteto pyramid refactor, rest of group A: steps 3, 4, 6, 6a, 11, 12 and 12a to 12c of the adoption plan | Michael 22 Nov | - | 22 Nov |
 
 ## In review
 
