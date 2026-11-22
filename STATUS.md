@@ -185,6 +185,9 @@ Invite cancel focus fixed in PR 34 with a component test
 ### CMS-24
 from: CMS-23
 
+**Notes**
+- 22 Nov: 22 Nov: steps 1, 2, 5, 5a, 7, 8, 9 and 10 are built on branch refactor/poteto-pyramid-guardrails and reviewed; every suite and the browser suite pass locally. Not pushed, no PR, no CI run. Left: steps 3, 4, 6, 6a, 11, 12, 12a to 12c.
+
 ### CMS-25
 from: CMS-23
 
