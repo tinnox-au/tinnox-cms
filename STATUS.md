@@ -43,15 +43,14 @@ None.
 
 ## In progress
 
-| Id | Card | Agreed | PR | Since |
-|---|---|---|---|---|
-| CMS-23 | Poteto pyramid adoption plan: rule and finding inventory, enforcement design per layer, ordered PR-sized steps (plan only, no code) | Michael 22 Nov | - | 22 Nov |
+None.
 
 ## In review
 
 | Id | Card | Agreed | PR | Since |
 |---|---|---|---|---|
 | CMS-24 | Poteto pyramid refactor, group A: guardrails that land with their fixes (document, test, migration, import and lint checks) | Michael 22 Nov | #36 | 22 Nov |
+| CMS-23 | Poteto pyramid adoption plan: rule and finding inventory, enforcement design per layer, ordered PR-sized steps (plan only, no code) | Michael 22 Nov | #36 | 22 Nov |
 
 ## Done, last 14 days
 
