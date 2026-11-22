@@ -47,15 +47,14 @@ None.
 
 ## In review
 
-| Id | Card | Agreed | PR | Since |
-|---|---|---|---|---|
-| CMS-23 | Poteto pyramid adoption plan: rule and finding inventory, enforcement design per layer, ordered PR-sized steps (plan only, no code) | Michael 22 Nov | #36 | 22 Nov |
+None.
 
 ## Done, last 14 days
 
 | Id | Date | Outcome | PR |
 |---|---|---|---|
 | CMS-24 | 22 Nov | Poteto pyramid refactor, group A: guardrails that land with their fixes (document, test, migration, import and lint checks) | #36 |
+| CMS-23 | 22 Nov | Poteto pyramid adoption plan: rule and finding inventory, enforcement design per layer, ordered PR-sized steps (plan only, no code) | #36 |
 | CMS-22 | 22 Nov | Keyboard focus after cancelling an invite lands on the first row; reuse useRowFocusReturn as the Alerts page does (EAX-14) | #34 |
 | CMS-21 | 22 Nov | Text app line fit fails on Linux fonts in e2e 07-apps-player (EAU-03): run it on ubuntu-24.04 and fix the fitter or the check | #34 |
 | CMS-15 | 22 Nov | E-mail alerts when a screen stops reporting (stage C) | #34 |
@@ -183,6 +182,11 @@ from: CMS-15
 
 **Evidence**
 Invite cancel focus fixed in PR 34 with a component test
+
+### CMS-23
+
+**Evidence**
+Plan, its 26 decisions (DEC-38) and the as-built record merged with the first steps
 
 ### CMS-24
 from: CMS-23
