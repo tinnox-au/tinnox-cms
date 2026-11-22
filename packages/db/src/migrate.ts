@@ -77,6 +77,13 @@ export interface MigrationResult {
 export const MIGRATION_FILE_PATTERN = /^([0-9]{4})_[a-z0-9_]+\.sql$/;
 /** Arbitrary constant; serialises concurrent migration runs on one database. */
 const ADVISORY_LOCK_KEY = 7_411_660_001;
+/**
+ * How long a migration statement (or the wait for the advisory lock) may wait for a lock. The
+ * runner sends it on its own session, so it holds on a database whatever its role defaults say
+ * (AGENTS.md section 4, Locks). infra/postgres/init/01-roles.sh sets the same value as a default
+ * for ad-hoc sessions as tinnox_migrator.
+ */
+export const MIGRATION_LOCK_TIMEOUT = '30s';
 
 export type MigrationNameProblem =
   | { readonly kind: 'pattern'; readonly name: string }
@@ -133,6 +140,9 @@ export async function runMigrations(options: MigrationOptions): Promise<Migratio
   const applied: string[] = [];
   const alreadyApplied: string[] = [];
   try {
+    // Before the advisory lock, which a lock_timeout also bounds. Session level (is_local false):
+    // each migration's BEGIN and ROLLBACK leave it alone.
+    await client.query("SELECT set_config('lock_timeout', $1, false)", [MIGRATION_LOCK_TIMEOUT]);
     await client.query('SELECT pg_advisory_lock($1)', [ADVISORY_LOCK_KEY]);
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.schema_migrations (

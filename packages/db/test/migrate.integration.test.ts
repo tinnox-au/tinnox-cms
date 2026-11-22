@@ -117,6 +117,43 @@ describe('migration history is checked before anything is applied', () => {
   });
 });
 
+describe('the runner sends its own lock_timeout (AG-4.12)', () => {
+  afterAll(async () => {
+    const client = await migratorClient();
+    try {
+      await client.query("DELETE FROM public.schema_migrations WHERE name LIKE '%_probe.sql'");
+    } finally {
+      await client.end();
+    }
+  });
+
+  it('has 30 s on its session, a migration sees it, and a role default of 0 does not decide it', async () => {
+    // The connection asks for lock_timeout = 0 at start-up, as a database without the role
+    // default of 01-roles.sh would give. The probe migration fails when the session it runs
+    // in is not at 30 s, so a runner that sends nothing, or a constant that drifts from the 30 s
+    // AGENTS.md section 4 states, fails here. The literal is on purpose: the constant is not used.
+    const url = new URL(migratorUrl());
+    url.searchParams.set('options', '-c lock_timeout=0');
+    const directory = await mkdtemp(join(tmpdir(), 'tinnox-migrate-'));
+    try {
+      const names = (await readdir(MIGRATIONS)).filter((name) => name.endsWith('.sql'));
+      for (const name of names) await copyFile(join(MIGRATIONS, name), join(directory, name));
+      await writeFile(
+        join(directory, '9999_probe.sql'),
+        `DO $$ BEGIN
+           IF current_setting('lock_timeout') <> '30s' THEN
+             RAISE EXCEPTION 'lock_timeout is %', current_setting('lock_timeout');
+           END IF;
+         END $$;\n`,
+      );
+      const result = await runMigrations({ connectionString: url.toString(), directory });
+      expect(result.applied).toEqual(['9999_probe.sql']);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 const REFUSED = /must log in and act as role tinnox_migrator/;
 
 describe('connectMigrator (D4)', () => {
