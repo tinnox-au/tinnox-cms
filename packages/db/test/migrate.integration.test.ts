@@ -13,7 +13,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 import { connectMigrator, resetTestDatabase, runMigrations } from '../src/index.ts';
-import { migratorClient, migratorUrl, superuserUrl } from './support.ts';
+import { actingAs, migratorClient, migratorUrl, superuserUrl } from './support.ts';
 
 const MIGRATIONS = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -116,13 +116,6 @@ describe('migration history is checked before anything is applied', () => {
     }
   });
 });
-
-/** `url` with a role set at connection start, as `SET ROLE` would. */
-function actingAs(url: string, role: string): string {
-  const parsed = new URL(url);
-  parsed.searchParams.set('options', `-c role=${role}`);
-  return parsed.toString();
-}
 
 const REFUSED = /must log in and act as role tinnox_migrator/;
 

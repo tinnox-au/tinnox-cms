@@ -6,14 +6,17 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { withOrg, withoutOrg, withResolvedOrg, type Pool } from '../src/index.ts';
+import { createPool, withOrg, withoutOrg, withResolvedOrg, type Pool } from '../src/index.ts';
 import {
+  actingAs,
   appPool,
   createOrg,
   migratorClient,
+  migratorUrl,
   PG,
   pgCode,
   pgViolation,
+  superuserUrl,
   type TestOrg,
 } from './support.ts';
 
@@ -236,6 +239,81 @@ describe('the runtime role itself', () => {
       expect(await pgCode(pool.query(`DELETE FROM ${table}`)), table).toBe(
         PG.insufficientPrivilege,
       );
+    }
+  });
+});
+
+describe('createPool serves tinnox_app only (AG-1.2)', () => {
+  // The refusal must also say what to use instead (plan section 3.4), not only what it found.
+  const REFUSED =
+    /createPool serves role tinnox_app only, but the connection logs in as .+; use the tinnox_app connection string \(DATABASE_URL\) without a role setting, and connectMigrator \(@tinnox\/db\) for an offline tool that needs tinnox_migrator/;
+  // pg takes ?user= and ?password= over the URL's username, so this URL names tinnox_app,
+  // passes the start-up check assertConnectionRole (which reads the username only, a gap
+  // left to the assertRuntimeRole item of plan step 12), and still logs in as the migrator.
+  const migratorInAppUrl = (): string => {
+    const migrator = new URL(migratorUrl());
+    const url = new URL(process.env['TEST_DATABASE_URL'] ?? '');
+    url.searchParams.set('user', decodeURIComponent(migrator.username));
+    url.searchParams.set('password', decodeURIComponent(migrator.password));
+    return url.toString();
+  };
+  const wrongLogins = (): [string, string, RegExp][] => [
+    ['the migrator', migratorUrl(), /logs in as tinnox_migrator and acts as tinnox_migrator/],
+    ['the superuser', superuserUrl(), /logs in as postgres and acts as postgres/],
+    // current_user would pass, session_user does not: the superuser keeps its rights.
+    [
+      'the superuser acting as tinnox_app',
+      actingAs(superuserUrl(), 'tinnox_app'),
+      /logs in as postgres and acts as tinnox_app/,
+    ],
+    [
+      'the migrator behind a tinnox_app URL username',
+      migratorInAppUrl(),
+      /logs in as tinnox_migrator and acts as tinnox_migrator/,
+    ],
+  ];
+
+  it('hands out connections that log in and act as tinnox_app', async () => {
+    const fresh = appPool(3);
+    const clients = await Promise.all([fresh.connect(), fresh.connect(), fresh.connect()]);
+    try {
+      for (const client of clients) {
+        const { rows } = await client.query('SELECT current_user, session_user');
+        expect(rows[0]).toEqual({ current_user: 'tinnox_app', session_user: 'tinnox_app' });
+      }
+    } finally {
+      for (const client of clients) client.release();
+      await fresh.end();
+    }
+  });
+
+  it('refuses the migrator and the superuser, even acting as tinnox_app, on every connection', async () => {
+    for (const [who, url, found] of wrongLogins()) {
+      const wrong = createPool({
+        connectionString: url,
+        applicationName: 'tinnox-test-wrong',
+        max: 3,
+      });
+      try {
+        // Several connections at once, then a checkout after they were closed: each new
+        // connection is checked, not only the pool's first.
+        const first = await Promise.allSettled([
+          wrong.query('SELECT 1'),
+          wrong.query('SELECT 1'),
+          // Released at once if it was wrongly handed out, so the pool can still end.
+          wrong.connect().then((client) => client.release()),
+        ]);
+        for (const result of first) {
+          expect(result.status, who).toBe('rejected');
+          const reason = result.status === 'rejected' ? String(result.reason) : '';
+          expect(reason, who).toMatch(REFUSED);
+          expect(reason, who).toMatch(found);
+        }
+        await expect(wrong.query('SELECT 1'), who).rejects.toThrow(REFUSED);
+        expect(wrong.totalCount, who).toBe(0);
+      } finally {
+        await wrong.end();
+      }
     }
   });
 });

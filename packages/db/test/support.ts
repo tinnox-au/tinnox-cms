@@ -299,6 +299,13 @@ export function superuserUrl(database?: string): string {
   return url.toString();
 }
 
+/** `url` with a role set at connection start, as `SET ROLE` would. */
+export function actingAs(url: string, role: string): string {
+  const parsed = new URL(url);
+  parsed.searchParams.set('options', `-c role=${role}`);
+  return parsed.toString();
+}
+
 /** The database administrator (superuser), as in the runbook. Bypasses row-level security. */
 export async function asSuperuser<T>(work: (client: pg.Client) => Promise<T>): Promise<T> {
   const client = new pg.Client({ connectionString: superuserUrl() });
