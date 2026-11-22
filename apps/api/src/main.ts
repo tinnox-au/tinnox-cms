@@ -2,7 +2,7 @@
  * API entry point. Start with `npm run dev -w @tinnox/api` (or `npm run start`),
  * which load ../../.env. Refuses to start on unsafe configuration (config.ts).
  */
-import { assertConnectionRole, createPool } from '@tinnox/db';
+import { assertConnectionRole, assertRuntimeRole, createPool, RuntimeRoleError } from '@tinnox/db';
 import { createDeliveryRegistry } from '@tinnox/delivery';
 import { LocalObjectStorage } from '@tinnox/storage';
 import { runDisplayAlerts } from './alerts.ts';
@@ -40,6 +40,21 @@ async function main(): Promise<void> {
     applicationName: 'tinnox-api',
     max: 15,
   });
+  // Before anything else uses the database and before the listener starts (AG-1.3): the session
+  // must be tinnox_app as infra/postgres/init/01-roles.sh makes it, read from the catalogue.
+  try {
+    await assertRuntimeRole(pool);
+  } catch (error) {
+    // The problems name roles and objects, never the connection string or a password.
+    if (error instanceof RuntimeRoleError) {
+      console.error('TINNOX API database role is not acceptable:');
+      for (const problem of error.problems) console.error(`  - ${problem}`);
+    } else {
+      console.error('TINNOX API could not check its database role:', (error as Error).message);
+    }
+    await pool.end();
+    process.exit(1);
+  }
   const storage = await LocalObjectStorage.create({ root: config.mediaRoot });
   const limits = config.limits;
   const delivery = createDeliveryRegistry({

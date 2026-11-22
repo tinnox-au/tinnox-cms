@@ -6,7 +6,17 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createPool, withOrg, withoutOrg, withResolvedOrg, type Pool } from '../src/index.ts';
+import {
+  assertRuntimeRole,
+  createPool,
+  readRuntimeRole,
+  RuntimeRoleError,
+  runtimeRoleProblems,
+  withOrg,
+  withoutOrg,
+  withResolvedOrg,
+  type Pool,
+} from '../src/index.ts';
 import {
   actingAs,
   appPool,
@@ -248,8 +258,8 @@ describe('createPool serves tinnox_app only (AG-1.2)', () => {
   const REFUSED =
     /createPool serves role tinnox_app only, but the connection logs in as .+; use the tinnox_app connection string \(DATABASE_URL\) without a role setting, and connectMigrator \(@tinnox\/db\) for an offline tool that needs tinnox_migrator/;
   // pg takes ?user= and ?password= over the URL's username, so this URL names tinnox_app,
-  // passes the start-up check assertConnectionRole (which reads the username only, a gap
-  // left to the assertRuntimeRole item of plan step 12), and still logs in as the migrator.
+  // passes the start-up check assertConnectionRole (which reads the username only), and still
+  // logs in as the migrator. This check is what refuses it, also inside assertRuntimeRole.
   const migratorInAppUrl = (): string => {
     const migrator = new URL(migratorUrl());
     const url = new URL(process.env['TEST_DATABASE_URL'] ?? '');
@@ -314,6 +324,75 @@ describe('createPool serves tinnox_app only (AG-1.2)', () => {
       } finally {
         await wrong.end();
       }
+    }
+  });
+});
+
+describe('assertRuntimeRole reads the role from the catalogue (AG-1.3)', () => {
+  it('accepts the runtime role of the test database', async () => {
+    await expect(assertRuntimeRole(pool)).resolves.toBeUndefined();
+  });
+
+  it('refuses another login before it reads anything', async () => {
+    const wrong = createPool({ connectionString: migratorUrl(), max: 1 });
+    try {
+      // createPool's session check refuses the checkout; the error is the same type, so an
+      // entry point prints both alike.
+      await expect(assertRuntimeRole(wrong)).rejects.toThrow(RuntimeRoleError);
+      await expect(assertRuntimeRole(wrong)).rejects.toThrow(/logs in as tinnox_migrator/);
+    } finally {
+      await wrong.end();
+    }
+  });
+
+  it('sees a tinnox_app made superuser, BYPASSRLS, REPLICATION, CREATEROLE, CREATEDB, a member or an owner (every change is rolled back)', async () => {
+    // ALTER ROLE and GRANT are cluster-wide, so they are never committed here: the superuser
+    // makes each change in a transaction, acts as tinnox_app in it, reads, and rolls back.
+    // The session is the superuser's, so the session problem is always there too.
+    const admin = new pg.Client({ connectionString: superuserUrl() });
+    await admin.connect();
+    const read = async (statement: string): Promise<string[]> => {
+      await admin.query('BEGIN');
+      try {
+        await admin.query(statement);
+        await admin.query('SET LOCAL ROLE tinnox_app');
+        return runtimeRoleProblems(await readRuntimeRole(admin));
+      } finally {
+        await admin.query('ROLLBACK');
+      }
+    };
+    try {
+      const session = /logs in as postgres and acts as tinnox_app, not tinnox_app/;
+      expect(await read('SELECT 1')).toEqual([expect.stringMatching(session)]);
+      const cases: [string, RegExp][] = [
+        ['ALTER ROLE tinnox_app SUPERUSER', /^role tinnox_app is a superuser/],
+        ['ALTER ROLE tinnox_app BYPASSRLS', /^role tinnox_app has BYPASSRLS/],
+        ['ALTER ROLE tinnox_app REPLICATION', /^role tinnox_app has REPLICATION/],
+        ['ALTER ROLE tinnox_app CREATEROLE', /^role tinnox_app has CREATEROLE/],
+        ['ALTER ROLE tinnox_app CREATEDB', /^role tinnox_app has CREATEDB/],
+        [
+          'GRANT pg_read_all_data TO tinnox_app',
+          /^role tinnox_app is a member of pg_read_all_data/,
+        ],
+        [
+          'ALTER TABLE public.media_tag OWNER TO tinnox_app',
+          /^role tinnox_app owns table media_tag/,
+        ],
+        ['ALTER SCHEMA sec OWNER TO tinnox_app', /^role tinnox_app owns schema sec/],
+        // A shared object: pg_shdepend records it with database 0.
+        [
+          'ALTER DATABASE tinnox_test OWNER TO tinnox_app',
+          /^role tinnox_app owns database tinnox_test/,
+        ],
+      ];
+      for (const [statement, found] of cases) {
+        expect(await read(statement), statement).toEqual([
+          expect.stringMatching(session),
+          expect.stringMatching(found),
+        ]);
+      }
+    } finally {
+      await admin.end();
     }
   });
 });

@@ -72,7 +72,7 @@ The API's `dev` and `start` scripts load `../../.env` through tsx's `--env-file`
 
 Form: `postgres://<role>:<password>@127.0.0.1:<POSTGRES_HOST_PORT>/<database>`.
 
-Roles: `tinnox_migrator` owns the schema. `tinnox_app` is `NOSUPERUSER NOBYPASSRLS`, owns nothing, has a 15 s statement timeout. `tinnox_definer` cannot log in, has `BYPASSRLS`, and owns only the functions in schema `sec`. The API should call `assertConnectionRole(DATABASE_URL, 'tinnox_app')` at start-up.
+Roles: `tinnox_migrator` owns the schema. `tinnox_app` is `NOSUPERUSER NOBYPASSRLS`, owns nothing, has a 15 s statement timeout. `tinnox_definer` cannot log in, has `BYPASSRLS`, and owns only the functions in schema `sec`. Both API entry points (`main.ts`, `alerts-once.ts`) call `assertConnectionRole(DATABASE_URL, 'tinnox_app')` on the configuration and then `await assertRuntimeRole(pool)`, which reads the session and the role from the catalogue (not superuser, no `BYPASSRLS`, `REPLICATION`, `CREATEROLE` or `CREATEDB`, a member of no role, owning nothing) and makes them exit non-zero before they listen or run. `createPool` also refuses, on every new connection, a session that does not log in and act as `tinnox_app`.
 
 ### Tenant context: `@tinnox/db`
 
@@ -83,6 +83,7 @@ withoutOrg<T>(pool: Pool, fn: (tx: Tx) => Promise<T>): Promise<T>
 poolAsTx(pool: Pool): Tx            // single-statement sec.* calls
 interface Tx { query<R>(text: string, values?: readonly unknown[]): Promise<QueryResult<R>> }
 assertConnectionRole(connectionString: string, expectedRole: string): void
+assertRuntimeRole(pool: Pool): Promise<void>   // rejects with RuntimeRoleError, problems listed
 sha256(value: string | Uint8Array): Buffer
 ```
 

@@ -2,63 +2,13 @@
  * D19 and brief section 6: the real API entry point, started with NODE_ENV=production
  * and the development configuration, must exit without ever listening.
  */
-import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { createServer } from 'node:net';
-import { join } from 'node:path';
-import { parseEnv } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { repoRoot } from './support.ts';
+import { developmentEnv, freePort, listening, runApiEntryPoint } from './support.ts';
 
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const address = server.address();
-      const port = typeof address === 'object' && address !== null ? address.port : 0;
-      server.close(() => {
-        resolve(port);
-      });
-    });
-  });
-}
-
-function runApi(env: Record<string, string>): Promise<{ code: number | null; output: string }> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', 'src/main.ts'], {
-      cwd: join(repoRoot, 'apps', 'api'),
-      env: { PATH: process.env['PATH'] ?? '', ...env },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let output = '';
-    child.stdout.on('data', (chunk: Buffer) => (output += chunk.toString('utf8')));
-    child.stderr.on('data', (chunk: Buffer) => (output += chunk.toString('utf8')));
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      reject(new Error(`the API kept running with an unacceptable configuration:\n${output}`));
-    }, 20_000);
-    child.once('exit', (code) => {
-      clearTimeout(timer);
-      resolve({ code, output });
-    });
-  });
-}
-
-async function listening(port: number): Promise<boolean> {
-  try {
-    await fetch(`http://127.0.0.1:${port}/healthz`, { signal: AbortSignal.timeout(500) });
-    return true;
-  } catch {
-    return false;
-  }
-}
+const runApi = (env: Record<string, string>) => runApiEntryPoint('src/main.ts', env);
 
 describe('production start-up', () => {
-  const envFile = join(repoRoot, '.env');
-  const devEnv: Record<string, string> = existsSync(envFile)
-    ? (parseEnv(readFileSync(envFile, 'utf8')) as Record<string, string>)
-    : {};
+  const devEnv = developmentEnv();
 
   it('has a generated development configuration to test with', () => {
     expect(devEnv['SESSION_SECRET'] ?? '').toMatch(/^dev-/);
