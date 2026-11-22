@@ -30,7 +30,8 @@ function readManifest(): ShellManifest | null {
   try {
     const parsed: unknown = JSON.parse(decodeURIComponent(SHELL_MANIFEST));
     if (typeof parsed !== 'object' || parsed === null) return null;
-    const { version, files } = parsed as { version?: unknown; files?: unknown };
+    if (!('version' in parsed) || !('files' in parsed)) return null;
+    const { version, files } = parsed;
     if (typeof version !== 'string' || !/^[0-9a-f]{8,64}$/.test(version)) return null;
     if (
       !Array.isArray(files) ||

@@ -160,8 +160,8 @@ function runFfprobe(path: string, timeoutMs: number): Promise<ProbeRun> {
       },
       (error, stdout) => {
         if (error !== null) {
-          const killed = (error as { killed?: boolean }).killed === true;
-          const code = (error as { code?: unknown }).code;
+          const killed = error.killed === true;
+          const code = error.code;
           resolve(
             killed && code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
               ? { kind: 'timeout' }

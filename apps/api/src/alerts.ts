@@ -8,7 +8,15 @@
  * at most once per transition.
  */
 import { alertDelayText, type WorkingHours } from '@tinnox/contracts';
-import { auditScoped, displayAlertOrgs, poolAsTx, withOrg, type Pool, type Tx } from '@tinnox/db';
+import {
+  auditScoped,
+  displayAlertOrgs,
+  errorField,
+  poolAsTx,
+  withOrg,
+  type Pool,
+  type Tx,
+} from '@tinnox/db';
 import { offlineDue } from '@tinnox/domain';
 import type { MailMessage, Mailer } from './mail.ts';
 
@@ -156,7 +164,7 @@ export async function runDisplayAlerts(deps: DisplayAlertDeps): Promise<DisplayA
  * it. Logged as `errorCode`: `code` is a redacted log field (logger.ts).
  */
 export function mailErrorCode(error: unknown): { errorCode: string | null } {
-  const code = (error as { code?: unknown } | null)?.code;
+  const code = errorField(error, 'code');
   return { errorCode: typeof code === 'string' ? code.slice(0, 64) : null };
 }
 

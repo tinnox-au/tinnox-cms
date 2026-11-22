@@ -1,0 +1,260 @@
+// The strictness lints of eslint.config.js (adoption plan sections 3.2 and 3.5, step 8), run
+// against fixture text. Each case takes the rule entries that eslint.config.js resolves for a real
+// path, so the file globs are tested with the rules: a block that took a rule away from a file
+// group would fail here.
+import { ESLint, type Linter } from 'eslint';
+import tseslint from 'typescript-eslint';
+import { describe, expect, it } from 'vitest';
+import { repoRoot } from './env.ts';
+
+const SWITCH = '@typescript-eslint/switch-exhaustiveness-check';
+const NON_NULL = '@typescript-eslint/no-non-null-assertion';
+const SYNTAX = 'no-restricted-syntax';
+const repository = new ESLint({ cwd: repoRoot });
+
+// typescript-eslint keeps one project service per process, made with the options of the first
+// typed lint, so every switch fixture path is listed here once.
+const SWITCH_FIXTURES = [
+  'apps/player-web/src/core/fixture.ts',
+  'apps/portal/src/lib/fixture.ts',
+  'apps/api/src/fixture.ts',
+  'packages/db/src/fixture.ts',
+  'scripts/lib/fixture.ts',
+  'apps/portal/src/fixture.test.tsx',
+] as const;
+
+/**
+ * The messages of `rules`, as eslint.config.js resolves them for `path`, for `code` at `path`.
+ * The switch rule reads types; the project service finds no tsconfig for a file that is not on
+ * disk, so the fixture is type-checked alone with the repository's compiler flags.
+ */
+async function flagged(path: string, code: string, rules: readonly string[]): Promise<string[]> {
+  const resolved = ((await repository.calculateConfigForFile(path)) as Linter.Config).rules ?? {};
+  const picked: Linter.RulesRecord = {};
+  for (const rule of rules) {
+    const entry = resolved[rule];
+    if (entry !== undefined) picked[rule] = entry;
+  }
+  const fixture = new ESLint({
+    cwd: repoRoot,
+    overrideConfigFile: true,
+    overrideConfig: [
+      {
+        files: ['**/*.ts', '**/*.tsx'],
+        plugins: { '@typescript-eslint': tseslint.plugin },
+        languageOptions: {
+          parser: tseslint.parser,
+          parserOptions: {
+            ecmaFeatures: { jsx: true },
+            ...(rules.includes(SWITCH)
+              ? {
+                  projectService: {
+                    allowDefaultProject: [...SWITCH_FIXTURES],
+                    defaultProject: 'tsconfig.base.json',
+                  },
+                  tsconfigRootDir: repoRoot,
+                }
+              : {}),
+          },
+        },
+        rules: picked,
+      },
+    ],
+  });
+  const [result] = await fixture.lintText(code, { filePath: path });
+  return (result?.messages ?? []).map((message) => message.message);
+}
+
+describe('switch-exhaustiveness-check (section 3.5)', () => {
+  const missing = [
+    "type Phase = 'idle' | 'playing' | 'faulted';",
+    'export function label(phase: Phase): string {',
+    '  switch (phase) {',
+    "    case 'idle':",
+    "      return 'Idle';",
+    '    default:',
+    "      return 'Other';",
+    '  }',
+    '}',
+  ].join('\n');
+
+  it.each(SWITCH_FIXTURES)(
+    'flags a switch whose default hides a missing union member, in %s',
+    async (path) => {
+      expect(await flagged(path, missing, [SWITCH])).toEqual([
+        'Switch is not exhaustive. Cases not matched: "faulted" | "playing"',
+      ]);
+    },
+  );
+
+  it('flags a switch over a nullable string that names no null case', async () => {
+    const code = [
+      'export function help(code: string | null): string | null {',
+      '  switch (code) {',
+      "    case 'pairing_expired':",
+      "      return 'expired';",
+      '    default:',
+      '      return null;',
+      '  }',
+      '}',
+    ].join('\n');
+    expect(await flagged('apps/portal/src/lib/fixture.ts', code, [SWITCH])).toEqual([
+      'Switch is not exhaustive. Cases not matched: null',
+    ]);
+  });
+
+  it('accepts a switch that names every member, and a plain string switch with a default', async () => {
+    const code = [
+      "type Phase = 'idle' | 'playing';",
+      'export function label(phase: Phase): string {',
+      '  switch (phase) {',
+      "    case 'idle':",
+      "      return 'Idle';",
+      "    case 'playing':",
+      "      return 'Playing';",
+      '  }',
+      '}',
+      'export function kind(name: string): number {',
+      '  switch (name) {',
+      "    case 'a':",
+      '      return 1;',
+      '    default:',
+      '      return 0;',
+      '  }',
+      '}',
+    ].join('\n');
+    expect(await flagged('apps/portal/src/lib/fixture.ts', code, [SWITCH])).toEqual([]);
+  });
+});
+
+describe('no non-null assertion outside tests (section 3.5)', () => {
+  const code = 'export const size = (value?: string): number => value!.length;';
+  const NON_NULL_MESSAGE = /^Do not assert a value is not null or undefined with `!`\. Handle/;
+
+  it.each([
+    'apps/api/src/fixture.ts',
+    'apps/portal/src/features/fixture.tsx',
+    'apps/portal/vite.config.ts',
+    'apps/player-web/src/core/fixture.ts',
+    'apps/player-web/sw/sw.ts',
+    'packages/db/src/fixture.ts',
+    'packages/contracts/src/fixture.ts',
+    'scripts/lib/fixture.ts',
+    'vitest.config.ts',
+  ])(
+    'flags a non-null assertion in %s, with a message that names the alternative',
+    async (path) => {
+      const messages = await flagged(path, code, [SYNTAX, NON_NULL]);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatch(NON_NULL_MESSAGE);
+    },
+  );
+
+  it('is stated once: the typescript-eslint rule, whose message names no alternative, is off', async () => {
+    const resolved =
+      ((await repository.calculateConfigForFile('apps/api/src/fixture.ts')) as Linter.Config)
+        .rules ?? {};
+    const entry = resolved[NON_NULL];
+    const severity = Array.isArray(entry) ? entry[0] : entry;
+    expect([undefined, 0, 'off']).toContain(severity);
+  });
+
+  // The test globs are TEST_FILES of eslint.config.js, the list the test-hygiene rules use; the
+  // .test.tsx, .test-support.tsx and setup entries were missing from the old hand-written list.
+  it.each([
+    'apps/api/src/fixture.test.ts',
+    'apps/api/test/fixture.integration.test.ts',
+    'apps/portal/src/fixture.test.tsx',
+    'apps/portal/src/session/fixture.test-support.tsx',
+    'apps/portal/src/fixture.test-support.ts',
+    'apps/portal/src/componentTests.setup.ts',
+    'scripts/vitest-integration-setup.ts',
+    'tests/integration/fixture.test.ts',
+  ])('allows it in the test file %s', async (path) => {
+    expect(await flagged(path, code, [SYNTAX, NON_NULL])).toEqual([]);
+  });
+});
+
+describe('casts to an inline object type (section 3.2, D25)', () => {
+  const INLINE_CAST = /^Do not cast to an inline object type to reach a member/;
+
+  it.each([
+    ['a plain cast', 'export const c = (error as { code?: unknown }).code;'],
+    ['the union form', 'export const c = (error as { code?: unknown } | null)?.code;'],
+    ['a parenthesised type', 'export const c = (error as ({ code?: unknown })).code;'],
+    ['an intersection', 'export const c = (error as Error & { code?: unknown }).code;'],
+    ['an angle-bracket assertion', 'export const c = (<{ code?: unknown }>error).code;'],
+    ['a cast of parsed JSON', "export const c = JSON.parse('{}') as { exceptions: string[] };"],
+    ['an array of inline objects', 'export const c = (rows as { id: string }[])[0];'],
+    ['a generic argument', 'export const c = (rows as Array<{ id: string }>)[0];'],
+    ['a Readonly wrapper', 'export const c = (row as Readonly<{ id: string }>).id;'],
+    [
+      'a union holding an intersection',
+      'export const c = (error as (Error & { code?: unknown }) | null)?.code;',
+    ],
+    // One report for the outermost literal, not one per nested literal.
+    ['a nested literal, once', 'export const c = (row as { a: { b: string } }[])[0];'],
+    ['a double cast', 'export const c = (row as unknown as { id: string }).id;'],
+  ])('flags %s', async (_name, code) => {
+    const messages = await flagged('apps/api/src/fixture.ts', code, [SYNTAX]);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatch(INLINE_CAST);
+  });
+
+  it.each([
+    'apps/media-worker/src/fixture.ts',
+    'apps/player-web/src/platform/fixture.ts',
+    'packages/db/src/fixture.ts',
+    'packages/contracts/src/fixture.ts',
+    'apps/player-web/sw/sw.ts',
+    'scripts/fixture.ts',
+    'scripts/lib/fixture.ts',
+  ])('flags it in %s', async (path) => {
+    const code = 'export const c = (error as { code?: unknown } | null)?.code;';
+    const messages = await flagged(path, code, [SYNTAX]);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatch(INLINE_CAST);
+  });
+
+  it('flags it in portal source, which keeps the portal selectors', async () => {
+    const messages = await flagged(
+      'apps/portal/src/features/fixture.tsx',
+      "const c = (error as { code?: unknown }).code; const x = <div dangerouslySetInnerHTML={{ __html: '' }} />;",
+      [SYNTAX],
+    );
+    expect(messages).toHaveLength(2);
+    expect(messages).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(INLINE_CAST),
+        'dangerouslySetInnerHTML is not allowed.',
+      ]),
+    );
+  });
+
+  it('leaves named types, query row types, type predicates and satisfies alone', async () => {
+    const code = [
+      'export const a = value as Error;',
+      'export const b = value as unknown;',
+      "export const k = ['a'] as const;",
+      "export const r = await tx.query<{ ok: boolean }>('SELECT true AS ok');",
+      // Only the cast's type is searched, not the expression being cast.
+      "export const q = tx.query<{ ok: boolean }>('SELECT true AS ok') as Promise<Result>;",
+      'export const f = ((o: { a: number }) => o.a) as Handler;',
+      'export const isUser = (u: unknown): u is { id?: unknown } => typeof u === "object";',
+      'export const s = { a: 1 } satisfies { a: number };',
+      'export const t: { a: number } = { a: 1 };',
+    ].join('\n');
+    expect(await flagged('apps/api/src/fixture.ts', code, [SYNTAX])).toEqual([]);
+  });
+
+  it.each([
+    'apps/api/src/fixture.test.ts',
+    'apps/api/test/fixture.ts',
+    'apps/portal/src/fixture.test.tsx',
+    'scripts/lib/fixture.test.ts',
+    'tests/integration/fixture.test.ts',
+  ])('leaves the test file %s alone', async (path) => {
+    const code = 'export const c = (error as { code?: unknown }).code;';
+    expect(await flagged(path, code, [SYNTAX])).toEqual([]);
+  });
+});

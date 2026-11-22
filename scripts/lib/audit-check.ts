@@ -74,6 +74,35 @@ export function advisories(report: unknown): Advisory[] {
   return [...found.values()];
 }
 
+/**
+ * The exceptions of scripts/audit-exceptions.json (parsed JSON). A field that is missing or not
+ * a string reads as '', which evaluate() blocks with the message for that field.
+ */
+export function parseExceptions(file: unknown): AuditException[] {
+  if (
+    typeof file !== 'object' ||
+    file === null ||
+    !('exceptions' in file) ||
+    !Array.isArray(file.exceptions)
+  ) {
+    throw new Error('scripts/audit-exceptions.json must be an object with an "exceptions" array');
+  }
+  return file.exceptions.map((entry: unknown) => {
+    const text = (field: keyof AuditException): string => {
+      const value: unknown =
+        typeof entry === 'object' && entry !== null ? Reflect.get(entry, field) : undefined;
+      return typeof value === 'string' ? value : '';
+    };
+    return {
+      id: text('id'),
+      package: text('package'),
+      reason: text('reason'),
+      owner: text('owner'),
+      reviewBy: text('reviewBy'),
+    };
+  });
+}
+
 function parseDay(value: string): number | undefined {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return undefined;
   const time = Date.parse(`${value}T00:00:00Z`);

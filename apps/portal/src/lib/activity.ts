@@ -485,7 +485,50 @@ export function describeActivity(event: AuditEventDto): ActivityDescription {
       }
       break;
     }
-    default:
+    // Their wording needs nothing from the detail. Listed by name, not as a default, so a new
+    // action fails lint here until someone decides (adoption plan section 3.5).
+    case 'alert_recipient.add':
+    case 'alert_recipient.confirm':
+    case 'alert_recipient.remove':
+    case 'app.create':
+    case 'app.delete':
+    case 'app.update':
+    case 'auth.login':
+    case 'auth.logout':
+    case 'auth.session_expired':
+    case 'display.create':
+    case 'folder.create':
+    case 'folder.delete':
+    case 'folder.update':
+    case 'invite.cancel':
+    case 'invite.create':
+    case 'layout.create':
+    case 'layout.delete':
+    case 'layout.update':
+    case 'media.delete':
+    case 'media.update':
+    case 'media.upload':
+    case 'media.validate':
+    case 'membership.create':
+    case 'membership.mfa_reset':
+    case 'membership.remove':
+    case 'membership.role_change':
+    case 'membership.sessions_end':
+    case 'membership.update':
+    case 'pairing.cancel':
+    case 'pairing.claim':
+    case 'pairing.create':
+    case 'pairing.lock':
+    case 'player.auth_rejected':
+    case 'playlist.delete':
+    case 'playlist.update':
+    case 'schedule.create':
+    case 'schedule.delete':
+    case 'schedule.update':
+    case 'security.cross_org_denied':
+    case 'security.csrf_rejected':
+    case 'security.permission_denied':
+    case 'tag.update':
       break;
   }
 

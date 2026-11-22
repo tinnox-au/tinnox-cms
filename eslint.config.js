@@ -85,6 +85,41 @@ const REAL_SERVICE_TEST_FILES = [
   'tests/**/*.ts',
   'scripts/vitest-integration-setup.ts',
 ];
+// Adoption plan section 3.5: no non-null assertion outside tests. Stated here rather than as
+// @typescript-eslint/no-non-null-assertion, whose fixed message names no alternative (section 3.4).
+const NO_NON_NULL = [
+  {
+    selector: 'TSNonNullExpression',
+    message:
+      'Do not assert a value is not null or undefined with `!`. Handle the missing case: narrow with a check or a type guard (and throw or return when it fails), or change the type so the value cannot be missing. Tests may use `!`.',
+  },
+];
+
+// Adoption plan sections 3.2 and 3.4: a cast to an inline object type reaches a member the
+// declared type lacks and hides it from the type checker (CX-04). Matched anywhere in the cast's
+// type (alone, in a union or intersection, `as { ... }[]`, `as Array<{ ... }>`), once for the
+// outermost literal, as `as` or as an angle-bracket assertion, which .ts files may still use;
+// the parser drops the parentheses of `as ({ ... })`. The cast expression itself is not searched,
+// so `tx.query<{ ok: boolean }>(...)` stays allowed.
+const INLINE_CAST_FILES = [
+  'apps/*/src/**/*.{ts,tsx}',
+  'packages/*/src/**/*.{ts,tsx}',
+  // The player's service worker is shipped product code outside src (plan correction).
+  'apps/player-web/sw/**/*.ts',
+  // D25: scripts get the inline-cast ban too.
+  'scripts/**/*.ts',
+];
+const NO_INLINE_CAST = [
+  {
+    selector: [
+      ':matches(TSAsExpression, TSTypeAssertion) > TSTypeLiteral.typeAnnotation',
+      ':matches(TSAsExpression, TSTypeAssertion) > .typeAnnotation TSTypeLiteral:not(TSTypeLiteral TSTypeLiteral)',
+    ].join(', '),
+    message:
+      'Do not cast to an inline object type to reach a member the declared type lacks. Add it to the interface (as ObjectStorage.removeStaleTempFiles, CX-04) or narrow with a type guard: an `in` check (`typeof value === "object" && value !== null && "id" in value`), or, in apps/api, packages/db and scripts, errorField(error, name) for a field of a thrown value (from @tinnox/db; from ./error-field.ts inside packages/db).',
+  },
+];
+
 const NO_MODULE_MOCK = ['mock', 'doMock', 'importMock', 'stubGlobal'].map((property) => ({
   object: 'vi',
   property,
@@ -395,6 +430,12 @@ export default tseslint.config(
       'no-implied-eval': 'off',
       '@typescript-eslint/no-implied-eval': 'error',
       'no-new-func': 'error',
+      // Adoption plan section 3.5: a new member of a closed union fails lint at every switch over
+      // it. A `default:` branch does not count as handling the members it does not name.
+      '@typescript-eslint/switch-exhaustiveness-check': [
+        'error',
+        { considerDefaultExhaustiveForUnions: false, requireDefaultForNonUnion: false },
+      ],
     },
   },
   {
@@ -447,24 +488,42 @@ export default tseslint.config(
     },
   },
   {
+    files: ['**/*.ts', '**/*.tsx'],
+    ignores: TEST_FILES,
+    rules: {
+      'no-restricted-syntax': ['error', ...NO_NON_NULL],
+    },
+  },
+  {
     files: ['apps/portal/**/*.{ts,tsx}'],
     plugins: { 'react-hooks': reactHooks },
     rules: {
       'react-hooks/rules-of-hooks': 'error',
       'react-hooks/exhaustive-deps': 'error',
-      'no-restricted-syntax': ['error', ...NO_RAW_HTML],
+      // Portal test files get the test blocks below, which replace this list.
+      'no-restricted-syntax': ['error', ...NO_RAW_HTML, ...NO_NON_NULL],
     },
   },
   {
-    files: ['**/*.test.ts', '**/*.test-support.ts', '**/test/**/*.ts', 'tests/**/*.ts'],
+    files: INLINE_CAST_FILES,
+    ignores: TEST_FILES,
     rules: {
-      '@typescript-eslint/no-non-null-assertion': 'off',
-      '@typescript-eslint/unbound-method': 'off',
+      'no-restricted-syntax': ['error', ...NO_NON_NULL, ...NO_INLINE_CAST],
     },
   },
   {
+    // Portal source keeps the portal's own selectors (see the note at the top of this file).
+    files: ['apps/portal/src/**/*.{ts,tsx}'],
+    ignores: TEST_FILES,
+    rules: {
+      'no-restricted-syntax': ['error', ...NO_RAW_HTML, ...NO_NON_NULL, ...NO_INLINE_CAST],
+    },
+  },
+  {
+    // Test files may use `!`: NO_NON_NULL is not in their lists.
     files: TEST_FILES,
     rules: {
+      '@typescript-eslint/unbound-method': 'off',
       'no-restricted-syntax': ['error', ...NO_SKIPPED_TESTS, ...NO_RANDOM_IN_TESTS],
     },
   },

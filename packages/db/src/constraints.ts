@@ -1,3 +1,5 @@
+import { errorField } from './error-field.ts';
+
 /**
  * Names of the constraints, unique indexes and guard triggers of
  * db/migrations/0005_portal_v2_stage_a.sql that a caller has to tell apart to
@@ -71,6 +73,6 @@ export const STAGE_C_CONSTRAINTS = Object.freeze({
 /** The constraint a PostgreSQL error names, or null when it names none. */
 export function violatedConstraint(error: unknown): string | null {
   if (typeof error !== 'object' || error === null) return null;
-  const constraint = (error as { constraint?: unknown }).constraint;
+  const constraint = errorField(error, 'constraint');
   return typeof constraint === 'string' && constraint !== '' ? constraint : null;
 }

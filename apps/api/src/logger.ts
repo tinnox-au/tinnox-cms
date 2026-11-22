@@ -4,6 +4,7 @@
  * query string (which carries `sig`, `code` and `state`) is never written.
  */
 import { REDACTED_HEADERS, REDACTED_QUERY_PARAMS } from '@tinnox/contracts';
+import { errorField } from '@tinnox/db';
 import { pino, type DestinationStream, type Logger } from 'pino';
 
 const SECRET_FIELDS = [
@@ -40,7 +41,7 @@ export function pathOnly(url: string | undefined): string {
 }
 
 function errorFields(error: Error): Record<string, unknown> {
-  const code = (error as { code?: unknown }).code;
+  const code = errorField(error, 'code');
   return {
     type: error.name,
     message: error.message.slice(0, 500),
@@ -56,7 +57,7 @@ function errorFields(error: Error): Record<string, unknown> {
  */
 export function serializeError(error: unknown): Record<string, unknown> {
   if (!(error instanceof Error)) return { message: 'non-error value thrown' };
-  const cause = (error as { cause?: unknown }).cause;
+  const cause = error.cause;
   return {
     ...errorFields(error),
     ...(cause instanceof Error ? { cause: errorFields(cause) } : {}),
