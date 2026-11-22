@@ -12,6 +12,8 @@ data/
 .env.*
 !.env.example
 infra/.generated/
+# the same path as a link: a worktree links it from the main checkout for the browser suite
+infra/.generated
 
 # test artefacts
 coverage/
