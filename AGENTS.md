@@ -31,8 +31,8 @@ The roles are created in `infra/postgres/init/01-roles.sh`.
 
 ### 4. Migration history
 
-- Migrations live in `db/migrations/NNNN_description.sql`, are applied in order, and each runs in one transaction with its `schema_migrations` row. A migration that has been merged to `main` is never edited, renamed or deleted: the runner rejects a changed checksum. Fixes go in a new migration with the next number.
-- Flag duplicate or skipped numbers, a migration that depends on data only present in development, and non-transactional statements (`CREATE INDEX CONCURRENTLY`, `VACUUM`) that cannot run inside the runner's transaction.
+- Migrations live in `db/migrations/NNNN_description.sql`, are applied in order, and each runs in one transaction with its `schema_migrations` row. A migration that has been merged to `main` is never edited, renamed or deleted: `npm run check:migrations` fails such a change in CI (against `origin/main` on a branch or pull request, against the first-parent history of `HEAD` on `main`), and the runner rejects a changed checksum on any database that applied it. Fixes go in a new migration with the next number.
+- Flag a migration that depends on data only present in development, and non-transactional statements (`CREATE INDEX CONCURRENTLY`, `VACUUM`) that cannot run inside the runner's transaction.
 - Ownership changes on `sec.*` functions use `SET LOCAL ROLE tinnox_definer` and `RESET ROLE`, as in migrations 0003, 0004, 0010, 0012, 0013 and 0014.
 - Locks: flag table rewrites or long `ACCESS EXCLUSIVE` locks on large tables. `tinnox_migrator` has `lock_timeout = '30s'`.
 - Each migration that changes tables, policies, grants or functions has an integration test like `packages/db/test/migration-0005.integration.test.ts` when it upgrades existing data.

@@ -36,6 +36,7 @@
     "test:e2e": "npm run e2e -w @tinnox/tests",
     "audit": "tsx scripts/audit.ts",
     "check:docs": "tsx scripts/check-docs.ts",
+    "check:migrations": "tsx scripts/check-migrations.ts",
     "scan:secrets": "node scripts/scan-secrets.mjs",
     "reset": "node scripts/reset-dev.mjs",
     "backup:verify": "bash scripts/backup-restore-check.sh",

@@ -16,9 +16,41 @@ export interface MigrationResult {
   readonly alreadyApplied: readonly string[];
 }
 
-const FILE_PATTERN = /^([0-9]{4})_[a-z0-9_]+\.sql$/;
+/** A migration file name; the first group is its four-digit number. */
+export const MIGRATION_FILE_PATTERN = /^([0-9]{4})_[a-z0-9_]+\.sql$/;
 /** Arbitrary constant; serialises concurrent migration runs on one database. */
 const ADVISORY_LOCK_KEY = 7_411_660_001;
+
+export type MigrationNameProblem =
+  | { readonly kind: 'pattern'; readonly name: string }
+  | { readonly kind: 'duplicate'; readonly name: string; readonly number: string };
+
+/**
+ * Checks migration file names in the order given (the runner passes them sorted): each looks
+ * like 0001_description.sql and no number repeats. Shared by the runner, which refuses the
+ * first problem before it connects, and by `npm run check:migrations`, which reports them all.
+ */
+export function validateMigrationNames(names: readonly string[]): MigrationNameProblem[] {
+  const problems: MigrationNameProblem[] = [];
+  const versions = new Set<string>();
+  for (const name of names) {
+    const match = MIGRATION_FILE_PATTERN.exec(name);
+    if (match === null || match[1] === undefined) {
+      problems.push({ kind: 'pattern', name });
+      continue;
+    }
+    if (versions.has(match[1])) problems.push({ kind: 'duplicate', name, number: match[1] });
+    versions.add(match[1]);
+  }
+  return problems;
+}
+
+/** The runner's error text for a name problem. */
+export function migrationNameMessage(problem: MigrationNameProblem): string {
+  return problem.kind === 'pattern'
+    ? `migration file name must look like 0001_description.sql: ${problem.name}`
+    : `duplicate migration number ${problem.number}`;
+}
 
 /**
  * Applies pending SQL migrations in file-name order. Each file runs in its own
@@ -30,15 +62,8 @@ const ADVISORY_LOCK_KEY = 7_411_660_001;
 export async function runMigrations(options: MigrationOptions): Promise<MigrationResult> {
   const log = options.log ?? (() => undefined);
   const names = (await readdir(options.directory)).filter((n) => n.endsWith('.sql')).sort();
-  const versions = new Set<string>();
-  for (const name of names) {
-    const match = FILE_PATTERN.exec(name);
-    if (match === null || match[1] === undefined) {
-      throw new Error(`migration file name must look like 0001_description.sql: ${name}`);
-    }
-    if (versions.has(match[1])) throw new Error(`duplicate migration number ${match[1]}`);
-    versions.add(match[1]);
-  }
+  const [problem] = validateMigrationNames(names);
+  if (problem !== undefined) throw new Error(migrationNameMessage(problem));
 
   const client = new pg.Client({
     connectionString: options.connectionString,

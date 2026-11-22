@@ -27,6 +27,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The whole history and every branch, so check:migrations finds origin/main and the
+          # merge-base on a pull request or branch push, and main's first-parent history on main.
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -39,6 +42,12 @@ jobs:
       # .cursor/BUGBOT.md generated from AGENTS.md, document paths, decision ranges, pinned
       # actions and images, and no undated hand-typed counts in live text (scripts/check-docs.ts).
       - run: npm run check:docs
+      # Merged migrations are append-only and numbered (scripts/check-migrations.ts, D12): on a
+      # pull request or branch it compares db/migrations with the merge-base of HEAD and
+      # origin/main, on main it reads HEAD's first-parent history; plus names, text rules and
+      # db/upgrade-tests.json. Until a ruleset on main requires this job (Michael's to create),
+      # a failure here reports but does not block a merge.
+      - run: npm run check:migrations
       - run: npm run typecheck
       - run: npm test
       # Portal components render in real Chromium (the portal relies on the popover attribute).
