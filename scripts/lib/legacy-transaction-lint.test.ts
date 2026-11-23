@@ -88,7 +88,6 @@ const FOUND_BY_STEP_19 = [
   'apps/api/src/auth/permissions.ts',
   'apps/api/src/db-helpers.ts',
   'apps/api/src/routes/auth.ts',
-  'apps/api/src/routes/members.ts',
   'apps/api/src/routes/player.ts',
   'scripts/lib/provision.ts',
   'scripts/seed.ts',
@@ -407,7 +406,7 @@ describe(
       );
 
     it.each([
-      // A new route file, an operator route file of the legacy list, and the role guard itself.
+      // A new route file, two operator route files, and the role guard itself.
       'apps/api/src/routes/fixture.ts',
       'apps/api/src/routes/folders.ts',
       'apps/api/src/routes/members.ts',

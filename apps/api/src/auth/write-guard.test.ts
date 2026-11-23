@@ -26,7 +26,7 @@ const READS: Readonly<Record<string, number>> = {
   'folders.ts': 0,
   'layouts.ts': 0,
   'media.ts': 0,
-  'members.ts': 3,
+  'members.ts': 0,
   'overview.ts': 0,
   'playlists.ts': 0,
   'push.ts': 0,

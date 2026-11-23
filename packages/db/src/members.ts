@@ -6,7 +6,7 @@
 import type { OrgTx } from './tx.ts';
 
 /**
- * Takes the per-organisation membership lock of the current withOrg transaction, the key the
+ * Takes the per-organisation membership lock of the current organisation transaction, the key the
  * 0013 trigger uses ('tinnox.membership:' || org). Every member-management transaction takes
  * it first. It takes an `OrgTx`, so there is an organisation; the check below is kept for a
  * handle whose organisation was cleared in SQL (pg_advisory_xact_lock(NULL) would silently take
@@ -18,7 +18,9 @@ export async function lockOrgMembership(tx: OrgTx): Promise<void> {
             pg_advisory_xact_lock(hashtextextended('tinnox.membership:' || app_org_id()::text, 0))`,
   );
   if (rows[0]?.in_org !== true) {
-    throw new Error('lockOrgMembership requires an organisation context (withOrg)');
+    throw new Error(
+      'lockOrgMembership requires an organisation context: in an API route, pass { lockMembership: true } to changeAsOperator(ctx, request, fn, options) from apps/api/src/auth/permissions.ts; elsewhere, call it on the tx of changeOrg, or of enterOrg inside withResolvedOrg',
+    );
   }
 }
 
