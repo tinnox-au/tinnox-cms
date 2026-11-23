@@ -24,13 +24,13 @@ const READS: Readonly<Record<string, number>> = {
   'audit.ts': 0,
   'displays.ts': 5,
   'folders.ts': 0,
-  'layouts.ts': 2,
+  'layouts.ts': 0,
   'media.ts': 6,
   'members.ts': 3,
   'overview.ts': 0,
   'playlists.ts': 2,
   'push.ts': 2,
-  'schedules.ts': 2,
+  'schedules.ts': 0,
   'tags.ts': 0,
 };
 

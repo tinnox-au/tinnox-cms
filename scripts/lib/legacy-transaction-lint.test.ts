@@ -95,13 +95,11 @@ const FOUND_BY_STEP_19 = [
   'apps/api/src/routes/alert-recipients.ts',
   'apps/api/src/routes/auth.ts',
   'apps/api/src/routes/displays.ts',
-  'apps/api/src/routes/layouts.ts',
   'apps/api/src/routes/media.ts',
   'apps/api/src/routes/members.ts',
   'apps/api/src/routes/player.ts',
   'apps/api/src/routes/playlists.ts',
   'apps/api/src/routes/push.ts',
-  'apps/api/src/routes/schedules.ts',
   'scripts/lib/provision.ts',
   'scripts/seed.ts',
 ];

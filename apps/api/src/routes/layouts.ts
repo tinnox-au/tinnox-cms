@@ -14,9 +14,9 @@ import {
   type LayoutInput,
   type LayoutListResponse,
 } from '@tinnox/contracts';
-import { auditScoped, withOrg, type OrgReadTx, type OrgTx } from '@tinnox/db';
+import { readOrg, type Change, type OrgReadTx, type OrgTx } from '@tinnox/db';
 import type { FastifyInstance } from 'fastify';
-import { withOrgAllowed } from '../auth/permissions.ts';
+import { changeAsOperator } from '../auth/permissions.ts';
 import { operatorOf, type OperatorSession } from '../auth/session.ts';
 import type { AppContext } from '../context.ts';
 import { bigintToNumber, iso } from '../db-helpers.ts';
@@ -91,14 +91,15 @@ async function loadLayouts(tx: OrgReadTx, id: string | null): Promise<LayoutDto[
 
 /**
  * Writes the whole layout: a new one (`id` null) or a replacement of `id`.
- * Returns null when the layout to replace does not exist.
+ * Returns null when the layout to replace does not exist. The audit event travels with the
+ * DTO, so the caller returns it as the change.
  */
 async function saveLayout(
   tx: OrgTx,
   session: OperatorSession,
   id: string | null,
   input: LayoutInput,
-): Promise<LayoutDto | null> {
+): Promise<Change<LayoutDto> | null> {
   if (id !== null) {
     // Held until commit. A push takes a share lock on the same row before it reads
     // the zones (loadLayoutDrafts), so it publishes this edit whole or not at all.
@@ -171,19 +172,21 @@ async function saveLayout(
       zones.map((zone) => zone.height),
     ],
   );
-  await auditScoped(tx, {
-    actorType: 'operator',
-    actorId: session.membershipId,
-    action: id === null ? 'layout.create' : 'layout.update',
-    objectType: 'layout',
-    objectId: layoutId,
-    result: 'success',
-    // Ids and a count, never names.
-    detail: { mainPlaylistId: zones[0]?.playlistId ?? null, zoneCount: zones.length },
-  });
   const [dto] = await loadLayouts(tx, layoutId);
   if (dto === undefined) throw new Error('saved layout is not visible');
-  return dto;
+  return {
+    value: dto,
+    audit: {
+      actorType: 'operator',
+      actorId: session.membershipId,
+      action: id === null ? 'layout.create' : 'layout.update',
+      objectType: 'layout',
+      objectId: layoutId,
+      result: 'success',
+      // Ids and a count, never names.
+      detail: { mainPlaylistId: zones[0]?.playlistId ?? null, zoneCount: zones.length },
+    },
+  };
 }
 
 /** A playlist went away between the check in `saveLayout` and the write: the database refuses. */
@@ -207,15 +210,18 @@ export function registerLayoutRoutes(app: FastifyInstance, ctx: AppContext): voi
   // shortcut: no pagination, the list is capped at ABSOLUTE.maxListItems; page it when an organisation has more layouts than that.
   app.get(ROUTES.layouts, async (request): Promise<LayoutListResponse> => {
     const session = operatorOf(request);
-    return withOrg(pool, session.orgId, async (tx) => ({ items: await loadLayouts(tx, null) }));
+    return readOrg(pool, session.orgId, async (tx) => ({ items: await loadLayouts(tx, null) }));
   });
 
   app.post(ROUTES.layouts, async (request, reply): Promise<LayoutDto> => {
     const session = operatorOf(request);
     const input = parseInput(LayoutInputSchema, request.body, 'layout');
     try {
-      const dto = await withOrgAllowed(ctx, request, (tx) => saveLayout(tx, session, null, input));
-      if (dto === null) throw new Error('created layout is not visible');
+      const dto = await changeAsOperator(ctx, request, async (tx) => {
+        const saved = await saveLayout(tx, session, null, input);
+        if (saved === null) throw new Error('created layout is not visible');
+        return saved;
+      });
       void reply.code(201);
       return dto;
     } catch (error) {
@@ -226,7 +232,7 @@ export function registerLayoutRoutes(app: FastifyInstance, ctx: AppContext): voi
   app.get(ROUTES.layoutPattern, async (request): Promise<LayoutDto> => {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
-    return withOrg(pool, session.orgId, async (tx) => {
+    return readOrg(pool, session.orgId, async (tx) => {
       const [dto] = await loadLayouts(tx, id);
       if (dto === undefined) throw notFound('The layout');
       return dto;
@@ -241,10 +247,10 @@ export function registerLayoutRoutes(app: FastifyInstance, ctx: AppContext): voi
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     const input = parseInput(LayoutInputSchema, request.body, 'layout');
     try {
-      return await withOrgAllowed(ctx, request, async (tx) => {
-        const dto = await saveLayout(tx, session, id, input);
-        if (dto === null) throw notFound('The layout');
-        return dto;
+      return await changeAsOperator(ctx, request, async (tx) => {
+        const saved = await saveLayout(tx, session, id, input);
+        if (saved === null) throw notFound('The layout');
+        return saved;
       });
     } catch (error) {
       throw playlistDeletedMeanwhile(error) ?? error;
@@ -258,7 +264,7 @@ export function registerLayoutRoutes(app: FastifyInstance, ctx: AppContext): voi
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     try {
-      await withOrgAllowed(ctx, request, async (tx) => {
+      await changeAsOperator(ctx, request, async (tx) => {
         const locked = await tx.query(
           'SELECT 1 FROM layout WHERE id = $1 AND org_id = app_org_id() FOR UPDATE',
           [id],
@@ -283,15 +289,18 @@ export function registerLayoutRoutes(app: FastifyInstance, ctx: AppContext): voi
           [id],
         );
         await tx.query('DELETE FROM layout WHERE id = $1 AND org_id = app_org_id()', [id]);
-        await auditScoped(tx, {
-          actorType: 'operator',
-          actorId: session.membershipId,
-          action: 'layout.delete',
-          objectType: 'layout',
-          objectId: id,
-          result: 'success',
-          detail: { zoneCount: zones.rowCount ?? 0 },
-        });
+        return {
+          value: undefined,
+          audit: {
+            actorType: 'operator',
+            actorId: session.membershipId,
+            action: 'layout.delete',
+            objectType: 'layout',
+            objectId: id,
+            result: 'success',
+            detail: { zoneCount: zones.rowCount ?? 0 },
+          },
+        };
       });
     } catch (error) {
       // A display took the layout between the check above and the delete.

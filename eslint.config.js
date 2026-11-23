@@ -898,12 +898,10 @@ export const LEGACY_TRANSACTION_FILES = [
   // withOrgDecisionAllowed with auditScoped in the callback.
   'apps/api/src/routes/alert-recipients.ts',
   'apps/api/src/routes/displays.ts',
-  'apps/api/src/routes/layouts.ts',
   'apps/api/src/routes/media.ts',
   'apps/api/src/routes/members.ts',
   'apps/api/src/routes/playlists.ts',
   'apps/api/src/routes/push.ts',
-  'apps/api/src/routes/schedules.ts',
   // Sign-in, sign-out and the player protocol: no role, and partly before the organisation is
   // known.
   'apps/api/src/routes/auth.ts',
