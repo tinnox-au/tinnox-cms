@@ -17,16 +17,35 @@ import { AST_NODE_TYPES, type TSESTree } from '@typescript-eslint/utils';
 import { createRule } from './create-rule.ts';
 
 // The functions of @tinnox/db that take a connection of their own (packages/db/src/tx.ts:
-// poolAsTx runs each statement as its own transaction), and the API's wrappers around withOrg
-// (apps/api/src/auth/permissions.ts, apps/api/src/db-helpers.ts). A new wrapper joins this list.
+// poolAsTx runs each statement as its own transaction, and so do auditStandalone and
+// sessionRevokeUnaudited of packages/db/src/sec.ts, which take the pool), and the API's wrappers
+// around withOrg (apps/api/src/auth/permissions.ts, apps/api/src/db-helpers.ts). A new wrapper
+// joins this list.
 const OPENERS: ReadonlySet<string> = new Set([
   'withOrg',
   'withoutOrg',
   'withResolvedOrg',
   'poolAsTx',
+  'auditStandalone',
+  'sessionRevokeUnaudited',
   'withOrgAllowed',
   'withOrgDecision',
   'withOrgDecisionAllowed',
+]);
+
+// The openers that take no callback: a function passed to one of them is not inside a transaction.
+const WITHOUT_CALLBACK: ReadonlySet<string> = new Set([
+  'poolAsTx',
+  'auditStandalone',
+  'sessionRevokeUnaudited',
+]);
+
+// The openers that take the pool and no tx. "Give the helper a tx parameter" does not fit them,
+// so each has a message that names the function doing the same work on the outer tx (plan
+// section 3.4).
+const BY_NAME: ReadonlyMap<string, 'standaloneAudit' | 'unauditedRevoke'> = new Map([
+  ['auditStandalone', 'standaloneAudit'],
+  ['sessionRevokeUnaudited', 'unauditedRevoke'],
 ]);
 
 // The types of a transaction handle: a function that takes one runs inside a transaction.
@@ -92,6 +111,10 @@ export default createRule({
     messages: {
       nested:
         '{{opener}}() is called inside {{outer}}, where a transaction is already open. This opens a second transaction on another connection that commits independently. Pass the outer tx to the helper: give it a `tx: Tx` parameter (from @tinnox/db) and run the statements on that; work that must commit on its own goes after the outer call has returned.',
+      standaloneAudit:
+        '{{opener}}() is called inside {{outer}}, where a transaction is already open. This opens a second transaction on another connection that commits independently. Write the event on the outer tx instead: auditUnscoped(tx, event), or auditScoped(tx, event) when the outer transaction is withOrg (both from @tinnox/db). auditStandalone is only for a refusal that no transaction carries: call it after the outer call has returned or thrown.',
+      unauditedRevoke:
+        '{{opener}}() is called inside {{outer}}, where a transaction is already open. This opens a second transaction on another connection that commits independently. End the session on the outer tx instead: sessionRevoke(tx, idHash) (from @tinnox/db), with its audit row on the same tx. sessionRevokeUnaudited is only for the sign-out fallback: call it after the outer call has returned or thrown.',
     },
   },
   create(context) {
@@ -122,8 +145,9 @@ export default createRule({
         parent.arguments.includes(node)
       ) {
         const opener = openerOf(parent.callee);
-        // poolAsTx takes no callback.
-        if (opener !== undefined && opener !== 'poolAsTx') return `the callback of ${opener}()`;
+        if (opener !== undefined && !WITHOUT_CALLBACK.has(opener)) {
+          return `the callback of ${opener}()`;
+        }
       }
       const handle = handleParameter(node);
       return handle === undefined
@@ -148,7 +172,11 @@ export default createRule({
         if (opener === undefined) return;
         const outer = enclosing.findLast((entry) => entry !== undefined);
         if (outer === undefined) return;
-        context.report({ node: node.callee, messageId: 'nested', data: { opener, outer } });
+        context.report({
+          node: node.callee,
+          messageId: BY_NAME.get(opener) ?? 'nested',
+          data: { opener, outer },
+        });
       },
     };
   },

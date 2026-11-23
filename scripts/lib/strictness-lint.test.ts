@@ -326,3 +326,76 @@ describe('casts to MigratorPool (SEC-1, D4)', () => {
     ]);
   });
 });
+
+describe('casts to Tx (D2, CX-01)', { timeout: 30_000 }, () => {
+  const TX_CAST =
+    /^Do not cast to Tx: .*Use the tx that the callback of withOrg, withoutOrg or withResolvedOrg .*auditStandalone\(pool, event\)\.$/;
+
+  it.each([
+    ['a plain cast', 'export const tx = poolAsTx(pool) as Tx;'],
+    ['a double cast', 'export const tx = pool as unknown as Tx;'],
+    ['an angle-bracket assertion', 'export const tx = <Tx>handle;'],
+    ['a union', 'export const tx = handle as Tx | undefined;'],
+    ['a generic argument', 'export const tx = open() as Promise<Tx>;'],
+    ['a wrapped handle', 'export const tx = handle as Readonly<Tx>;'],
+    ['a qualified name', 'export const tx = handle as db.Tx;'],
+  ])('flags %s', async (_name, code) => {
+    const messages = await flagged('apps/api/src/routes/fixture.ts', code, [SYNTAX]);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatch(TX_CAST);
+  });
+
+  it.each([
+    'apps/api/src/fixture.ts',
+    'apps/api/src/main.ts',
+    'apps/api/src/mail.ts',
+    'apps/api/src/config.ts',
+    'apps/media-worker/src/fixture.ts',
+    // packages/db too: run() builds the handle with its mark, so nothing there needs the cast.
+    'packages/db/src/tx.ts',
+    'packages/db/src/sec.ts',
+    'packages/db/src/migrate.ts',
+    'packages/delivery/src/fixture.ts',
+    'apps/portal/src/features/fixture.tsx',
+    'apps/player-web/sw/sw.ts',
+    'scripts/seed.ts',
+    'scripts/lib/provision.ts',
+    'vitest.config.ts',
+    // Tests open a real transaction instead (inTx, withoutOrg).
+    'tests/integration/fixture.test.ts',
+    'packages/db/test/fixture.integration.test.ts',
+    'packages/db/test/support.ts',
+    'packages/db/src/fixture.test.ts',
+    'apps/api/test/support.ts',
+    'apps/api/src/fixture.test.ts',
+    'apps/portal/src/fixture.test.tsx',
+    'apps/portal/src/testFrame.test-support.ts',
+  ])('flags it in %s', async (path) => {
+    const messages = await flagged(path, 'export const tx = poolAsTx(pool) as Tx;', [SYNTAX]);
+    expect(messages).toEqual([expect.stringMatching(TX_CAST)]);
+  });
+
+  it('leaves the type in annotations, the Autocommit handle and other casts alone', async () => {
+    const code = [
+      'export async function rename(tx: Tx, id: string): Promise<void> {}',
+      'export const run = (fn: (tx: Tx) => Promise<void>): Promise<void> => withoutOrg(pool, fn);',
+      'export const unscoped: Autocommit = poolAsTx(pool);',
+      'export const p = handle as Autocommit;',
+      'export const kept: Tx[] = [];',
+    ].join('\n');
+    expect(await flagged('apps/api/src/fixture.ts', code, [SYNTAX])).toEqual([]);
+    expect(await flagged('packages/db/test/fixture.integration.test.ts', code, [SYNTAX])).toEqual(
+      [],
+    );
+  });
+
+  it('keeps the MigratorPool ban beside it in every list', async () => {
+    const code = 'export const tx = handle as Tx; export const p = pool as MigratorPool;';
+    for (const path of ['apps/api/src/fixture.ts', 'tests/integration/fixture.test.ts']) {
+      expect(await flagged(path, code, [SYNTAX])).toEqual([
+        expect.stringMatching(TX_CAST),
+        expect.stringMatching(/^Do not cast to MigratorPool: /),
+      ]);
+    }
+  });
+});

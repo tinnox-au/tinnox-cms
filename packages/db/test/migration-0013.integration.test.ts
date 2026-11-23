@@ -39,10 +39,10 @@ import {
   sha256,
   withOrg,
   withoutOrg,
+  type Autocommit,
   type MigrationResult,
   type Pool,
   type SessionCreateResult,
-  type Tx,
 } from '../src/index.ts';
 import {
   appPool,
@@ -50,6 +50,7 @@ import {
   asSuperuser,
   createOrg,
   hash,
+  inTx,
   migratorClient,
   migratorUrl,
   pairingCode,
@@ -85,7 +86,7 @@ interface Member {
 let scratch: string | undefined;
 let migrator: pg.Client | undefined;
 let pool: Pool | undefined;
-let db: Tx;
+let db: Autocommit;
 let upgrade: MigrationResult;
 /** Two members, as the code before 0013 created them. */
 let legacyA: Legacy;
@@ -206,14 +207,16 @@ async function signIn(
   authTime: Date | null = new Date(),
   idHash: Buffer = sha256(`cookie-${randomUUID()}`),
 ): Promise<SessionCreateResult & { idHash: Buffer }> {
-  const result = await sessionCreate(db, {
-    idHash,
-    oidcSub,
-    csrfToken: 'c'.repeat(43),
-    ttlSeconds: 3600,
-    idToken: null,
-    authTime,
-  });
+  const result = await inTx(clients().pool, (tx) =>
+    sessionCreate(tx, {
+      idHash,
+      oidcSub,
+      csrfToken: 'c'.repeat(43),
+      ttlSeconds: 3600,
+      idToken: null,
+      authTime,
+    }),
+  );
   return { ...result, idHash };
 }
 
@@ -857,14 +860,16 @@ describe('pairing by a removed member, or one whose sessions were ended', () => 
   async function newPairing(): Promise<Pairing> {
     const pollingTokenHash = hash();
     const code = pairingCode();
-    const created = await pairingCreate(db, {
-      code,
-      pollingTokenHash,
-      clientKey: `client-${code}`,
-      ttlSeconds: 600,
-      maxSessionsPerClient: 10,
-      windowSeconds: 600,
-    });
+    const created = await inTx(clients().pool, (tx) =>
+      pairingCreate(tx, {
+        code,
+        pollingTokenHash,
+        clientKey: `client-${code}`,
+        ttlSeconds: 600,
+        maxSessionsPerClient: 10,
+        windowSeconds: 600,
+      }),
+    );
     if (created.outcome !== 'created') throw new Error(`pairing not created: ${created.outcome}`);
     return { code, pollingTokenHash, pairingId: created.pairingId };
   }
@@ -879,11 +884,13 @@ describe('pairing by a removed member, or one whose sessions were ended', () => 
       }),
     );
   const collect = (p: Pairing) =>
-    pairingComplete(db, {
-      pairingId: p.pairingId,
-      pollingTokenHash: p.pollingTokenHash,
-      deviceTokenHash: hash(),
-    });
+    inTx(clients().pool, (tx) =>
+      pairingComplete(tx, {
+        pairingId: p.pairingId,
+        pollingTokenHash: p.pollingTokenHash,
+        deviceTokenHash: hash(),
+      }),
+    );
   /** The collection is refused for good: the claim is spent and the display has no player. */
   async function expectRefused(p: Pairing): Promise<void> {
     expect(await collect(p)).toEqual({ outcome: 'not_claimable' });

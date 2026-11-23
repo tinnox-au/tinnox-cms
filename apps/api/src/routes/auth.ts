@@ -21,12 +21,14 @@ import {
 } from '@tinnox/contracts';
 import {
   auditScoped,
+  auditStandalone,
   auditUnscoped,
   loginStatePut,
   loginStateTake,
   poolAsTx,
   sessionCreate,
   sessionRevoke,
+  sessionRevokeUnaudited,
   sha256,
   withOrg,
   withResolvedOrg,
@@ -145,7 +147,7 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
         (await loginStateTake(unscoped, loginStateKey(ctx, preAuth, state, 'normal')));
       const forced = reauthStored !== null;
       if (stored === null) {
-        await auditUnscoped(unscoped, {
+        await auditStandalone(ctx.pool, {
           actorType: 'anonymous',
           actorId: null,
           action: 'auth.login',
@@ -171,7 +173,7 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
           { reason: error instanceof Error ? error.message : 'unknown' },
           'sign-in was not completed',
         );
-        await auditUnscoped(unscoped, {
+        await auditStandalone(ctx.pool, {
           actorType: 'anonymous',
           actorId: null,
           action: 'auth.login',
@@ -188,7 +190,7 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
         amrValues: ctx.config.oidc.mfaAmrValues,
       });
       if (!mfa.ok) {
-        await auditUnscoped(unscoped, {
+        await auditStandalone(ctx.pool, {
           actorType: 'anonymous',
           actorId: null,
           action: 'auth.login',
@@ -270,7 +272,7 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
         // transaction's audit row included, so the failed sign-in is recorded on its own.
         if (pgErrorCode(error) === '55P03') {
           request.log.warn({ pgCode: '55P03' }, 'sign-in waited too long for the member row');
-          await auditUnscoped(unscoped, {
+          await auditStandalone(ctx.pool, {
             actorType: 'anonymous',
             actorId: null,
             action: 'auth.login',
@@ -386,7 +388,7 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
       } catch (error) {
         // Ending a session is the safe direction, so a sign-out that cannot be audited still
         // ends it. Sign-in and pairing do the opposite: no audit event, no credential.
-        const ended = await sessionRevoke(unscoped, session.idHash).then(
+        const ended = await sessionRevokeUnaudited(ctx.pool, session.idHash).then(
           () => true,
           (revokeError: unknown) => {
             request.log.error({ err: revokeError }, 'sign-out could not end the session either');

@@ -5,14 +5,30 @@ import type { Pool, PoolClient, QueryResult, QueryResultRow } from './pool.ts';
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
- * The only handle request code gets on the database inside a transaction.
+ * A handle that runs one statement at a time, each committing on its own: what `poolAsTx`
+ * returns. A function that only reads before the organisation is known, or whose one statement
+ * is complete by itself (the login state, the purges), takes this, and so also accepts a `Tx`.
  * Always pass values as parameters; never build SQL from input.
  */
-export interface Tx {
+export interface Autocommit {
   query<R extends QueryResultRow = QueryResultRow>(
     text: string,
     values?: readonly unknown[],
   ): Promise<QueryResult<R>>;
+}
+
+/** Marks a handle made by run(). Not exported, so no other module can build a `Tx`. */
+const inTransaction: unique symbol = Symbol('inTransaction');
+
+/**
+ * The only handle request code gets on the database inside a transaction: the callback of
+ * `withOrg`, `withoutOrg` or `withResolvedOrg` receives it. A pool, and the handle `poolAsTx`
+ * returns, are not a `Tx`. So a function that takes a `Tx` (the audit writers, and every sec.*
+ * wrapper that changes data) cannot be given a handle that commits each statement on its own,
+ * and the audit row commits or rolls back with the change it records (CX-01, D2).
+ */
+export interface Tx extends Autocommit {
+  readonly [inTransaction]: true;
 }
 
 /** One transaction of run(): `open` from BEGIN until its callback returns or throws. */
@@ -34,16 +50,17 @@ const current = new AsyncLocalStorage<Transaction>();
  * before a connection is taken. tinnox/no-nested-transaction reports the cases lint can read
  * (scripts/eslint-rules/no-nested-transaction.ts).
  */
-function refuseNested(opener: string): void {
+function refuseNested(opener: string, instead = 'Pass the outer tx to the helper.'): void {
   if (current.getStore()?.open === true) {
     throw new Error(
-      `${opener} was called while a transaction is open on the same asynchronous path (inside the callback of withOrg, withoutOrg or withResolvedOrg, or in a helper it called). This opens a second transaction on another connection that commits independently. Pass the outer tx to the helper.`,
+      `${opener} was called while a transaction is open on the same asynchronous path (inside the callback of withOrg, withoutOrg or withResolvedOrg, or in a helper it called). This opens a second transaction on another connection that commits independently. ${instead}`,
     );
   }
 }
 
 function wrap(client: PoolClient, transaction: Transaction): Tx {
   return {
+    [inTransaction]: true,
     query: <R extends QueryResultRow = QueryResultRow>(
       text: string,
       values?: readonly unknown[],
@@ -216,17 +233,29 @@ export interface Queryable {
 }
 
 /**
+ * A function that writes on the pool under a name of its own (`auditStandalone`,
+ * `sessionRevokeUnaudited`): the name the refusal of U-3 gives, and what to call on the outer
+ * `tx` instead, since "pass the outer tx" does not fit a function that takes none.
+ */
+export interface StandaloneCaller {
+  readonly opener: string;
+  readonly instead: string;
+}
+
+/**
  * Adapts a pool for single-statement sec.* calls (each statement is its own transaction). So a
  * statement sent while a transaction is open on the same asynchronous path is refused, like
- * any other second transaction (U-3).
+ * any other second transaction (U-3). The handle is an `Autocommit`, never a `Tx`: an audit
+ * writer or a wrapper that changes data does not accept it.
  */
-export function poolAsTx(pool: Pool): Tx {
+export function poolAsTx(pool: Pool, caller?: StandaloneCaller): Autocommit {
   return {
     query: async <R extends QueryResultRow = QueryResultRow>(
       text: string,
       values?: readonly unknown[],
     ) => {
-      refuseNested('poolAsTx(pool).query');
+      if (caller === undefined) refuseNested('poolAsTx(pool).query');
+      else refuseNested(caller.opener, caller.instead);
       return pool.query<R>(text, values === undefined ? undefined : [...values]);
     },
   };

@@ -5,7 +5,8 @@
  * with `sha256` before calling.
  */
 import { createHash } from 'node:crypto';
-import type { Tx } from './tx.ts';
+import type { Pool } from './pool.ts';
+import { poolAsTx, type Autocommit, type Tx } from './tx.ts';
 
 /** SHA-256 digest as a Buffer, the form stored in *_hash columns. */
 export function sha256(value: string | Uint8Array): Buffer {
@@ -29,10 +30,10 @@ export interface MembershipLookup {
 }
 
 export async function membershipByOidcSub(
-  tx: Tx,
+  db: Autocommit,
   oidcSub: string,
 ): Promise<MembershipLookup | null> {
-  const { rows } = await tx.query<{
+  const { rows } = await db.query<{
     membership_id: string;
     org_id: string;
     role: string;
@@ -51,7 +52,7 @@ export interface LoginState {
 }
 
 export async function loginStatePut(
-  tx: Tx,
+  db: Autocommit,
   input: {
     stateHash: Buffer;
     codeVerifier: string;
@@ -60,7 +61,7 @@ export async function loginStatePut(
     ttlSeconds: number;
   },
 ): Promise<void> {
-  await tx.query('SELECT sec.login_state_put($1, $2, $3, $4, $5)', [
+  await db.query('SELECT sec.login_state_put($1, $2, $3, $4, $5)', [
     input.stateHash,
     input.codeVerifier,
     input.nonce,
@@ -70,8 +71,11 @@ export async function loginStatePut(
 }
 
 /** One-time: a second call with the same hash returns null. */
-export async function loginStateTake(tx: Tx, stateHash: Buffer): Promise<LoginState | null> {
-  const { rows } = await tx.query<{
+export async function loginStateTake(
+  db: Autocommit,
+  stateHash: Buffer,
+): Promise<LoginState | null> {
+  const { rows } = await db.query<{
     code_verifier: string;
     nonce: string;
     return_to: string | null;
@@ -154,11 +158,11 @@ export interface SessionLookup {
 
 /** Returns the live session and records activity, or null when missing, expired, idle or revoked. */
 export async function sessionByIdHash(
-  tx: Tx,
+  db: Autocommit,
   idHash: Buffer,
   idleTimeoutSeconds: number,
 ): Promise<SessionLookup | null> {
-  const { rows } = await tx.query<{
+  const { rows } = await db.query<{
     membership_id: string;
     org_id: string;
     oidc_sub: string;
@@ -203,6 +207,22 @@ export async function sessionRevoke(
 }
 
 /**
+ * Ends the session in a statement of its own, with no audit row. The one accepted exception
+ * to "a revocation commits with its audit row" (CX-01 residual): the sign-out fallback, when
+ * the audited transaction failed and ending the session is still the safe direction. Every
+ * other revocation uses `sessionRevoke` on the `Tx` that also writes the audit row. Returns
+ * true when a live session was ended.
+ */
+export async function sessionRevokeUnaudited(pool: Pool, idHash: Buffer): Promise<boolean> {
+  const { rows } = await poolAsTx(pool, {
+    opener: 'sessionRevokeUnaudited',
+    instead:
+      'End the session on the outer tx with sessionRevoke(tx, idHash), and write its audit row on the same tx.',
+  }).query('SELECT 1 FROM sec.session_revoke($1)', [idHash]);
+  return rows.length > 0;
+}
+
+/**
  * sec.session_revoke_membership (0013): ends every live session of the member and sets the
  * member's cut-off, so older sessions and sign-ins authenticated before it are refused. The
  * cut-off is the start of this statement (never earlier than it was), so lock waits before it
@@ -216,8 +236,8 @@ export async function sessionRevokeMembership(tx: Tx, membershipId: string): Pro
   return rows[0]?.n ?? 0;
 }
 
-export async function sessionPurgeExpired(tx: Tx): Promise<number> {
-  const { rows } = await tx.query<{ n: number }>('SELECT sec.session_purge_expired() AS n');
+export async function sessionPurgeExpired(db: Autocommit): Promise<number> {
+  const { rows } = await db.query<{ n: number }>('SELECT sec.session_purge_expired() AS n');
   return rows[0]?.n ?? 0;
 }
 
@@ -403,16 +423,16 @@ export async function pairingComplete(
   throw new Error(`unexpected pairing_complete outcome ${r.outcome}`);
 }
 
-export async function pairingPurge(tx: Tx, olderThanSeconds: number): Promise<number> {
-  const { rows } = await tx.query<{ n: number }>('SELECT sec.pairing_purge($1) AS n', [
+export async function pairingPurge(db: Autocommit, olderThanSeconds: number): Promise<number> {
+  const { rows } = await db.query<{ n: number }>('SELECT sec.pairing_purge($1) AS n', [
     olderThanSeconds,
   ]);
   return rows[0]?.n ?? 0;
 }
 
 /** Removes heartbeat history older than `olderThanSeconds` (at least 3600) in every organisation. */
-export async function heartbeatLogPurge(tx: Tx, olderThanSeconds: number): Promise<number> {
-  const { rows } = await tx.query<{ n: number }>('SELECT sec.heartbeat_log_purge($1) AS n', [
+export async function heartbeatLogPurge(db: Autocommit, olderThanSeconds: number): Promise<number> {
+  const { rows } = await db.query<{ n: number }>('SELECT sec.heartbeat_log_purge($1) AS n', [
     olderThanSeconds,
   ]);
   return rows[0]?.n ?? 0;
@@ -425,8 +445,11 @@ export interface DeviceLookup {
 }
 
 /** Null for an unknown or revoked token. */
-export async function deviceByTokenHash(tx: Tx, tokenHash: Buffer): Promise<DeviceLookup | null> {
-  const { rows } = await tx.query<{ registration_id: string; org_id: string; display_id: string }>(
+export async function deviceByTokenHash(
+  db: Autocommit,
+  tokenHash: Buffer,
+): Promise<DeviceLookup | null> {
+  const { rows } = await db.query<{ registration_id: string; org_id: string; display_id: string }>(
     'SELECT registration_id, org_id, display_id FROM sec.device_by_token_hash($1)',
     [tokenHash],
   );
@@ -437,8 +460,8 @@ export async function deviceByTokenHash(tx: Tx, tokenHash: Buffer): Promise<Devi
 }
 
 /** Every organisation's id, for the alert check (0014); it then enters each with withOrg. */
-export async function displayAlertOrgs(tx: Tx): Promise<string[]> {
-  const { rows } = await tx.query<{ org_id: string }>(
+export async function displayAlertOrgs(db: Autocommit): Promise<string[]> {
+  const { rows } = await db.query<{ org_id: string }>(
     'SELECT org_id FROM sec.display_alert_orgs()',
   );
   return rows.map((r) => r.org_id);
@@ -451,10 +474,10 @@ export interface AlertRecipientLookup {
 
 /** The unconfirmed, unexpired recipient a confirmation link names; null otherwise (0014). */
 export async function alertRecipientByTokenHash(
-  tx: Tx,
+  db: Autocommit,
   tokenHash: Buffer,
 ): Promise<AlertRecipientLookup | null> {
-  const { rows } = await tx.query<{ org_id: string; recipient_id: string }>(
+  const { rows } = await db.query<{ org_id: string; recipient_id: string }>(
     'SELECT org_id, recipient_id FROM sec.alert_recipient_by_token_hash($1)',
     [tokenHash],
   );
@@ -490,9 +513,8 @@ export async function auditScoped(tx: Tx, event: AuditInput): Promise<void> {
   );
 }
 
-/** Appends an audit event that has no organisation (before sign-in, rejected device token). */
-export async function auditUnscoped(tx: Tx, event: AuditInput): Promise<void> {
-  await tx.query('SELECT sec.audit_unscoped($1, $2, $3, $4, $5, $6, $7)', [
+function writeUnscoped(handle: Autocommit, event: AuditInput): Promise<unknown> {
+  return handle.query('SELECT sec.audit_unscoped($1, $2, $3, $4, $5, $6, $7)', [
     event.actorType,
     event.actorId,
     event.action,
@@ -501,4 +523,64 @@ export async function auditUnscoped(tx: Tx, event: AuditInput): Promise<void> {
     event.result,
     event.detail === null ? null : JSON.stringify(event.detail),
   ]);
+}
+
+/**
+ * Appends an audit event that has no organisation (a sign-in by nobody's member, a pairing
+ * attempt), on the transaction of what it records.
+ */
+export async function auditUnscoped(tx: Tx, event: AuditInput): Promise<void> {
+  await writeUnscoped(tx, event);
+}
+
+interface NoActorOrObject {
+  readonly actorId: null;
+  readonly objectType: null;
+  readonly objectId: null;
+  /** Small structured context. Never file content, secrets or signed URLs. */
+  readonly detail: Record<string, unknown> | null;
+}
+
+/**
+ * What `auditStandalone` may record: a refusal with no change to commit with, so there is no
+ * transaction to write it on (D2). A closed list with no `success` member and no actor or
+ * object id, so a change can never be recorded this way. A sign-in refused at or after the
+ * provider call has already had its one-time login state consumed by `loginStateTake`, in an
+ * earlier statement of its own. That is the only change on these paths, and it is not audited
+ * by itself (D3).
+ *
+ * Does a new kind of refusal belong here? Only when it comes before the organisation is
+ * known, nothing but the login state was changed and nothing was issued on its path, and no
+ * transaction is open to carry the row. A refusal inside an organisation is a scoped
+ * audit-only transaction instead (`withOrg` and `auditScoped`, as the permission, CSRF and
+ * upload refusals do).
+ */
+export type StandaloneAuditEvent =
+  /** A sign-in that was refused, or that failed, before any session existed. */
+  | (NoActorOrObject & {
+      readonly action: 'auth.login';
+      readonly actorType: 'anonymous';
+      readonly result: 'denied' | 'failure';
+    })
+  /** A device credential the API did not accept. */
+  | (NoActorOrObject & {
+      readonly action: 'player.auth_rejected';
+      readonly actorType: 'player';
+      readonly result: 'denied';
+    });
+
+/**
+ * Appends an unscoped audit event in a statement of its own. For the refusals of
+ * `StandaloneAuditEvent` only; everything else is written with `auditScoped` or
+ * `auditUnscoped` on the `Tx` of the change.
+ */
+export async function auditStandalone(pool: Pool, event: StandaloneAuditEvent): Promise<void> {
+  await writeUnscoped(
+    poolAsTx(pool, {
+      opener: 'auditStandalone',
+      instead:
+        'Write the event on the outer tx with auditUnscoped(tx, event), or with auditScoped(tx, event) when the outer transaction is withOrg.',
+    }),
+    event,
+  );
 }

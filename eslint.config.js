@@ -277,6 +277,26 @@ const NO_MIGRATOR_POOL_CAST = [
   },
 ];
 
+// D2, CX-01 (adoption plan section 2.1 A): a Tx says the handle came from withOrg, withoutOrg or
+// withResolvedOrg, so everything written on it commits or rolls back together. The audit writers
+// and the sec.* wrappers that change data rely on that alone, so nothing may make one by a cast:
+// in every file, tests included, and in packages/db too, where run() builds it without one.
+// Matched like MigratorPool above, with the same three forms left to review (a value typed `any`,
+// an alias of the type, `as never`).
+const TX = ":matches([typeName.name='Tx'], [typeName.right.name='Tx'])";
+const NO_TX_CAST = [
+  {
+    selector: [
+      `:matches(TSAsExpression, TSTypeAssertion) > TSTypeReference.typeAnnotation${TX}`,
+      `:matches(TSAsExpression, TSTypeAssertion) > .typeAnnotation TSTypeReference${TX}`,
+    ].join(', '),
+    message:
+      'Do not cast to Tx: the type says the handle is inside a transaction, so an audit row written on it commits with the change it records. Use the tx that the callback of withOrg, withoutOrg or withResolvedOrg (from @tinnox/db) receives; a test opens one the same way (inTx in packages/db/test/support.ts). A refusal with no change to pair with is written with auditStandalone(pool, event).',
+  },
+];
+// The two types only packages/db may make.
+const NO_BRAND_CAST = [...NO_MIGRATOR_POOL_CAST, ...NO_TX_CAST];
+
 // Adoption plan section 3.2: the API reads the time from one injected clock, so tests can set it.
 // main.ts and alerts-once.ts create that clock and are outside this rule. `new Date(value)` is a
 // conversion, not a clock read, and stays allowed.
@@ -903,7 +923,7 @@ function importBoundaryBlocks() {
 const PRODUCT_SYNTAX = [
   ...NO_NON_NULL,
   ...NO_INLINE_CAST,
-  ...NO_MIGRATOR_POOL_CAST,
+  ...NO_BRAND_CAST,
   ...NO_CREDENTIAL_NAMES,
   ...NO_HTML_SINK_CALLS,
   ...NO_GLOBAL_PROCESS_ENV,
@@ -912,7 +932,7 @@ const PRODUCT_SYNTAX = [
 const API_SYNTAX = [
   ...NO_NON_NULL,
   ...NO_INLINE_CAST,
-  ...NO_MIGRATOR_POOL_CAST,
+  ...NO_BRAND_CAST,
   ...NO_CREDENTIAL_NAMES,
   ...NO_CLOCK,
   ...NO_ORG_FROM_REQUEST,
@@ -1039,7 +1059,7 @@ export default tseslint.config(
     files: ['**/*.ts', '**/*.tsx'],
     ignores: TEST_FILES,
     rules: {
-      'no-restricted-syntax': ['error', ...NO_NON_NULL, ...NO_MIGRATOR_POOL_CAST],
+      'no-restricted-syntax': ['error', ...NO_NON_NULL, ...NO_BRAND_CAST],
     },
   },
   {
@@ -1053,7 +1073,7 @@ export default tseslint.config(
         'error',
         ...NO_RAW_HTML,
         ...NO_NON_NULL,
-        ...NO_MIGRATOR_POOL_CAST,
+        ...NO_BRAND_CAST,
         ...NO_HTML_SINK_CALLS,
       ],
     },
@@ -1062,12 +1082,7 @@ export default tseslint.config(
     files: INLINE_CAST_FILES,
     ignores: TEST_FILES,
     rules: {
-      'no-restricted-syntax': [
-        'error',
-        ...NO_NON_NULL,
-        ...NO_INLINE_CAST,
-        ...NO_MIGRATOR_POOL_CAST,
-      ],
+      'no-restricted-syntax': ['error', ...NO_NON_NULL, ...NO_INLINE_CAST, ...NO_BRAND_CAST],
     },
   },
   {
@@ -1146,7 +1161,7 @@ export default tseslint.config(
         'error',
         ...NO_NON_NULL,
         ...NO_INLINE_CAST,
-        ...NO_MIGRATOR_POOL_CAST,
+        ...NO_BRAND_CAST,
         ...NO_MIGRATOR_URL,
         ...NO_GLOBAL_PROCESS_ENV,
       ],
@@ -1162,7 +1177,7 @@ export default tseslint.config(
         ...NO_RAW_HTML,
         ...NO_NON_NULL,
         ...NO_INLINE_CAST,
-        ...NO_MIGRATOR_POOL_CAST,
+        ...NO_BRAND_CAST,
         ...NO_CREDENTIAL_NAMES,
         ...STATUS_WORDING,
         ...NO_TEXT_KEYS,
@@ -1180,7 +1195,7 @@ export default tseslint.config(
         'error',
         ...NO_SKIPPED_TESTS,
         ...NO_RANDOM_IN_TESTS,
-        ...NO_MIGRATOR_POOL_CAST,
+        ...NO_BRAND_CAST,
         ...NO_HTML_SINK_CALLS,
       ],
     },
@@ -1195,7 +1210,7 @@ export default tseslint.config(
         ...NO_SKIPPED_TESTS,
         ...NO_RANDOM_IN_TESTS,
         ...NO_BARE_KEYBOARD,
-        ...NO_MIGRATOR_POOL_CAST,
+        ...NO_BRAND_CAST,
         ...NO_HTML_SINK_CALLS,
       ],
     },
@@ -1211,7 +1226,7 @@ export default tseslint.config(
         ...NO_RAW_HTML,
         ...NO_SKIPPED_TESTS,
         ...NO_RANDOM_IN_TESTS,
-        ...NO_MIGRATOR_POOL_CAST,
+        ...NO_BRAND_CAST,
         ...NO_HTML_SINK_CALLS,
       ],
     },

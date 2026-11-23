@@ -3,13 +3,14 @@
  * including the case the integration tests cannot produce on demand: a ROLLBACK that fails.
  */
 import pg from 'pg';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
   CommitOutcomeUnknownError,
   poolAsTx,
   withOrg,
   withoutOrg,
   withResolvedOrg,
+  type Autocommit,
   type Pool,
   type Tx,
 } from './index.ts';
@@ -398,5 +399,47 @@ describe('a transaction inside another (U-3)', () => {
       'STILL OPEN',
       'COMMIT',
     ]);
+  });
+});
+
+// D2, CX-01: the type checker holds that what takes a Tx is never given a handle that commits
+// each statement on its own. `npm run typecheck` reads this file: an unused @ts-expect-error
+// is an error, so each case fails the build the day its line compiles.
+describe('Tx and Autocommit (D2)', () => {
+  const needsTx = (tx: Tx): Tx => tx;
+  const takesEither = (handle: Autocommit): Autocommit => handle;
+
+  it('a pool is not a Tx, nor is the handle of poolAsTx, nor an object with a query method', () => {
+    const { pool } = fakePool();
+    const autocommit = poolAsTx(pool);
+    const handMade = { query: autocommit.query };
+    // @ts-expect-error a pool commits each statement on its own, so it is not a Tx
+    needsTx(pool);
+    // @ts-expect-error poolAsTx gives an Autocommit, which is not a Tx
+    needsTx(autocommit);
+    // @ts-expect-error only run() in tx.ts can make a Tx: the mark is not exported
+    needsTx(handMade);
+
+    expectTypeOf(poolAsTx).returns.toEqualTypeOf<Autocommit>();
+    expectTypeOf<Autocommit>().not.toExtend<Tx>();
+    expectTypeOf<Pool>().not.toExtend<Tx>();
+    expect(takesEither(autocommit)).toBe(autocommit);
+  });
+
+  it('every opener hands its callback a Tx, which is also accepted where either handle is', async () => {
+    const { pool } = fakePool();
+    const seen: Tx[] = [];
+    await withOrg(pool, ORG, async (tx) => {
+      seen.push(needsTx(tx));
+    });
+    await withoutOrg(pool, async (tx) => {
+      seen.push(needsTx(tx));
+    });
+    await withResolvedOrg(pool, async (tx) => {
+      seen.push(needsTx(tx));
+      expect(takesEither(tx)).toBe(tx);
+    });
+    expect(seen).toHaveLength(3);
+    expectTypeOf<Tx>().toExtend<Autocommit>();
   });
 });

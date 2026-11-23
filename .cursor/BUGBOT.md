@@ -23,7 +23,7 @@ The roles are created in `infra/postgres/init/01-roles.sh`.
 
 ### 3. Audit record in the same transaction as the change
 
-- A state change that must be audited (sign-in and sign-out, pairing, revocation, upload, publishing, membership, and any new security-relevant action) writes its `audit_event` row with `auditScoped` or `auditUnscoped` (`packages/db/src/sec.ts`) on the same `Tx` as the change, so both commit or neither does. Writing the change in one transaction and the audit in a later one is a finding (see CX-01 in `docs/reviews/2026-11-16-backend-round-1/`).
+- A state change that must be audited (sign-in and sign-out, pairing, revocation, upload, publishing, membership, and any new security-relevant action) writes its `audit_event` row with `auditScoped` or `auditUnscoped` (`packages/db/src/sec.ts`) on the same `Tx` as the change, so both commit or neither does. Writing the change in one transaction and the audit in a later one is a finding (see CX-01 in `docs/reviews/2026-11-16-backend-round-1/`). Two exceptions, both refusals where nothing changed: `auditStandalone` (unscoped sign-in and device-credential refusals) and the scoped refusal-only transaction (SCR-32) (D2).
 - Audit rows carry actor, organisation, object and result. They never contain content, secrets, tokens, signed URLs or query strings. `occurred_at` is set by the database, so code must not pass a time.
 - `audit_event` is append-only. Flag any `UPDATE` or `DELETE` on it and any change to its trigger.
 

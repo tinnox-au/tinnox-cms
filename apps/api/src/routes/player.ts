@@ -31,6 +31,7 @@ import {
 } from '@tinnox/contracts';
 import {
   auditScoped,
+  auditStandalone,
   auditUnscoped,
   deviceByTokenHash,
   pairingComplete,
@@ -138,7 +139,7 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
     request: FastifyRequest,
     record: { count: number; crossedLimit: boolean },
   ): Promise<void> {
-    await auditUnscoped(unscoped, {
+    await auditStandalone(pool, {
       actorType: 'player',
       actorId: null,
       action: 'player.auth_rejected',

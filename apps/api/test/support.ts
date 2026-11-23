@@ -33,7 +33,15 @@ import {
   type ScheduleDto,
   type ScheduleEventInput,
 } from '@tinnox/contracts';
-import { createPool, poolAsTx, sessionCreate, sha256, withOrg, type Pool } from '@tinnox/db';
+import {
+  createPool,
+  poolAsTx,
+  sessionCreate,
+  sha256,
+  withOrg,
+  withoutOrg,
+  type Pool,
+} from '@tinnox/db';
 import { createDeliveryRegistry } from '@tinnox/delivery';
 import { LocalObjectStorage } from '@tinnox/storage';
 import type { FastifyInstance } from 'fastify';
@@ -314,14 +322,17 @@ export async function signIn(
 ): Promise<Operator> {
   const sessionId = randomBytes(32).toString('base64url');
   const csrfToken = randomBytes(32).toString('base64url');
-  const created = await sessionCreate(poolAsTx(t.pool), {
-    idHash: sha256(sessionId),
-    oidcSub: org.oidcSub,
-    csrfToken,
-    ttlSeconds: 3600,
-    idToken: null,
-    authTime: options.authTime === undefined ? new Date(Date.now() + 60_000) : options.authTime,
-  });
+  // In a transaction, as the callback route calls it: sessionCreate takes a Tx (D2).
+  const created = await withoutOrg(t.pool, (tx) =>
+    sessionCreate(tx, {
+      idHash: sha256(sessionId),
+      oidcSub: org.oidcSub,
+      csrfToken,
+      ttlSeconds: 3600,
+      idToken: null,
+      authTime: options.authTime === undefined ? new Date(Date.now() + 60_000) : options.authTime,
+    }),
+  );
   if (created.outcome !== 'created') {
     throw new Error(`test member could not sign in: ${created.outcome}`);
   }

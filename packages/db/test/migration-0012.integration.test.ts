@@ -30,14 +30,15 @@ import {
   resetTestDatabase,
   runMigrations,
   withOrg,
+  type Autocommit,
   type MigrationResult,
   type Pool,
-  type Tx,
 } from '../src/index.ts';
 import {
   appPool,
   createOrg,
   hash,
+  inTx,
   migratorClient,
   migratorUrl,
   pairingCode,
@@ -63,7 +64,7 @@ interface Pairing {
 let scratch: string | undefined;
 let migrator: pg.Client | undefined;
 let pool: Pool | undefined;
-let db: Tx;
+let db: Autocommit;
 let upgrade: MigrationResult;
 
 /** A screen that never had a player, with two claims at once: possible only before 0010. */
@@ -108,14 +109,16 @@ async function asDefiner<R extends pg.QueryResultRow>(
 async function newPairing(): Promise<Pairing> {
   const pollingTokenHash = hash();
   const code = pairingCode();
-  const created = await pairingCreate(db, {
-    code,
-    pollingTokenHash,
-    clientKey: `client-${code}`,
-    ttlSeconds: 600,
-    maxSessionsPerClient: 10,
-    windowSeconds: 600,
-  });
+  const created = await inTx(clients().pool, (tx) =>
+    pairingCreate(tx, {
+      code,
+      pollingTokenHash,
+      clientKey: `client-${code}`,
+      ttlSeconds: 600,
+      maxSessionsPerClient: 10,
+      windowSeconds: 600,
+    }),
+  );
   if (created.outcome !== 'created') throw new Error(`pairing not created: ${created.outcome}`);
   return { code, pollingTokenHash, pairingId: created.pairingId };
 }
@@ -142,11 +145,13 @@ async function statusOf(pairing: Pairing): Promise<string | undefined> {
 }
 
 const complete = (pairing: Pairing, deviceTokenHash: Buffer = hash()) =>
-  pairingComplete(db, {
-    pairingId: pairing.pairingId,
-    pollingTokenHash: pairing.pollingTokenHash,
-    deviceTokenHash,
-  });
+  inTx(clients().pool, (tx) =>
+    pairingComplete(tx, {
+      pairingId: pairing.pairingId,
+      pollingTokenHash: pairing.pollingTokenHash,
+      deviceTokenHash,
+    }),
+  );
 
 /** The cancellations an organisation can read in its own audit trail. */
 async function cancellationsSeenBy(org: TestOrg): Promise<Record<string, unknown>[]> {

@@ -12,12 +12,17 @@ RuleTester.it = it;
 
 const tester = new RuleTester({ languageOptions: { parser: tseslint.parser } });
 
-const REMEDY =
-  'where a transaction is already open. This opens a second transaction on another connection that commits independently. Pass the outer tx to the helper: give it a `tx: Tx` parameter (from @tinnox/db) and run the statements on that; work that must commit on its own goes after the outer call has returned.';
-const inCallback = (opener: string, outer: string) =>
-  `${opener}() is called inside the callback of ${outer}(), ${REMEDY}`;
-const withHandle = (opener: string, handle: string) =>
-  `${opener}() is called inside a function that takes a transaction handle (${handle}), ${REMEDY}`;
+const SECOND =
+  'where a transaction is already open. This opens a second transaction on another connection that commits independently.';
+const REMEDY = `${SECOND} Pass the outer tx to the helper: give it a \`tx: Tx\` parameter (from @tinnox/db) and run the statements on that; work that must commit on its own goes after the outer call has returned.`;
+// The two functions that take the pool and no tx: the message names what to call on the outer
+// tx, not a parameter the function does not have.
+const AUDIT_REMEDY = `${SECOND} Write the event on the outer tx instead: auditUnscoped(tx, event), or auditScoped(tx, event) when the outer transaction is withOrg (both from @tinnox/db). auditStandalone is only for a refusal that no transaction carries: call it after the outer call has returned or thrown.`;
+const REVOKE_REMEDY = `${SECOND} End the session on the outer tx instead: sessionRevoke(tx, idHash) (from @tinnox/db), with its audit row on the same tx. sessionRevokeUnaudited is only for the sign-out fallback: call it after the outer call has returned or thrown.`;
+const inCallback = (opener: string, outer: string, remedy = REMEDY) =>
+  `${opener}() is called inside the callback of ${outer}(), ${remedy}`;
+const withHandle = (opener: string, handle: string, remedy = REMEDY) =>
+  `${opener}() is called inside a function that takes a transaction handle (${handle}), ${remedy}`;
 
 tester.run('no-nested-transaction (U-3)', rule, {
   valid: [
@@ -54,6 +59,21 @@ tester.run('no-nested-transaction (U-3)', rule, {
         const session = await sessionByTokenHash(poolAsTx(ctx.pool), hash);
         await withOrg(ctx.pool, session.orgId, (tx) => touch(tx));
       `,
+    },
+    {
+      name: 'a refusal written on its own after the transaction has rolled back, and the sign-out fallback (D2)',
+      code: `
+        try {
+          await withResolvedOrg(ctx.pool, (tx, enterOrg) => signIn(tx, enterOrg));
+        } catch (error) {
+          await auditStandalone(ctx.pool, memberLocked);
+          await sessionRevokeUnaudited(ctx.pool, idHash);
+        }
+      `,
+    },
+    {
+      name: 'a function given to an opener that takes no callback is not inside a transaction',
+      code: `await auditStandalone(pool, events.find((event) => withoutOrg(pool, check)));`,
     },
     {
       name: 'a wrapper that passes its callback on: its parameter is a function, not a handle',
@@ -122,6 +142,23 @@ tester.run('no-nested-transaction (U-3)', rule, {
         });
       `,
       errors: [{ message: inCallback('poolAsTx', 'withOrg') }],
+    },
+    {
+      name: 'the two functions that write on the pool by name, inside a transaction (D2)',
+      code: `
+        await withResolvedOrg(ctx.pool, async (tx, enterOrg) => {
+          await auditStandalone(ctx.pool, refusal);
+          await sessionRevokeUnaudited(ctx.pool, idHash);
+        });
+        async function refuse(tx: Tx, pool: Pool): Promise<void> {
+          await auditStandalone(pool, refusal);
+        }
+      `,
+      errors: [
+        { message: inCallback('auditStandalone', 'withResolvedOrg', AUDIT_REMEDY) },
+        { message: inCallback('sessionRevokeUnaudited', 'withResolvedOrg', REVOKE_REMEDY) },
+        { message: withHandle('auditStandalone', 'tx: Tx', AUDIT_REMEDY) },
+      ],
     },
     {
       name: 'a nested function inside the callback is still inside it',

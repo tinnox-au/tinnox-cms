@@ -80,8 +80,9 @@ Roles: `tinnox_migrator` owns the schema. `tinnox_app` is `NOSUPERUSER NOBYPASSR
 createPool(options: { connectionString: string; applicationName?: string; max?: number; statementTimeoutMs?: number }): Pool
 withOrg<T>(pool: Pool, orgId: string, fn: (tx: Tx) => Promise<T>): Promise<T>
 withoutOrg<T>(pool: Pool, fn: (tx: Tx) => Promise<T>): Promise<T>
-poolAsTx(pool: Pool): Tx            // single-statement sec.* calls
-interface Tx { query<R>(text: string, values?: readonly unknown[]): Promise<QueryResult<R>> }
+poolAsTx(pool: Pool): Autocommit    // single-statement sec.* lookups; each statement commits on its own
+interface Autocommit { query<R>(text: string, values?: readonly unknown[]): Promise<QueryResult<R>> }
+interface Tx extends Autocommit {}  // marked; only withOrg, withoutOrg and withResolvedOrg make one
 assertConnectionRole(connectionString: string, expectedRole: string): void
 assertRuntimeRole(pool: Pool): Promise<void>   // rejects with RuntimeRoleError, problems listed
 sha256(value: string | Uint8Array): Buffer
@@ -93,7 +94,7 @@ Inside `withOrg` write `org_id` explicitly or use `app_org_id()`: `INSERT INTO p
 
 ### Lookups before the organisation is known (schema `sec`, wrappers in `@tinnox/db`)
 
-All take a `Tx` first. Pass `poolAsTx(pool)` or a `withoutOrg` transaction, except `pairingClaim`, which needs `withOrg`.
+The wrappers that change data (`sessionCreate`, `sessionRevoke`, `sessionRevokeMembership`, the five `pairing*` calls) and the two audit writers take a `Tx`: call them inside `withoutOrg` or `withResolvedOrg` (`pairingClaim`, `pairingCancelClaims`, `sessionRevokeMembership` and `auditScoped` inside `withOrg`), so the change and its audit row commit together. A pool, or the handle of `poolAsTx(pool)`, is a type error there. The lookups, the login state and the purges take an `Autocommit`, so `poolAsTx(pool)` or a `Tx` will do. Two functions take the pool and write in a statement of their own: `auditStandalone(pool, event)`, for a refused or failed sign-in and a rejected device credential only (its event type has no `success`), and `sessionRevokeUnaudited(pool, idHash)`, for the sign-out fallback only. Called while a transaction is open, both are refused like any second transaction, and the message names what to call on the outer `tx` instead: `auditUnscoped` or `auditScoped`, and `sessionRevoke`. Nothing casts to `Tx` (lint refuses it); a test opens a transaction with `withoutOrg`, or `inTx` in `packages/db/test/support.ts`.
 
 ```ts
 membershipByOidcSub(tx, oidcSub): Promise<{ membershipId, orgId, role, orgName } | null>
@@ -115,6 +116,8 @@ pairingPurge(tx, olderThanSeconds): Promise<number>
 deviceByTokenHash(tx, tokenHash): Promise<{ registrationId, orgId, displayId } | null>         // null when revoked
 auditScoped(tx /* withOrg */, event): Promise<void>
 auditUnscoped(tx, event): Promise<void>                                                         // org_id NULL
+auditStandalone(pool, event): Promise<void>                                                     // org_id NULL, refusals only
+sessionRevokeUnaudited(pool, idHash): Promise<boolean>                                          // sign-out fallback only
 ```
 
 Hashes are `sha256(rawValue)` Buffers. Raw session ids, polling tokens and device tokens are never stored.
