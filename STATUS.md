@@ -48,14 +48,13 @@ None.
 
 ## In review
 
-| Id | Card | Agreed | PR | Since |
-|---|---|---|---|---|
-| CMS-28 | Poteto pyramid refactor, rest of group A: steps 3, 4, 6, 6a, 11, 12 and 12a to 12c of the adoption plan | Michael 22 Nov | #37 | 23 Nov |
+None.
 
 ## Done, last 14 days
 
 | Id | Date | Outcome | PR |
 |---|---|---|---|
+| CMS-28 | 23 Nov | Poteto pyramid refactor, rest of group A: steps 3, 4, 6, 6a, 11, 12 and 12a to 12c of the adoption plan | #37 |
 | CMS-24 | 22 Nov | Poteto pyramid refactor, group A: guardrails that land with their fixes (document, test, migration, import and lint checks) | #36 |
 | CMS-23 | 22 Nov | Poteto pyramid adoption plan: rule and finding inventory, enforcement design per layer, ordered PR-sized steps (plan only, no code) | #36 |
 | CMS-22 | 22 Nov | Keyboard focus after cancelling an invite lands on the first row; reuse useRowFocusReturn as the Alerts page does (EAX-14) | #34 |
@@ -215,6 +214,9 @@ from: CMS-23
 
 ### CMS-28
 from: CMS-24
+
+**Evidence**
+Merged; CI green on the pull request; every suite and the browser suite passed locally on 23 Nov
 
 ### CMS-29
 from: CMS-28
