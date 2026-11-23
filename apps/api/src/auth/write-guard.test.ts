@@ -19,7 +19,7 @@ const OUTSIDE_OPERATOR_API = new Set(['auth.ts', 'ops.ts', 'player.ts']);
  * withOrgAllowed. A file on the new API (readOrg, changeAsOperator) has none.
  */
 const READS: Readonly<Record<string, number>> = {
-  'alert-recipients.ts': 1,
+  'alert-recipients.ts': 0,
   'apps.ts': 0,
   'audit.ts': 0,
   'displays.ts': 0,

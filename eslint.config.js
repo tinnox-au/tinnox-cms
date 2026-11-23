@@ -896,7 +896,6 @@ const AUDIT_WRITERS = ['packages/db/src/sec.ts'];
 export const LEGACY_TRANSACTION_FILES = [
   // The operator routes: reads in plain withOrg, writes through withOrgAllowed or
   // withOrgDecisionAllowed with auditScoped in the callback.
-  'apps/api/src/routes/alert-recipients.ts',
   'apps/api/src/routes/members.ts',
   'apps/api/src/routes/playlists.ts',
   'apps/api/src/routes/push.ts',

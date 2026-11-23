@@ -92,7 +92,6 @@ const FOUND_BY_STEP_19 = [
   'apps/api/src/db-helpers.ts',
   'apps/api/src/media/pipeline.ts',
   'apps/api/src/publishing.ts',
-  'apps/api/src/routes/alert-recipients.ts',
   'apps/api/src/routes/auth.ts',
   'apps/api/src/routes/members.ts',
   'apps/api/src/routes/player.ts',
