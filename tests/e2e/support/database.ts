@@ -12,7 +12,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resetTestDatabase, runMigrations } from '@tinnox/db';
+import { resetTestDatabase, runMigrations } from '@tinnox/db/migrate';
 import pg from 'pg';
 
 // Not imported from stack.ts, which imports this module.

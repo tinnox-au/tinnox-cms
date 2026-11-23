@@ -209,6 +209,8 @@ describe('the handle each wrapper takes (D2, CX-01)', () => {
       | 'pairingPurge'
       | 'heartbeatLogPurge'
       | 'deviceByTokenHash'
+      | 'deviceByRegistrationId'
+      | 'mediaProcessingJobs'
       | 'displayAlertOrgs'
       | 'alertRecipientByTokenHash'
     >();

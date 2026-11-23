@@ -77,6 +77,16 @@ export function createPool(options: CreatePoolOptions): Pool {
   return pool;
 }
 
+/**
+ * A liveness probe (the API's /readyz): resolves when a pooled connection answers one statement
+ * that reads no table, and rejects when no connection can be had or the server does not answer.
+ * The one statement the API sends on the pool itself; everything else goes through a transaction
+ * or a typed sec.* wrapper (tinnox/no-query-off-transaction).
+ */
+export async function ping(pool: Pool): Promise<void> {
+  await pool.query('SELECT 1');
+}
+
 // The connection parameters createPool sends itself. `options` carries `-c name=value` for any
 // setting, search_path and row_security included.
 const STARTUP_SETTINGS = [
@@ -164,7 +174,7 @@ async function assertRuntimeSession(client: pg.ClientBase): Promise<void> {
       `createPool serves role ${RUNTIME_ROLE} only, but the connection logs in as ` +
         `${who?.session_user ?? 'unknown'} and acts as ${who?.current_user ?? 'unknown'}; ` +
         `use the ${RUNTIME_ROLE} connection string (DATABASE_URL) without a role setting, ` +
-        'and connectMigrator (@tinnox/db) for an offline tool that needs tinnox_migrator',
+        'and connectMigrator (@tinnox/db/migrate) for an offline tool that needs tinnox_migrator',
     ]);
   }
 }

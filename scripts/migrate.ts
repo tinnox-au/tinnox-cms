@@ -2,7 +2,7 @@
 //   npm run db:migrate            development database (DATABASE_MIGRATOR_URL)
 //   npm run db:migrate -- --test  integration-test database (TEST_DATABASE_MIGRATOR_URL)
 import { join } from 'node:path';
-import { runMigrations } from '@tinnox/db';
+import { runMigrations } from '@tinnox/db/migrate';
 import { loadEnv, repoRoot, requireEnv } from './lib/env.ts';
 
 loadEnv();

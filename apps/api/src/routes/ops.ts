@@ -1,4 +1,5 @@
 import { ROUTES } from '@tinnox/contracts';
+import { ping } from '@tinnox/db';
 import type { FastifyInstance } from 'fastify';
 import type { AppContext } from '../context.ts';
 
@@ -26,7 +27,7 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
 
   app.get(ROUTES.readyz, async (_request, reply) => {
     const [database, storage, jobs, identityProvider, workerAge] = await Promise.all([
-      passes(() => ctx.pool.query('SELECT 1')),
+      passes(() => ping(ctx.pool)),
       passes(() => ctx.storage.check()),
       passes(() => ctx.media.check()),
       ctx.idp.check(),

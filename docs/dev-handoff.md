@@ -66,7 +66,7 @@ The API's `dev`, `start` and `alerts:once` scripts pass no `--env-file`. The ent
 | Variable | Role | Database | Use |
 |---|---|---|---|
 | `DATABASE_URL` | `tinnox_app` | `tinnox` | The running API. Nothing else. |
-| `DATABASE_MIGRATOR_URL` | `tinnox_migrator` | `tinnox` | Offline tools only: `db:migrate`, `db:seed` and `npm run provision` (from a controlled host), each through `connectMigrator`; the e2e setup also reads it to build its own database. |
+| `DATABASE_MIGRATOR_URL` | `tinnox_migrator` | `tinnox` | Offline tools only: `db:migrate`, `db:seed` and `npm run provision` (from a controlled host), each through `connectMigrator` (`@tinnox/db/migrate`); the e2e setup also reads it to build its own database. |
 | `TEST_DATABASE_URL` | `tinnox_app` | `tinnox_test` | Integration tests, acting as the application. |
 | `TEST_DATABASE_MIGRATOR_URL` | `tinnox_migrator` | `tinnox_test` | Integration tests, arranging data. |
 
@@ -85,8 +85,20 @@ interface Autocommit { query<R>(text: string, values?: readonly unknown[]): Prom
 interface Tx extends Autocommit {}  // marked; only withOrg, withoutOrg and withResolvedOrg make one
 assertConnectionRole(connectionString: string, expectedRole: string): void
 assertRuntimeRole(pool: Pool): Promise<void>   // rejects with RuntimeRoleError, problems listed
+ping(pool: Pool): Promise<void>                // the liveness probe of /readyz
+sql`...`, sqlParameter(position), joinSql(parts, separator): SqlFragment   // fixed SQL text put together at run time
 sha256(value: string | Uint8Array): Buffer
 ```
+
+The package has three entries. `@tinnox/db` is the runtime API above. `@tinnox/db/migrate` holds what only an offline tool that connects as `tinnox_migrator` may use: `connectMigrator`, `MigratorPool`, `runMigrations`, `resetTestDatabase` and `asDefiner(pool, tx, work)`, the one place that switches to `tinnox_definer` (provisioning's reads across organisations). `@tinnox/db/testing` holds what only tests may use (`inTx`). Lint refuses the migrator entry in the API's source and the testing entry in every file that is not a test.
+
+Lint also holds how the API and the scripts reach the database (`eslint.config.js`; `scripts/lib/db-access-lint.test.ts` runs each rule against fixture text):
+
+- `tinnox/no-query-off-transaction`: `query()` is called only on a `Tx`. A statement on the pool, a pooled client or a `poolAsTx` handle is an error; use `withOrg`, a typed `sec.*` wrapper, or `ping(pool)`. The alert check's session lock is the one listed exception (`QUERY_OFF_TRANSACTION`).
+- `sec.*` SQL is written only in `packages/db/src/sec.ts`; add a wrapper there.
+- `withoutOrg` and `poolAsTx` may be imported only by the files of `UNSCOPED_HELPER_FILES`, each with its reason.
+- `tinnox/sql-fragments`: the statement given to `query()` is a literal or a template that interpolates only an UPPER_CASE module constant or a `SqlFragment`. Everything else is a parameter (`$1`).
+- Outside tests, `SET ROLE` text in TypeScript exists only in `asDefiner` (`packages/db/src/definer.ts`); the incident SQL scripts (`scripts/revoke-*-sessions.sql`) carry their own.
 
 `withOrg` does `BEGIN`, `SELECT set_config('app.org_id', $1, true)`, runs `fn` on that one connection, then `COMMIT` (or `ROLLBACK` when `fn` throws). `orgId` must be a lower-case UUID that came from a verified session or device lookup. Outside `withOrg` every tenant table is empty to the application. The `tx` handle works only until `fn` returns or throws: a `query` on it afterwards rejects and sends nothing, so await every query inside `fn`. `withOrg`, `withoutOrg`, `withResolvedOrg` and a `poolAsTx` statement reject when called while a transaction is open on the same asynchronous path, in `fn` or in a helper it calls: a second transaction takes another connection and commits on its own, so pass the outer `tx` to the helper instead (lint reports the cases it can read as `tinnox/no-nested-transaction`). A test that plays a second writer starts that writer's transaction from the test body, not from inside the first transaction. pg returns `bigint` columns (`audit_event.id`, `media.bytes`, `last_seq`) as strings.
 
@@ -94,7 +106,7 @@ Inside `withOrg` write `org_id` explicitly or use `app_org_id()`: `INSERT INTO p
 
 ### Lookups before the organisation is known (schema `sec`, wrappers in `@tinnox/db`)
 
-The wrappers that change data (`sessionCreate`, `sessionRevoke`, `sessionRevokeMembership`, the five `pairing*` calls) and the two audit writers take a `Tx`: call them inside `withoutOrg` or `withResolvedOrg` (`pairingClaim`, `pairingCancelClaims`, `sessionRevokeMembership` and `auditScoped` inside `withOrg`), so the change and its audit row commit together. A pool, or the handle of `poolAsTx(pool)`, is a type error there. The lookups, the login state and the purges take an `Autocommit`, so `poolAsTx(pool)` or a `Tx` will do. Two functions take the pool and write in a statement of their own: `auditStandalone(pool, event)`, for a refused or failed sign-in and a rejected device credential only (its event type has no `success`), and `sessionRevokeUnaudited(pool, idHash)`, for the sign-out fallback only. Called while a transaction is open, both are refused like any second transaction, and the message names what to call on the outer `tx` instead: `auditUnscoped` or `auditScoped`, and `sessionRevoke`. Nothing casts to `Tx` (lint refuses it); a test opens a transaction with `withoutOrg`, or `inTx` in `packages/db/test/support.ts`.
+The wrappers that change data (`sessionCreate`, `sessionRevoke`, `sessionRevokeMembership`, the five `pairing*` calls) and the two audit writers take a `Tx`: call them inside `withoutOrg` or `withResolvedOrg` (`pairingClaim`, `pairingCancelClaims`, `sessionRevokeMembership` and `auditScoped` inside `withOrg`), so the change and its audit row commit together. A pool, or the handle of `poolAsTx(pool)`, is a type error there. The lookups, the login state and the purges take an `Autocommit`, so `poolAsTx(pool)` or a `Tx` will do. Two functions take the pool and write in a statement of their own: `auditStandalone(pool, event)`, for a refused or failed sign-in and a rejected device credential only (its event type has no `success`), and `sessionRevokeUnaudited(pool, idHash)`, for the sign-out fallback only. Called while a transaction is open, both are refused like any second transaction, and the message names what to call on the outer `tx` instead: `auditUnscoped` or `auditScoped`, and `sessionRevoke`. Nothing casts to `Tx` (lint refuses it); a test opens a transaction with `withoutOrg`, or `inTx` from `@tinnox/db/testing`.
 
 ```ts
 membershipByOidcSub(tx, oidcSub): Promise<{ membershipId, orgId, role, orgName } | null>

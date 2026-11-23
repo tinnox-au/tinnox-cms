@@ -5,10 +5,14 @@
 // is enabled in no block of eslint.config.js.
 import type { ESLint, Rule } from 'eslint';
 import noNestedTransaction from './no-nested-transaction.ts';
+import noQueryOffTransaction from './no-query-off-transaction.ts';
+import sqlFragments from './sql-fragments.ts';
 
 // Each rule under its file's name; eslint.config.js enables it as tinnox/<name>.
 const rules: Record<string, Rule.RuleModule> = {
   'no-nested-transaction': noNestedTransaction,
+  'no-query-off-transaction': noQueryOffTransaction,
+  'sql-fragments': sqlFragments,
 };
 
 export default { meta: { name: 'tinnox' }, rules } satisfies ESLint.Plugin;

@@ -4,16 +4,20 @@
  * (decision D6); the tag routes themselves are in routes/tags.ts.
  */
 import type { TagScope } from '@tinnox/contracts';
-import { STAGE_A_CONSTRAINTS, violatedConstraint, type Tx } from '@tinnox/db';
+import { sql, STAGE_A_CONSTRAINTS, violatedConstraint, type Tx } from '@tinnox/db';
 import { bigintToNumber } from './db-helpers.ts';
 import { notFound, pgErrorCode } from './errors.ts';
 
 /** The join table of each scope. Fixed text: nothing here comes from a request. */
 const TAG_JOIN = {
-  media: { table: 'media_tag', target: 'media_id', tagForeignKey: STAGE_A_CONSTRAINTS.mediaTagTag },
+  media: {
+    table: sql`media_tag`,
+    target: sql`media_id`,
+    tagForeignKey: STAGE_A_CONSTRAINTS.mediaTagTag,
+  },
   display: {
-    table: 'display_tag',
-    target: 'display_id',
+    table: sql`display_tag`,
+    target: sql`display_id`,
     tagForeignKey: STAGE_A_CONSTRAINTS.displayTagTag,
   },
 } as const satisfies Record<TagScope, unknown>;

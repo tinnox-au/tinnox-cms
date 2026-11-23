@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import pg from 'pg';
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from './pool.ts';
+import { rememberPool } from './tx-pool.ts';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -134,7 +135,10 @@ async function run<T>(
     await begin(client);
     let result: T;
     try {
-      result = await current.run(transaction, () => fn(wrap(client, transaction)));
+      const tx = wrap(client, transaction);
+      // For asDefiner (./definer.ts), which must know the handle came from the migrator's pool.
+      rememberPool(tx, pool);
+      result = await current.run(transaction, () => fn(tx));
     } finally {
       // The handle closes before COMMIT or ROLLBACK is sent (U-2), and work the callback left
       // running no longer counts as inside this transaction (U-3).

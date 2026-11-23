@@ -1,3 +1,7 @@
+// The '@tinnox/db/migrate' entry: what only an offline tool that connects as tinnox_migrator may
+// use (the migration runner and the test reset, the development seed, provisioning, and tests).
+// It is not part of the runtime entry (./index.ts), and lint refuses it in the API's source
+// (AG-1.10; the db entries of eslint.config.js).
 import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -9,6 +13,9 @@ import {
   assertSchemaInvariants,
   schemaProblemsInTransaction,
 } from './schema-invariants.ts';
+
+// The definer switch belongs to this entry too: it needs the MigratorPool (D25).
+export { asDefiner } from './definer.ts';
 
 const MIGRATOR_ROLE = 'tinnox_migrator';
 

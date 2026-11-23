@@ -34,7 +34,7 @@ import {
   isMediaItem,
   isPushPending,
 } from '@tinnox/contracts';
-import { auditScoped, type Tx } from '@tinnox/db';
+import { auditScoped, sql, type Tx } from '@tinnox/db';
 import {
   buildManifest,
   decidePushState,
@@ -94,6 +94,11 @@ export interface PublicationRow {
 }
 
 const PUBLICATION_COLUMNS = 'id, display_id, playlist_id, manifest, created_at';
+
+// The row lock a read takes when its caller asks for one, and the text when it asks for none.
+const FOR_SHARE = sql`FOR SHARE`;
+const FOR_KEY_SHARE = sql`FOR KEY SHARE`;
+const NO_LOCK = sql``;
 
 /** A live playlist as publishing sees it: its items in play order. */
 export interface PlaylistDraft {
@@ -279,7 +284,7 @@ export async function loadPlaylistDrafts(
   }>(
     `SELECT id, name, transition, shuffle FROM playlist
      WHERE org_id = app_org_id() AND deleted_at IS NULL AND id = ANY($1::uuid[])
-     ${lock ? 'FOR SHARE' : ''}`,
+     ${lock ? FOR_SHARE : NO_LOCK}`,
     [ids],
   );
   const itemsByPlaylist = new Map<string, DraftItem[]>();
@@ -484,7 +489,7 @@ export async function loadMediaRecords(
             m.duration_ms, m.codec, ${MEDIA_WINDOW_COLUMNS}
      FROM media m
      WHERE m.org_id = app_org_id() AND m.deleted_at IS NULL AND m.id = ANY($1::uuid[])
-     ${lock ? 'FOR KEY SHARE' : ''}`,
+     ${lock ? FOR_KEY_SHARE : NO_LOCK}`,
     [[...new Set(ids)]],
   );
   for (const row of rows) {
@@ -534,7 +539,7 @@ export async function loadAppRecords(
   const { rows } = await tx.query<{ id: string; type: string; settings: unknown }>(
     `SELECT id, type, settings FROM app
      WHERE org_id = app_org_id() AND id = ANY($1::uuid[])
-     ${lock ? 'FOR KEY SHARE' : ''}`,
+     ${lock ? FOR_KEY_SHARE : NO_LOCK}`,
     [[...new Set(ids)]],
   );
   for (const row of rows) {

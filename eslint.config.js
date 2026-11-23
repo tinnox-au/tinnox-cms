@@ -273,7 +273,7 @@ const NO_MIGRATOR_POOL_CAST = [
       `:matches(TSAsExpression, TSTypeAssertion) > .typeAnnotation TSTypeReference${MIGRATOR_POOL}`,
     ].join(', '),
     message:
-      'Do not cast to MigratorPool: the brand says connectMigrator checked that the connection logs in and acts as tinnox_migrator. Call connectMigrator(connectionString, { applicationName }) from @tinnox/db and pass the pool it returns.',
+      'Do not cast to MigratorPool: the brand says connectMigrator checked that the connection logs in and acts as tinnox_migrator. Call connectMigrator(connectionString, { applicationName }) from @tinnox/db/migrate and pass the pool it returns.',
   },
 ];
 
@@ -291,11 +291,26 @@ const NO_TX_CAST = [
       `:matches(TSAsExpression, TSTypeAssertion) > .typeAnnotation TSTypeReference${TX}`,
     ].join(', '),
     message:
-      'Do not cast to Tx: the type says the handle is inside a transaction, so an audit row written on it commits with the change it records. Use the tx that the callback of withOrg, withoutOrg or withResolvedOrg (from @tinnox/db) receives; a test opens one the same way (inTx in packages/db/test/support.ts). A refusal with no change to pair with is written with auditStandalone(pool, event).',
+      'Do not cast to Tx: the type says the handle is inside a transaction, so an audit row written on it commits with the change it records. Use the tx that the callback of withOrg, withoutOrg or withResolvedOrg (from @tinnox/db) receives; a test opens one the same way (inTx from @tinnox/db/testing). A refusal with no change to pair with is written with auditStandalone(pool, event).',
   },
 ];
-// The two types only packages/db may make.
-const NO_BRAND_CAST = [...NO_MIGRATOR_POOL_CAST, ...NO_TX_CAST];
+// OTH-12: a SqlFragment says the text was written in the source (sql`...`, sqlParameter, joinSql
+// in packages/db/src/sql.ts), which is what lets tinnox/sql-fragments allow it inside a statement.
+// A cast would let any string in. Matched like the two above, with the same three forms left to
+// review; packages/db/src/sql.ts, where the three makers are, has its own block below.
+const SQL_FRAGMENT = ":matches([typeName.name='SqlFragment'], [typeName.right.name='SqlFragment'])";
+const NO_SQL_FRAGMENT_CAST = [
+  {
+    selector: [
+      `:matches(TSAsExpression, TSTypeAssertion) > TSTypeReference.typeAnnotation${SQL_FRAGMENT}`,
+      `:matches(TSAsExpression, TSTypeAssertion) > .typeAnnotation TSTypeReference${SQL_FRAGMENT}`,
+    ].join(', '),
+    message:
+      'Do not cast to SqlFragment: the type says the text was written in the source, so it may be put into a statement. Make one with sql`...`, sqlParameter(position) or joinSql(parts, separator) from @tinnox/db, and pass every value as a parameter ($1, $2).',
+  },
+];
+// The three types only packages/db may make.
+const NO_BRAND_CAST = [...NO_MIGRATOR_POOL_CAST, ...NO_TX_CAST, ...NO_SQL_FRAGMENT_CAST];
 
 // Adoption plan section 3.2: the API reads the time from one injected clock, so tests can set it.
 // main.ts and alerts-once.ts create that clock and are outside this rule. `new Date(value)` is a
@@ -336,6 +351,48 @@ const textMatching = (regex) =>
     `Identifier[name=${regex}]`,
   ].join(', ');
 
+/** Selectors for a string or template text that matches `regex` (selector syntax). */
+const stringMatching = (regex) =>
+  [`Literal[value=${regex}]`, `TemplateElement[value.raw=${regex}]`].join(', ');
+
+// AG-2.2 (adoption plan sections 2.4 and 3.2): a sec.* function is called through its typed
+// wrapper in packages/db/src/sec.ts and nowhere else, so each is named once, with the handle it
+// needs (an Autocommit for a lookup, a Tx for a change) and what it returns. Matched in string
+// and template text of product code and scripts; packages/db/src/sec.ts has its own block below.
+// Tests are outside: they call the functions raw to test them. Not seen: a name put together at
+// run time ('sec.' + name).
+const NO_RAW_SEC = [
+  {
+    selector: stringMatching('/\\bsec\\.[a-z_]+\\s*\\(/'),
+    message:
+      'Call sec.* through a typed wrapper in packages/db/src/sec.ts (exported from @tinnox/db); add the wrapper if it is missing. It names the function once, types what it returns and says which handle it takes: an Autocommit (poolAsTx(pool) or a tx) for a lookup, a Tx for a call that changes data.',
+  },
+];
+
+// D25: the database role is switched in one place, asDefiner in packages/db/src/definer.ts (the
+// '@tinnox/db/migrate' entry), which has its own block below. Matched in string and template
+// text that starts with the statement, or has it after a semicolon: SET ROLE, SET LOCAL ROLE,
+// SET SESSION ROLE, RESET ROLE, the same for SESSION AUTHORIZATION, and set_config('role', ...).
+// So a sentence that mentions the statement (the messages of scripts/lib/migrations-check.ts) and
+// `UPDATE membership SET role = $2` pass. Only a string or the first text of a template starts a
+// statement: the text after an interpolation (`UPDATE ${TABLE} SET role = $2`) continues one, so
+// there the statement counts only after a semicolon. Tests are outside: they arrange data as the
+// definer. The incident scripts under scripts/*.sql are SQL and are not linted. Not seen: the
+// statement behind a SQL comment or inside a DO block, and text put together at run time.
+const ROLE_STATEMENT =
+  "\\s*(SET\\s+((LOCAL|SESSION)\\s+)?|RESET\\s+)(ROLE|SESSION\\s+AUTHORIZATION)\\b|\\bset_config\\s*\\(\\s*'(role|session_authorization)'";
+const NO_ROLE_SWITCH = [
+  {
+    selector: [
+      `Literal[value=/(^|;)${ROLE_STATEMENT}/i]`,
+      `TemplateElement:first-child[value.raw=/(^|;)${ROLE_STATEMENT}/i]`,
+      `TemplateElement:not(:first-child)[value.raw=/;${ROLE_STATEMENT}/i]`,
+    ].join(', '),
+    message:
+      'Do not switch the database role here (D25): the only SET ROLE text is in asDefiner (packages/db/src/definer.ts, exported from @tinnox/db/migrate). An offline tool that holds a MigratorPool calls asDefiner(pool, tx, work) inside its transaction, and the switch ends with `work`. The API never switches role: it reads across organisations only through the typed sec.* wrappers of @tinnox/db.',
+  },
+];
+
 // AG-1.9, AG-1.17 (D5): product code never names the migrator, superuser or provisioning
 // credentials. The one override is CREDENTIAL_NAME_REFUSERS below.
 const NO_CREDENTIAL_NAMES = [
@@ -344,7 +401,7 @@ const NO_CREDENTIAL_NAMES = [
       '/MIGRATOR_URL|MIGRATOR_PASSWORD|POSTGRES_SUPERUSER|PROVISION_IDP_CLIENT_SECRET/',
     ),
     message:
-      'Product code never names the migrator, superuser or provisioning credentials (AG-1.9, AG-1.17): they must never reach the API, the media worker or the player. Use AppConfig.databaseUrl, which connects as tinnox_app; offline tools connect as tinnox_migrator through connectMigrator in scripts/.',
+      'Product code never names the migrator, superuser or provisioning credentials (AG-1.9, AG-1.17): they must never reach the API, the media worker or the player. Use AppConfig.databaseUrl, which connects as tinnox_app; offline tools connect as tinnox_migrator through connectMigrator (@tinnox/db/migrate) in scripts/.',
   },
 ];
 
@@ -374,7 +431,7 @@ const NO_MIGRATOR_URL = [
   {
     selector: textMatching('/MIGRATOR_URL/'),
     message:
-      'Only the offline tools in MIGRATOR_URL_READERS of eslint.config.js read the migrator URL (D4): the runner, the seed, provisioning and setup-dev. A new tool that must connect as tinnox_migrator calls connectMigrator from @tinnox/db and is added to that list with its reason.',
+      'Only the offline tools in MIGRATOR_URL_READERS of eslint.config.js read the migrator URL (D4): the runner, the seed, provisioning and setup-dev. A new tool that must connect as tinnox_migrator calls connectMigrator from @tinnox/db/migrate and is added to that list with its reason.',
   },
 ];
 
@@ -517,6 +574,98 @@ export const IMPORT_LAYERS = {
   // The API's test harness is the one app entry anything may import (apps/api/package.json).
   tests: ['contracts', 'db', 'domain', 'app-render', 'api/test-support'],
   scripts: ['contracts', 'db', 'domain'],
+};
+
+// The entries of @tinnox/db beside its root (the "exports" of packages/db/package.json), and what
+// may not import each (adoption plan step 15). The root entry is the runtime API, and a workspace
+// whose row above names `db` may import it. scripts/lib/db-access-lint.test.ts fails when this
+// table and the package's exports differ, and packages/db/src/entries.test.ts when the root entry
+// reaches a module of another entry.
+export const DB_ENTRIES = {
+  // AG-1.10, D4: connectMigrator, MigratorPool, runMigrations, resetTestDatabase and asDefiner.
+  // The API holds the tinnox_app connection only, so nothing in an app's source may import what
+  // works on the migrator's. Scripts and tests may.
+  migrate: {
+    refusedIn: (dir) => dir.startsWith('apps/'),
+    message:
+      '@tinnox/db/migrate is for the offline tools that connect as tinnox_migrator: the migration runner, the seed and provisioning under scripts/, and tests (AG-1.10). The API holds only the tinnox_app connection: use createPool, withOrg and the typed sec.* wrappers from @tinnox/db. Work that needs the migrator is a script under scripts/, run from a controlled host.',
+  },
+  // What only tests may use: refused in every file that is not a test.
+  testing: {
+    refusedIn: () => true,
+    message:
+      '@tinnox/db/testing is for test files only. Outside a test, open the transaction with withOrg from @tinnox/db, or with withResolvedOrg while a credential is still being resolved to its organisation.',
+  },
+};
+
+/** The entry bans of DB_ENTRIES for the non-test files of the workspace `dir`. */
+function dbEntryPatterns(dir) {
+  // A workspace that may not import @tinnox/db at all is told so by its layer row.
+  if (!IMPORT_LAYERS[dir].includes('db')) return [];
+  return Object.entries(DB_ENTRIES)
+    .filter(([, entry]) => entry.refusedIn(dir))
+    .map(([name, entry]) => ({ regex: `^@tinnox/db/${name}(/|$)`, message: entry.message }));
+}
+
+// AG-2.2: withoutOrg and poolAsTx run with no organisation, so row-level security shows a tenant
+// read nothing and nobody notices. They are for sec.* calls only, and only these files may import
+// them, each with its reason. Three of the reasons are not "before the organisation is known",
+// which is what the rule in AGENTS.md says: the list records what each file really does. A file
+// leaves the list when its use is gone (adoption plan section 2.4: an unscoped handle ends with
+// no public query). Test files are outside the rule. Not seen: the names taken from a dynamic
+// import (`const { withoutOrg } = await import('@tinnox/db')`).
+export const UNSCOPED_HELPER_FILES = {
+  'apps/api/src/auth/session.ts':
+    'before the organisation is known: poolAsTx for sessionByIdHash, which resolves the session cookie to its member and organisation',
+  'apps/api/src/routes/auth.ts':
+    'before the organisation is known: poolAsTx for the one-time login state of a sign-in (loginStatePut, loginStateTake), kept before any member is identified',
+  'apps/api/src/routes/player.ts':
+    'before the organisation is known: poolAsTx for deviceByTokenHash and deviceByRegistrationId, which resolve a device credential or a signed media URL to its organisation, and withoutOrg for pairingCreate and pairingPoll, when the pairing session belongs to no organisation yet',
+  'apps/api/src/alerts.ts':
+    'not before the organisation is known, but across all of them: poolAsTx for displayAlertOrgs, the list of organisations the alert check then enters one by one with withOrg',
+  'apps/api/src/housekeeping.ts':
+    'not before the organisation is known, but across all of them: poolAsTx for the purges of expired sessions, old pairing sessions and heartbeat history (sessionPurgeExpired, pairingPurge, heartbeatLogPurge)',
+  'apps/api/src/media/pipeline.ts':
+    'not before the organisation is known, but across all of them: poolAsTx for mediaProcessingJobs, the queue of media waiting for validation; each job is then handled inside withOrg',
+  'scripts/lib/provision.ts':
+    'the provisioning exception of AGENTS.md section 1: withoutOrg for `pending`, which expires and lists the invites of every organisation as tinnox_definer (asDefiner from @tinnox/db/migrate)',
+};
+const UNSCOPED_HELPERS = ['withoutOrg', 'poolAsTx'];
+
+// The workspaces whose product code can hold a database handle: the rows of IMPORT_LAYERS that
+// name `db`, without tests (the API and the offline tools). The query rules below cover their
+// non-test files, the unscoped-helper list their imports.
+const DB_CALLERS = Object.keys(IMPORT_LAYERS).filter(
+  (dir) => dir !== 'tests' && IMPORT_LAYERS[dir].includes('db'),
+);
+// An app's product code is its src folder; scripts has no such folder.
+const DB_CALLER_FILES = DB_CALLERS.map((dir) =>
+  dir.startsWith('apps/') ? `${dir}/src/**/*.ts` : `${dir}/**/*.ts`,
+);
+
+// AG-2.1: the statements tinnox/no-query-off-transaction lets a file send off a transaction,
+// each with its reason. The rule takes a statement only when it is a string literal the pattern
+// matches, so an entry opens nothing else in its file.
+export const QUERY_OFF_TRANSACTION = {
+  'apps/api/src/alerts.ts': [
+    {
+      sql: '^SELECT pg_try_advisory_lock\\(hashtextextended\\(\\$1, 0\\)\\) AS ok$',
+      reason: 'session lock; removed by `withSessionLock` in step 22',
+    },
+    {
+      sql: '^SELECT pg_advisory_unlock\\(hashtextextended\\(\\$1, 0\\)\\) AS ok$',
+      reason: 'session lock; removed by `withSessionLock` in step 22',
+    },
+  ],
+};
+
+// OTH-12: the two places in packages/db that hand query() a statement another file wrote, and
+// the local name it has there. tinnox/sql-fragments checks the statement where it is written.
+export const SQL_PASS_THROUGH = {
+  // The handles of run() and poolAsTx send the statement their caller gave them.
+  'packages/db/src/tx.ts': ['text'],
+  // The runner sends each migration file as it is; `npm run check:migrations` reads the files.
+  'packages/db/src/migrate.ts': ['sql'],
 };
 
 // Every file ESLint parses as code. A glob without an extension would make ESLint lint JSON,
@@ -741,7 +890,11 @@ function pgMessage(dir) {
   const why =
     'a direct pg client skips the tinnox_app role check and the row_security and timeout start-up parameters.';
   if (IMPORT_LAYERS[dir].includes('db')) {
-    return `Only packages/db talks to PostgreSQL. Use createPool and withOrg from @tinnox/db (connectMigrator for an offline tool); ${why}`;
+    // Only an offline tool may use the migrator's entry (DB_ENTRIES).
+    const offline = dir.startsWith('apps/')
+      ? ''
+      : ' (connectMigrator from @tinnox/db/migrate for an offline tool that needs tinnox_migrator)';
+    return `Only packages/db talks to PostgreSQL. Use createPool and withOrg from @tinnox/db${offline}; ${why}`;
   }
   // packages/app-render is bundled for the browser too, but a package may not import an app, so
   // it gets the package sentence below.
@@ -780,6 +933,22 @@ const IMPORT_FACETS = [
           'Product code does not import test code. Move what both need into a module that is not a test file, and import it from the test.',
       },
       ...(dir === 'packages/db' ? [] : [{ regex: '^pg(/|$)', message: pgMessage(dir) }]),
+      ...dbEntryPatterns(dir),
+    ],
+  },
+  {
+    // AG-2.2: the unscoped helpers, outside the files that may import them. Only the workspaces
+    // that may import @tinnox/db at all; tests are test files, which this leaves alone.
+    only: DB_CALLERS,
+    files: [CODE_FILES],
+    ignores: [...TEST_FILES, ...Object.keys(UNSCOPED_HELPER_FILES)],
+    patterns: [
+      {
+        regex: '^@tinnox/db$',
+        importNames: UNSCOPED_HELPERS,
+        message:
+          'withoutOrg and poolAsTx run without an organisation (AG-2.2). Use withOrg(pool, session.orgId, fn), where row-level security limits every statement to that organisation. If the organisation really is not known yet (a credential is still being resolved, or a sec.* wrapper works across every organisation), add this file to UNSCOPED_HELPER_FILES in eslint.config.js with its reason, and say why in the pull request.',
+      },
     ],
   },
   {
@@ -928,6 +1097,8 @@ const PRODUCT_SYNTAX = [
   ...NO_HTML_SINK_CALLS,
   ...NO_GLOBAL_PROCESS_ENV,
   ...NO_LOADCONFIG_OPTIONS,
+  ...NO_RAW_SEC,
+  ...NO_ROLE_SWITCH,
 ];
 const API_SYNTAX = [
   ...NO_NON_NULL,
@@ -938,7 +1109,32 @@ const API_SYNTAX = [
   ...NO_ORG_FROM_REQUEST,
   ...NO_GLOBAL_PROCESS_ENV,
   ...NO_LOADCONFIG_OPTIONS,
+  ...NO_RAW_SEC,
+  ...NO_ROLE_SWITCH,
 ];
+// The list of the offline tools (D25: scripts get the database rules too). The tools that read
+// the migrator URL get it as it is; every other script also gets NO_MIGRATOR_URL.
+const SCRIPTS_SYNTAX = [
+  ...NO_NON_NULL,
+  ...NO_INLINE_CAST,
+  ...NO_BRAND_CAST,
+  ...NO_GLOBAL_PROCESS_ENV,
+  ...NO_RAW_SEC,
+  ...NO_ROLE_SWITCH,
+];
+
+// The files of packages/db that are the one place for something the rest may not write, with the
+// list each is excused from. The rest of the package's list is unchanged for them.
+const DB_ONE_PLACES = {
+  // SEC-1: connectMigrator mints the MigratorPool brand here, after checking the role.
+  'packages/db/src/migrate.ts': NO_MIGRATOR_POOL_CAST,
+  // AG-2.2: the typed wrappers of the sec.* functions.
+  'packages/db/src/sec.ts': NO_RAW_SEC,
+  // D25: asDefiner, the one role switch.
+  'packages/db/src/definer.ts': NO_ROLE_SWITCH,
+  // OTH-12: sql, sqlParameter and joinSql make the SqlFragment.
+  'packages/db/src/sql.ts': NO_SQL_FRAGMENT_CAST,
+};
 
 export default tseslint.config(
   {
@@ -1108,18 +1304,16 @@ export default tseslint.config(
       'no-restricted-syntax': ['error', ...PRODUCT_SYNTAX, ...outboundSyntax(dir, null)],
     },
   })),
-  {
-    // SEC-1: connectMigrator mints the MigratorPool brand here, after checking the role; the
-    // rest of packages/db's list is unchanged.
-    files: ['packages/db/src/migrate.ts'],
+  ...Object.entries(DB_ONE_PLACES).map(([file, excused]) => ({
+    files: [file],
     rules: {
       'no-restricted-syntax': [
         'error',
-        ...PRODUCT_SYNTAX.filter((entry) => !NO_MIGRATOR_POOL_CAST.includes(entry)),
+        ...PRODUCT_SYNTAX.filter((entry) => !excused.includes(entry)),
         ...outboundSyntax('packages/db', null),
       ],
     },
-  },
+  })),
   {
     // API source but its two entry points, which create the clock, and the two reviewed clients.
     files: ['apps/api/src/**/*.ts'],
@@ -1157,14 +1351,14 @@ export default tseslint.config(
     files: ['scripts/**/*.{ts,mjs}'],
     ignores: [...TEST_FILES, ...MIGRATOR_URL_READERS],
     rules: {
-      'no-restricted-syntax': [
-        'error',
-        ...NO_NON_NULL,
-        ...NO_INLINE_CAST,
-        ...NO_BRAND_CAST,
-        ...NO_MIGRATOR_URL,
-        ...NO_GLOBAL_PROCESS_ENV,
-      ],
+      'no-restricted-syntax': ['error', ...SCRIPTS_SYNTAX, ...NO_MIGRATOR_URL],
+    },
+  },
+  {
+    // The tools that read the migrator URL keep the rest of the scripts' list.
+    files: MIGRATOR_URL_READERS,
+    rules: {
+      'no-restricted-syntax': ['error', ...SCRIPTS_SYNTAX],
     },
   },
   {
@@ -1262,6 +1456,42 @@ export default tseslint.config(
       'tinnox/no-nested-transaction': 'error',
     },
   },
+  {
+    // AG-2.1: a statement is sent only on a transaction handle
+    // (scripts/eslint-rules/no-query-off-transaction.ts). The API's source and the offline tools
+    // (D25: scripts with no exception); tests arrange data on clients of their own.
+    files: DB_CALLER_FILES,
+    ignores: TEST_FILES,
+    plugins: { tinnox },
+    rules: {
+      'tinnox/no-query-off-transaction': 'error',
+    },
+  },
+  ...Object.entries(QUERY_OFF_TRANSACTION).map(([file, allowed]) => ({
+    files: [file],
+    plugins: { tinnox },
+    rules: {
+      'tinnox/no-query-off-transaction': ['error', { allowed }],
+    },
+  })),
+  {
+    // OTH-12: the statement given to query() is text from the source
+    // (scripts/eslint-rules/sql-fragments.ts). The same files, and packages/db, which holds the
+    // sec.* wrappers and the runner.
+    files: [...DB_CALLER_FILES, 'packages/db/src/**/*.ts'],
+    ignores: TEST_FILES,
+    plugins: { tinnox },
+    rules: {
+      'tinnox/sql-fragments': 'error',
+    },
+  },
+  ...Object.entries(SQL_PASS_THROUGH).map(([file, passThrough]) => ({
+    files: [file],
+    plugins: { tinnox },
+    rules: {
+      'tinnox/sql-fragments': ['error', { passThrough }],
+    },
+  })),
   {
     // A marker of unfinished work is a decision nobody recorded. ESLint's message for this rule is
     // fixed; the shortcut ledger of adoption plan step 48 (not yet written) is where an accepted

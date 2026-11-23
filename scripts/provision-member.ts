@@ -5,7 +5,8 @@
 // Environment (controlled host only): DATABASE_MIGRATOR_URL; PROVISION_IDP_ISSUER (default
 // OIDC_ISSUER), PROVISION_IDP_CLIENT_ID and PROVISION_IDP_CLIENT_SECRET, the identity-provider
 // client that can only read accounts. Exit 0 done, 1 refused or failed, 2 usage error.
-import { CommitOutcomeUnknownError, connectMigrator, type MigratorPool } from '@tinnox/db';
+import { CommitOutcomeUnknownError } from '@tinnox/db';
+import { connectMigrator, type MigratorPool } from '@tinnox/db/migrate';
 import { loadEnv, requireEnv } from './lib/env.ts';
 import { keycloakDirectory, type IdpDirectory } from './lib/idp.ts';
 import {

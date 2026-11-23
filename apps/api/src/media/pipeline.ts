@@ -48,7 +48,15 @@ import {
   type MediaJobResult,
   type MediaJobSpec,
 } from '@tinnox/contracts';
-import { auditScoped, CommitOutcomeUnknownError, poolAsTx, withOrg, type Pool } from '@tinnox/db';
+import {
+  auditScoped,
+  CommitOutcomeUnknownError,
+  mediaProcessingJobs,
+  poolAsTx,
+  withOrg,
+  type MediaProcessingJob,
+  type Pool,
+} from '@tinnox/db';
 import { newObjectKey, type ObjectStorage } from '@tinnox/storage';
 import { SNIFF_BYTES, sniffMediaType } from './sniff.ts';
 
@@ -100,12 +108,6 @@ export interface MediaPipelineOptions {
   /** Extra time allowed per queued job on top of the inspection timeout. */
   readonly perJobGraceMs?: number;
   readonly baseGraceMs?: number;
-}
-
-interface PendingJob {
-  readonly mediaId: string;
-  readonly orgId: string;
-  readonly createdAt: Date;
 }
 
 type ResultRead =
@@ -352,13 +354,8 @@ export class MediaPipeline {
   }
 
   /** The oldest `limit` jobs still waiting for validation, in every organisation. */
-  async #pending(limit: number): Promise<PendingJob[]> {
-    const { rows } = await poolAsTx(this.#pool).query<{
-      media_id: string;
-      org_id: string;
-      created_at: Date;
-    }>('SELECT media_id, org_id, created_at FROM sec.media_processing_jobs($1)', [limit]);
-    return rows.map((r) => ({ mediaId: r.media_id, orgId: r.org_id, createdAt: r.created_at }));
+  async #pending(limit: number): Promise<MediaProcessingJob[]> {
+    return mediaProcessingJobs(poolAsTx(this.#pool), limit);
   }
 
   async #scan(): Promise<void> {
@@ -551,7 +548,11 @@ export class MediaPipeline {
     }
   }
 
-  async #ingest(job: PendingJob, result: MediaJobResult, verdictUid: number): Promise<void> {
+  async #ingest(
+    job: MediaProcessingJob,
+    result: MediaJobResult,
+    verdictUid: number,
+  ): Promise<void> {
     if (result.outcome === 'rejected') {
       await this.#fail(job, result.errorCode, cleanDetail(result.errorDetail));
       return;
@@ -683,7 +684,7 @@ export class MediaPipeline {
     await this.#cleanup(job.mediaId);
   }
 
-  async #fail(job: PendingJob, code: MediaErrorCode, detail: string | null): Promise<void> {
+  async #fail(job: MediaProcessingJob, code: MediaErrorCode, detail: string | null): Promise<void> {
     await withOrg(this.#pool, job.orgId, async (tx) => {
       const done = await tx.query(
         `UPDATE media SET status = 'failed', error_code = $2, error_detail = $3

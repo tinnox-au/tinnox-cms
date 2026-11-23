@@ -28,7 +28,7 @@ import {
   SessionResponseSchema,
   type ManifestV1,
 } from '@tinnox/contracts';
-import { resetTestDatabase, runMigrations } from '@tinnox/db';
+import { resetTestDatabase, runMigrations } from '@tinnox/db/migrate';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {

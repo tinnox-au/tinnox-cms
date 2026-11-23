@@ -4,13 +4,14 @@
  * uses. TINNOX staff run it from a controlled host, never from the API's host or container.
  *
  * Every command:
- * - runs only as tinnox_migrator: it takes the MigratorPool that connectMigrator (@tinnox/db)
- *   returns after checking current_user and session_user. The 0013 exemptions test session_user,
- *   and the superuser, whose writes they would not cover, is refused;
+ * - runs only as tinnox_migrator: it takes the MigratorPool that connectMigrator
+ *   (@tinnox/db/migrate) returns after checking current_user and session_user. The 0013
+ *   exemptions test session_user, and the superuser, whose writes they would not cover, is refused;
  * - reads the identity provider before BEGIN and checks the database facts again inside one
  *   transaction, which also holds its audit rows (actor 'system', no time passed);
- * - reads across organisations only between SET LOCAL ROLE tinnox_definer and RESET ROLE, and
- *   writes membership and member_invite as the migrator with app.org_id taken from a row, never
+ * - reads across organisations only inside asDefiner (@tinnox/db/migrate), which runs its work
+ *   between SET LOCAL ROLE tinnox_definer and RESET ROLE, and writes
+ *   membership and member_invite as the migrator with app.org_id taken from a row, never
  *   from an argument (both tables force row-level security on their owner). Exception: pending's
  *   expiry and its audit rows, which run as the definer;
  * - except pending, takes the organisation's membership lock (lockOrgMembership) before it
@@ -32,13 +33,14 @@ import {
   auditScoped,
   lockOrgMembership,
   sessionRevokeMembership,
+  sql,
   violatedConstraint,
   withOrg,
   withResolvedOrg,
   withoutOrg,
-  type MigratorPool,
   type Tx,
 } from '@tinnox/db';
+import { asDefiner, type MigratorPool } from '@tinnox/db/migrate';
 import { ROLE_LABELS, grantableRoles } from '@tinnox/domain';
 import type { IdpAccount, IdpDirectory } from './idp.ts';
 
@@ -371,17 +373,6 @@ export interface Result {
   readonly lines: readonly string[];
 }
 
-/**
- * Runs `work` as tinnox_definer (BYPASSRLS, so it reads every organisation), then returns to the
- * migrator. A failure aborts the transaction, which undoes the SET LOCAL as well.
- */
-async function asDefiner<T>(tx: Tx, work: () => Promise<T>): Promise<T> {
-  await tx.query('SET LOCAL ROLE tinnox_definer');
-  const result = await work();
-  await tx.query('RESET ROLE');
-  return result;
-}
-
 async function enabledAccount(idp: IdpDirectory, name: string): Promise<IdpAccount> {
   const account = await idp.findByUsername(name);
   if (account === null) throw new RefusedError('no identity-provider account has this username');
@@ -475,7 +466,7 @@ export async function orgCreate(
   const orgId = randomUUID();
   return withOrg(pool, orgId, async (tx) => {
     await lockOrgMembership(tx);
-    const taken = await asDefiner(tx, () =>
+    const taken = await asDefiner(pool, tx, () =>
       tx.query('SELECT 1 FROM public.membership WHERE oidc_sub = ANY($1::text[])', [subjects]),
     );
     if (taken.rows.length > 0) {
@@ -558,9 +549,9 @@ export async function pending(
     // rows span every organisation (its 0013 UPDATE (status) on member_invite, its INSERT on
     // audit_event). No membership lock: only member_invite rows change, and an invite a
     // concurrent fulfil or cancel holds FOR UPDATE is skipped by the READ COMMITTED re-check.
-    await tx.query('SET LOCAL ROLE tinnox_definer');
-    const expired = await tx.query(
-      `WITH closed AS (
+    const { expired, rows } = await asDefiner(pool, tx, async () => {
+      const expired = await tx.query(
+        `WITH closed AS (
          UPDATE public.member_invite i SET status = 'expired'
          WHERE i.status = 'pending' AND i.expires_at <= now()
          RETURNING i.id, i.org_id, i.role
@@ -569,24 +560,25 @@ export async function pending(
        SELECT closed.org_id, 'system', NULL, 'invite.cancel', 'invite', closed.id::text, 'success',
               jsonb_build_object('role', closed.role, 'reason', 'expired', 'executedBy', $1::text)
        FROM closed`,
-      [args.executedBy],
-    );
-    const { rows } = await tx.query<{
-      id: string;
-      org_id: string;
-      org_name: string;
-      role: string;
-      name: string;
-      email: string;
-      created_at: Date;
-      expires_at: Date;
-    }>(
-      `SELECT i.id, i.org_id, o.name AS org_name, i.role, i.name, i.email, i.created_at, i.expires_at
+        [args.executedBy],
+      );
+      const { rows } = await tx.query<{
+        id: string;
+        org_id: string;
+        org_name: string;
+        role: string;
+        name: string;
+        email: string;
+        created_at: Date;
+        expires_at: Date;
+      }>(
+        `SELECT i.id, i.org_id, o.name AS org_name, i.role, i.name, i.email, i.created_at, i.expires_at
        FROM public.member_invite i JOIN public.organization o ON o.id = i.org_id
        WHERE i.status = 'pending'
        ORDER BY i.created_at, i.id`,
-    );
-    await tx.query('RESET ROLE');
+      );
+      return { expired, rows };
+    });
     const invites = rows.map((r) => ({
       id: r.id,
       reference: inviteReference(r.id),
@@ -639,7 +631,7 @@ export async function fulfil(
     throw new RefusedError('the identity-provider account has no e-mail address');
   }
   return withResolvedOrg(pool, async (tx, enterOrg) => {
-    const found = await asDefiner(tx, async () => ({
+    const found = await asDefiner(pool, tx, async () => ({
       invite: (
         await tx.query<{ org_id: string }>(
           'SELECT org_id FROM public.member_invite WHERE id = $1',
@@ -790,15 +782,16 @@ export async function setName(
   const lookup =
     'username' in args.target
       ? {
-          sql: 'SELECT id, org_id FROM public.membership WHERE oidc_sub = $1',
+          sql: sql`SELECT id, org_id FROM public.membership WHERE oidc_sub = $1`,
           value: await subjectOf(idp, args.target.username),
         }
       : {
-          sql: 'SELECT id, org_id FROM public.membership WHERE id = $1',
+          sql: sql`SELECT id, org_id FROM public.membership WHERE id = $1`,
           value: args.target.membershipId,
         };
   return withResolvedOrg(pool, async (tx, enterOrg) => {
     const member = await asDefiner(
+      pool,
       tx,
       async () =>
         (await tx.query<{ id: string; org_id: string }>(lookup.sql, [lookup.value])).rows[0],
@@ -865,6 +858,7 @@ export async function mfaReset(
   const subject = await subjectOf(idp, args.username);
   return withResolvedOrg(pool, async (tx, enterOrg) => {
     const member = await asDefiner(
+      pool,
       tx,
       async () =>
         (
@@ -894,7 +888,7 @@ export async function mfaReset(
       );
     }
     // The definer owns sec.session_revoke_membership; the migrator gets no EXECUTE grant.
-    const sessionsEnded = await asDefiner(tx, () => sessionRevokeMembership(tx, member.id));
+    const sessionsEnded = await asDefiner(pool, tx, () => sessionRevokeMembership(tx, member.id));
     await audit(tx, 'membership.mfa_reset', 'membership', member.id, {
       requestRef: args.requestRef,
       executedBy: args.executedBy,
@@ -937,6 +931,7 @@ export async function restoreOwner(
   if (args.mode === 'promote') {
     return withResolvedOrg(pool, async (tx, enterOrg) => {
       const member = await asDefiner(
+        pool,
         tx,
         async () =>
           (
@@ -988,7 +983,7 @@ export async function restoreOwner(
   const { successor, replaces } = args;
   const account = await enabledAccount(idp, successor.username);
   return withResolvedOrg(pool, async (tx, enterOrg) => {
-    const found = await asDefiner(tx, async () => ({
+    const found = await asDefiner(pool, tx, async () => ({
       old: (
         await tx.query<{ org_id: string }>('SELECT org_id FROM public.membership WHERE id = $1', [
           replaces,
@@ -1046,7 +1041,7 @@ export async function restoreOwner(
         executedBy: args.executedBy,
       });
     }
-    const sessionsEnded = await asDefiner(tx, () => sessionRevokeMembership(tx, replaces));
+    const sessionsEnded = await asDefiner(pool, tx, () => sessionRevokeMembership(tx, replaces));
     await audit(tx, 'membership.create', 'membership', ownerId, {
       role: 'owner',
       inviteId: null,

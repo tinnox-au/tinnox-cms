@@ -13,7 +13,8 @@
 // this script creates the matching membership rows. A subject without a membership cannot
 // sign in. Customers' members come from scripts/provision-member.ts instead.
 import type { Role } from '@tinnox/contracts';
-import { connectMigrator, withOrg, type MigratorPool, type Tx } from '@tinnox/db';
+import { withOrg, type Tx } from '@tinnox/db';
+import { connectMigrator, type MigratorPool } from '@tinnox/db/migrate';
 import { loadEnv, requireEnv } from './lib/env.ts';
 
 loadEnv();

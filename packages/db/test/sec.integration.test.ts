@@ -10,10 +10,12 @@ import {
   auditScoped,
   auditStandalone,
   auditUnscoped,
+  deviceByRegistrationId,
   deviceByTokenHash,
   heartbeatLogPurge,
   loginStatePut,
   loginStateTake,
+  mediaProcessingJobs,
   membershipByOidcSub,
   pairingCancelClaims,
   pairingClaim,
@@ -1147,6 +1149,84 @@ describe('the two writes outside a transaction (D2, CX-01)', () => {
     expect(await sessionRevokeUnaudited(pool, idHash)).toBe(false);
     expect(await sessionRevokeUnaudited(pool, hash())).toBe(false);
     expect(await auditRows()).toBe(before);
+  });
+});
+
+describe('the device-registration and media-queue lookups (AG-2.2)', () => {
+  it('deviceByRegistrationId resolves a registration to its organisation and display, until it is revoked', async () => {
+    const org = await createOrg(migrator, 'By registration');
+    const p = await newPairing();
+    await claim(org, p.code);
+    const done = await inTx(pool, (tx) =>
+      pairingComplete(tx, {
+        pairingId: p.pairingId,
+        pollingTokenHash: p.pollingTokenHash,
+        deviceTokenHash: hash(),
+      }),
+    );
+    if (done.outcome !== 'completed') throw new Error('expected completed');
+    expect(await deviceByRegistrationId(db, done.registrationId)).toEqual({
+      orgId: org.orgId,
+      displayId: org.displayId,
+    });
+    // A lookup takes either handle.
+    expect(await withoutOrg(pool, (tx) => deviceByRegistrationId(tx, done.registrationId))).toEqual(
+      { orgId: org.orgId, displayId: org.displayId },
+    );
+    expect(await deviceByRegistrationId(db, randomUUID())).toBeNull();
+
+    await withOrg(pool, org.orgId, (tx) =>
+      tx.query(
+        "UPDATE player_registration SET revoked_at = now(), revoked_reason = 'operator' WHERE id = $1 AND revoked_at IS NULL",
+        [done.registrationId],
+      ),
+    );
+    expect(await deviceByRegistrationId(db, done.registrationId)).toBeNull();
+  });
+
+  it('mediaProcessingJobs lists the rows waiting for validation in every organisation, oldest first, up to the limit', async () => {
+    // Older than anything another test file may have left waiting, so these two lead the queue.
+    const waiting = (org: TestOrg, age: string): Promise<string> =>
+      withOrg(pool, org.orgId, async (tx) => {
+        const { rows } = await tx.query<{ id: string }>(
+          `INSERT INTO media (org_id, kind, status, original_name, created_at)
+           VALUES (app_org_id(), 'image', 'processing', 'queued', now() - $1::interval)
+           RETURNING id`,
+          [age],
+        );
+        if (rows[0] === undefined) throw new Error('the media row was not inserted');
+        return rows[0].id;
+      });
+    const settle = (org: TestOrg, id: string): Promise<unknown> =>
+      withOrg(pool, org.orgId, (tx) =>
+        tx.query(
+          `UPDATE media SET status = 'failed', error_code = 'inspection_timeout',
+                  error_detail = 'Settled by the test that queued it.'
+           WHERE org_id = app_org_id() AND id = $1`,
+          [id],
+        ),
+      );
+    const older = await waiting(a, '20 years');
+    const newer = await waiting(b, '19 years');
+    try {
+      const jobs = await mediaProcessingJobs(db, 2);
+      expect(jobs.map((job) => ({ mediaId: job.mediaId, orgId: job.orgId }))).toEqual([
+        { mediaId: older, orgId: a.orgId },
+        { mediaId: newer, orgId: b.orgId },
+      ]);
+      expect(jobs[0]?.createdAt).toBeInstanceOf(Date);
+      expect(jobs[0]?.createdAt.getTime()).toBeLessThan(jobs[1]?.createdAt.getTime() ?? 0);
+      expect(await mediaProcessingJobs(db, 1)).toHaveLength(1);
+      // The function clamps the limit to at least one row (migration 0003).
+      expect(await mediaProcessingJobs(db, 0)).toHaveLength(1);
+    } finally {
+      // Left waiting, they would lengthen the media pipeline's queue for the files after this.
+      await settle(a, older);
+      await settle(b, newer);
+    }
+    const left = (await mediaProcessingJobs(db, 5000)).map((job) => job.mediaId);
+    expect(left).not.toContain(older);
+    expect(left).not.toContain(newer);
   });
 });
 

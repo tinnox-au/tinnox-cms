@@ -13,7 +13,7 @@ import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { runMigrations } from '@tinnox/db';
+import { runMigrations } from '@tinnox/db/migrate';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { repoRoot } from './support.ts';

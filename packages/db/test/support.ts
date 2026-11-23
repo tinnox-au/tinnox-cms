@@ -3,7 +3,11 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
-import { createPool, violatedConstraint, withoutOrg, type Pool, type Tx } from '../src/index.ts';
+import { createPool, violatedConstraint, type Pool } from '../src/index.ts';
+
+// The helper that opens a real transaction for the wrappers and audit writers that take a `Tx`
+// (D2). It lives in the package's testing entry, so tests outside this package use the same one.
+export { inTx } from '../src/testing.ts';
 
 const envFile = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '.env');
 if (existsSync(envFile)) process.loadEnvFile(envFile);
@@ -22,15 +26,6 @@ export function appPool(max = 4): Pool {
     applicationName: 'tinnox-test-app',
     max,
   });
-}
-
-/**
- * Runs `fn` in a transaction of its own with no organisation, as a route does before the
- * organisation is known. For the sec.* wrappers that change data and the audit writers: they
- * take a `Tx`, and the handle `poolAsTx` gives is not one (D2).
- */
-export function inTx<T>(pool: Pool, fn: (tx: Tx) => Promise<T>): Promise<T> {
-  return withoutOrg(pool, fn);
 }
 
 /** Connection string of the integration-test database for role tinnox_migrator. */

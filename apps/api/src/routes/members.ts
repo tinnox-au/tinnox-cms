@@ -29,10 +29,14 @@ import {
 import { canManage, grantableRoles, isDemotion } from '@tinnox/domain';
 import {
   auditScoped,
+  joinSql,
   sessionRevokeMembership,
+  sql,
+  sqlParameter,
   STAGE_C_CONSTRAINTS,
   violatedConstraint,
   withOrg,
+  type SqlFragment,
   type Tx,
 } from '@tinnox/db';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
@@ -330,11 +334,11 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): voi
 
           // Only the named, changed columns; fixed text, every value a parameter.
           const values: unknown[] = [target.row.id];
-          const sets: string[] = [];
-          if (to !== null) sets.push(`role = $${values.push(to)}`);
-          if (name !== null) sets.push(`display_name = $${values.push(name)}`);
+          const sets: SqlFragment[] = [];
+          if (to !== null) sets.push(sql`role = ${sqlParameter(values.push(to))}`);
+          if (name !== null) sets.push(sql`display_name = ${sqlParameter(values.push(name))}`);
           const updated = await tx.query<MemberRow>(
-            `UPDATE membership SET ${sets.join(', ')}
+            `UPDATE membership SET ${joinSql(sets, sql`, `)}
              WHERE id = $1 AND org_id = app_org_id()
              RETURNING ${MEMBER_COLUMNS}`,
             values,

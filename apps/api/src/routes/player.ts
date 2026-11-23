@@ -33,6 +33,7 @@ import {
   auditScoped,
   auditStandalone,
   auditUnscoped,
+  deviceByRegistrationId,
   deviceByTokenHash,
   pairingComplete,
   pairingCreate,
@@ -531,16 +532,12 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
         );
       }
 
-      const { rows: devices } = await unscoped.query<{ org_id: string; display_id: string }>(
-        'SELECT org_id, display_id FROM sec.device_by_registration_id($1)',
-        [claims.registrationId],
-      );
-      const device = devices[0];
-      if (device === undefined) {
+      const device = await deviceByRegistrationId(unscoped, claims.registrationId);
+      if (device === null) {
         throw new HttpError(401, 'device_revoked', 'This device registration is no longer valid.');
       }
 
-      const asset = await withOrg(pool, device.org_id, async (tx) => {
+      const asset = await withOrg(pool, device.orgId, async (tx) => {
         const { rows } = await tx.query<{
           storage_key: string | null;
           mime_type: string | null;
@@ -552,7 +549,7 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
            JOIN media m ON m.id = pa.media_id AND m.org_id = pa.org_id
            WHERE p.id = $1 AND p.org_id = app_org_id() AND p.display_id = $2 AND pa.media_id = $3
            LIMIT 1`,
-          [claims.publicationId, device.display_id, claims.assetId],
+          [claims.publicationId, device.displayId, claims.assetId],
         );
         return rows[0];
       });
@@ -567,7 +564,7 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
       }
       return serveObject(request, reply, {
         storage: ctx.storage,
-        orgId: device.org_id,
+        orgId: device.orgId,
         storageKey: asset.storage_key,
         mimeType: mime.data,
         sha256: asset.sha256,

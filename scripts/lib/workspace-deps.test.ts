@@ -101,6 +101,9 @@ describe('packageOf', () => {
     expect(packageOf('zod')).toBe('zod');
     expect(packageOf('vitest/config')).toBe('vitest');
     expect(packageOf('@tinnox/api/test-support')).toBe('@tinnox/api');
+    // The entries of @tinnox/db (step 15) are declared as the one package.
+    expect(packageOf('@tinnox/db/migrate')).toBe('@tinnox/db');
+    expect(packageOf('@tinnox/db/testing')).toBe('@tinnox/db');
     expect(packageOf('@fontsource-variable/inter/files/a.woff2')).toBe(
       '@fontsource-variable/inter',
     );

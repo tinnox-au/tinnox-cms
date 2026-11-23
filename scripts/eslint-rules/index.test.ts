@@ -12,7 +12,7 @@ import plugin from './index.ts';
 
 const FOLDER = 'scripts/eslint-rules';
 // The files of the folder that are not a rule.
-const SUPPORT_FILES = new Set(['index.ts', 'create-rule.ts']);
+const SUPPORT_FILES = new Set(['index.ts', 'create-rule.ts', 'typed.ts']);
 
 /** The rule files of the folder, by rule name: every .ts file but tests and the support files. */
 function ruleFiles(): string[] {

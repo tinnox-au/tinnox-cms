@@ -256,7 +256,7 @@ describe('the runtime role itself', () => {
 describe('createPool serves tinnox_app only (AG-1.2)', () => {
   // The refusal must also say what to use instead (plan section 3.4), not only what it found.
   const REFUSED =
-    /createPool serves role tinnox_app only, but the connection logs in as .+; use the tinnox_app connection string \(DATABASE_URL\) without a role setting, and connectMigrator \(@tinnox\/db\) for an offline tool that needs tinnox_migrator/;
+    /createPool serves role tinnox_app only, but the connection logs in as .+; use the tinnox_app connection string \(DATABASE_URL\) without a role setting, and connectMigrator \(@tinnox\/db\/migrate\) for an offline tool that needs tinnox_migrator/;
   // pg takes ?user= and ?password= over the URL's username, so this URL names tinnox_app,
   // passes the start-up check assertConnectionRole (which reads the username only), and still
   // logs in as the migrator. This check is what refuses it, also inside assertRuntimeRole.

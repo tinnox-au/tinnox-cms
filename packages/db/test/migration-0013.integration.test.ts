@@ -31,8 +31,6 @@ import {
   pairingComplete,
   pairingCreate,
   poolAsTx,
-  resetTestDatabase,
-  runMigrations,
   sessionByIdHash,
   sessionCreate,
   sessionRevokeMembership,
@@ -40,10 +38,10 @@ import {
   withOrg,
   withoutOrg,
   type Autocommit,
-  type MigrationResult,
   type Pool,
   type SessionCreateResult,
 } from '../src/index.ts';
+import { resetTestDatabase, runMigrations, type MigrationResult } from '../src/migrate.ts';
 import {
   appPool,
   asDefiner,

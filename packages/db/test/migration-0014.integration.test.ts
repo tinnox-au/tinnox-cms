@@ -20,12 +20,10 @@ import {
   alertRecipientByTokenHash,
   displayAlertOrgs,
   poolAsTx,
-  resetTestDatabase,
-  runMigrations,
   withOrg,
-  type MigrationResult,
   type Pool,
 } from '../src/index.ts';
+import { resetTestDatabase, runMigrations, type MigrationResult } from '../src/migrate.ts';
 import { appPool, createOrg, migratorClient, migratorUrl, type TestOrg } from './support.ts';
 
 const MIGRATIONS = join(

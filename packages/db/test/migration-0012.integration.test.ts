@@ -27,13 +27,11 @@ import {
   pairingComplete,
   pairingCreate,
   poolAsTx,
-  resetTestDatabase,
-  runMigrations,
   withOrg,
   type Autocommit,
-  type MigrationResult,
   type Pool,
 } from '../src/index.ts';
+import { resetTestDatabase, runMigrations, type MigrationResult } from '../src/migrate.ts';
 import {
   appPool,
   createOrg,

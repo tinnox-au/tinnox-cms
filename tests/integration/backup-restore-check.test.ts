@@ -17,7 +17,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AppContent } from '@tinnox/contracts';
-import { resetTestDatabase, runMigrations } from '@tinnox/db';
+import { resetTestDatabase, runMigrations } from '@tinnox/db/migrate';
 import { buildManifest, type ResolvedItem, type ResolvedMediaItem } from '@tinnox/domain';
 import pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';

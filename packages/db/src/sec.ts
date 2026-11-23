@@ -459,6 +459,44 @@ export async function deviceByTokenHash(
     : { registrationId: r.registration_id, orgId: r.org_id, displayId: r.display_id };
 }
 
+/**
+ * The organisation and display of an active registration, by the registration id a signed media
+ * URL names (0003); null for an unknown or revoked one. The media route verifies the signature
+ * first, then enters the organisation with withOrg.
+ */
+export async function deviceByRegistrationId(
+  db: Autocommit,
+  registrationId: string,
+): Promise<{ orgId: string; displayId: string } | null> {
+  const { rows } = await db.query<{ org_id: string; display_id: string }>(
+    'SELECT org_id, display_id FROM sec.device_by_registration_id($1)',
+    [registrationId],
+  );
+  const r = only(rows);
+  return r === null ? null : { orgId: r.org_id, displayId: r.display_id };
+}
+
+export interface MediaProcessingJob {
+  readonly mediaId: string;
+  readonly orgId: string;
+  readonly createdAt: Date;
+}
+
+/**
+ * The oldest `limit` media rows still waiting for validation, in every organisation (0003): the
+ * media pipeline's queue. It then enters each row's organisation with withOrg.
+ */
+export async function mediaProcessingJobs(
+  db: Autocommit,
+  limit: number,
+): Promise<MediaProcessingJob[]> {
+  const { rows } = await db.query<{ media_id: string; org_id: string; created_at: Date }>(
+    'SELECT media_id, org_id, created_at FROM sec.media_processing_jobs($1)',
+    [limit],
+  );
+  return rows.map((r) => ({ mediaId: r.media_id, orgId: r.org_id, createdAt: r.created_at }));
+}
+
 /** Every organisation's id, for the alert check (0014); it then enters each with withOrg. */
 export async function displayAlertOrgs(db: Autocommit): Promise<string[]> {
   const { rows } = await db.query<{ org_id: string }>(
