@@ -3,7 +3,7 @@ contract: status/v2
 repo: tinnox-au/tinnox-cms
 initiative: TINNOX CMS
 key: CMS
-next_id: 31
+next_id: 32
 phase: Not written yet: one sentence on what this project is and where it stands
 gate: -
 seeded: 17 Nov 2026 by status init
@@ -36,6 +36,7 @@ None.
 | CMS-26 | Ruleset on main: no force push or deletion, merge or squash only, pull requests and the three CI jobs required (poteto D12, D14); Michael creates it | proposed | - | 22 Nov |
 | CMS-27 | Ask TINNOX whether DEC-13 (data stays in Australia) allows alert e-mails to mailboxes outside Australia (poteto D23) | proposed | - | 22 Nov |
 | CMS-29 | Revoke three unused tinnox_definer grants in a new migration: member_invite.invited_by SELECT, UPDATE on login_state and pairing_claim_failure (poteto step 6) | proposed | - | 23 Nov |
+| CMS-31 | Poteto pyramid refactor, group C: errors and outcomes (steps 23 to 28 of the adoption plan); Michael starts it | proposed | - | 24 Nov |
 
 ## To do
 
@@ -247,3 +248,6 @@ from: CMS-28
 
 ### CMS-30
 from: CMS-28
+
+### CMS-31
+from: CMS-30
