@@ -17,7 +17,7 @@ const SECOND =
 const REMEDY = `${SECOND} Pass the outer tx to the helper: give it a \`tx: OrgTx\` parameter (from @tinnox/db) and run the statements on that; work that must commit on its own goes after the outer call has returned.`;
 // The two functions that take the pool and no tx: the message names what to call on the outer
 // tx, not a parameter the function does not have.
-const AUDIT_REMEDY = `${SECOND} Write the event on the outer tx instead: auditUnscoped(tx, event), or auditScoped(tx, event) when the outer transaction is withOrg (both from @tinnox/db). auditStandalone is only for a refusal that no transaction carries: call it after the outer call has returned or thrown.`;
+const AUDIT_REMEDY = `${SECOND} Write the event on the outer transaction instead: inside changeOrg or changePreOrg, return it as { value, audit } and the wrapper writes it there; in a file of LEGACY_TRANSACTION_FILES (eslint.config.js), auditUnscoped(tx, event), or auditScoped(tx, event) when the outer transaction is withOrg (both from @tinnox/db). auditStandalone is only for a refusal that no transaction carries: call it after the outer call has returned or thrown.`;
 const REVOKE_REMEDY = `${SECOND} End the session on the outer tx instead: sessionRevoke(tx, idHash) (from @tinnox/db), with its audit row on the same tx. sessionRevokeUnaudited is only for the sign-out fallback: call it after the outer call has returned or thrown.`;
 const inCallback = (opener: string, outer: string, remedy = REMEDY) =>
   `${opener}() is called inside the callback of ${outer}(), ${remedy}`;
@@ -132,6 +132,28 @@ tester.run('no-nested-transaction (U-3)', rule, {
         { message: inCallback('withResolvedOrg', 'withoutOrg') },
         { message: inCallback('withOrgDecision', 'withOrgDecision') },
         { message: inCallback('withOrgAllowed', 'withOrgDecisionAllowed') },
+      ],
+    },
+    {
+      name: 'the openers of step 19: a read, a change and the operator wrapper, inside and outside',
+      code: `
+        await changeOrg(pool, orgId, permit, async (tx) => {
+          await readOrg(pool, orgId, (inner) => load(inner));
+          return { value: 1, audit: event };
+        });
+        await readOrg(pool, orgId, async (tx) => changeAsOperator(ctx, request, write));
+        await changePreOrg(pool, async (pre) => changeOrg(pool, orgId, permit, write));
+        await withOrg(pool, orgId, async (tx) => changePreOrg(pool, write));
+        export async function total(tx: OrgReadTx, pool: Pool): Promise<number> {
+          return readOrg(pool, orgId, (inner) => count(inner));
+        }
+      `,
+      errors: [
+        { message: inCallback('readOrg', 'changeOrg') },
+        { message: inCallback('changeAsOperator', 'readOrg') },
+        { message: inCallback('changeOrg', 'changePreOrg') },
+        { message: inCallback('changePreOrg', 'withOrg') },
+        { message: withHandle('readOrg', 'tx: OrgReadTx') },
       ],
     },
     {

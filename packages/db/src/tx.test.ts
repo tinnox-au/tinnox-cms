@@ -5,13 +5,19 @@
 import pg from 'pg';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
+  auditScoped,
   CommitOutcomeUnknownError,
+  lockOrgMembership,
   poolAsTx,
+  readOrg,
+  sessionRevokeMembership,
   withOrg,
   withoutOrg,
   withResolvedOrg,
+  type AuditInput,
   type Autocommit,
   type OrgId,
+  type OrgReadTx,
   type OrgTx,
   type Pool,
   type PreOrgTx,
@@ -205,7 +211,7 @@ describe('a COMMIT that does not confirm (review round 3, SCX-03)', () => {
 });
 
 const HANDLE_CLOSED =
-  'a transaction handle was used after its transaction ended: the callback given to withOrg, withoutOrg or withResolvedOrg had already returned or thrown, so the statement was not sent. Await every query inside the callback, and do not keep tx, or pass it to work that outlives the callback.';
+  'a transaction handle was used after its transaction ended: the callback given to withOrg, withoutOrg, withResolvedOrg, readOrg, changeOrg or changePreOrg had already returned or thrown, so the statement was not sent. Await every query inside the callback, and do not keep tx, or pass it to work that outlives the callback.';
 
 describe('a transaction handle after its transaction ended (U-2)', () => {
   it('refuses a statement on a handle kept after the commit, and sends nothing', async () => {
@@ -312,7 +318,7 @@ describe('a transaction handle after its transaction ended (U-2)', () => {
 
 /** The section 3.4 sentence, after the name of the function that was refused. */
 const nested = (opener: string): string =>
-  `${opener} was called while a transaction is open on the same asynchronous path (inside the callback of withOrg, withoutOrg or withResolvedOrg, or in a helper it called). This opens a second transaction on another connection that commits independently. Pass the outer tx to the helper.`;
+  `${opener} was called while a transaction is open on the same asynchronous path (inside the callback of withOrg, withoutOrg, withResolvedOrg, readOrg, changeOrg or changePreOrg, or in a helper it called). This opens a second transaction on another connection that commits independently. Pass the outer tx to the helper.`;
 
 // Every nesting below goes through a function defined outside the callback: lint reports the
 // form it can read (tinnox/no-nested-transaction), and these cases are the rest, which only
@@ -325,6 +331,7 @@ describe('a transaction inside another (U-3)', () => {
     ['withOrg', (pool: Pool, fn: () => Promise<unknown>) => withOrg(pool, ORG, fn)],
     ['withoutOrg', (pool: Pool, fn: () => Promise<unknown>) => withoutOrg(pool, fn)],
     ['withResolvedOrg', (pool: Pool, fn: () => Promise<unknown>) => withResolvedOrg(pool, fn)],
+    ['readOrg', (pool: Pool, fn: () => Promise<unknown>) => readOrg(pool, ORG, fn)],
   ] as const;
 
   it('refuses every opener inside every other, before a second connection is taken, and rolls the outer back', async () => {
@@ -579,5 +586,94 @@ describe('OrgTx and PreOrgTx (AG-2.1, AG-2.2)', () => {
       'COMMIT',
     ]);
     expect(taken).toHaveLength(1);
+  });
+});
+
+// SCR-34 (adoption plan step 19): a read runs in a READ ONLY transaction, on a handle that
+// nothing that writes takes. The database's half (SQLSTATE 25006 for a write) is in
+// packages/db/test/change.integration.test.ts; the types' half is checked by `npm run
+// typecheck`, as above.
+describe('readOrg (SCR-34)', () => {
+  const needsOrg = (tx: OrgTx): OrgTx => tx;
+  const reads = (tx: OrgReadTx): OrgReadTx => tx;
+  const takesEither = (handle: Autocommit): Autocommit => handle;
+  const FOLDER_CREATED = {
+    actorType: 'operator',
+    actorId: 'a-member-id',
+    action: 'folder.create',
+    objectType: 'folder',
+    objectId: 'a-folder-id',
+    result: 'success',
+    detail: null,
+  } as const satisfies AuditInput;
+
+  it('opens a READ ONLY transaction with the organisation set, and commits it', async () => {
+    const { pool, statements, released, taken } = fakePool();
+    expect(
+      await readOrg(pool, ORG, async (tx) => {
+        await tx.query('TENANT READ');
+        return 'read';
+      }),
+    ).toBe('read');
+    expect(statements).toEqual([
+      'BEGIN READ ONLY',
+      "SELECT set_config('app.org_id', $1, true)",
+      'TENANT READ',
+      'COMMIT',
+    ]);
+    expect(taken).toHaveLength(1);
+    expect(released).toEqual([undefined]);
+  });
+
+  it('rolls back when the read throws, takes an OrgId only, and closes its handle like any other', async () => {
+    const { pool, statements } = fakePool();
+    await expect(readOrg(pool, ORG, () => Promise.reject(new Error('boom')))).rejects.toThrow(
+      'boom',
+    );
+    expect(statements).toEqual([
+      'BEGIN READ ONLY',
+      "SELECT set_config('app.org_id', $1, true)",
+      'ROLLBACK',
+    ]);
+    await expect(readOrg(pool, testOrgId('not-a-uuid'), () => Promise.resolve())).rejects.toThrow(
+      'readOrg requires a lower-case UUID organisation id',
+    );
+
+    const kept: OrgReadTx[] = [];
+    await readOrg(pool, ORG, async (tx) => {
+      kept.push(tx);
+    });
+    await expect(kept[0]?.query('LATE')).rejects.toThrow(HANDLE_CLOSED);
+    expect(statements).not.toContain('LATE');
+  });
+
+  it('gives a handle that is not accepted by what writes, while an OrgTx is accepted by what reads', () => {
+    // Never called: these lines are for the type checker.
+    const cases = async (read: OrgReadTx, org: OrgTx): Promise<void> => {
+      // A helper that only reads takes either handle.
+      reads(read);
+      reads(org);
+      // @ts-expect-error the handle of readOrg is not an OrgTx: a helper that writes refuses it
+      needsOrg(read);
+      // @ts-expect-error nor does the scoped audit writer take it
+      await auditScoped(read, FOLDER_CREATED);
+      // @ts-expect-error nor the member revocation
+      await sessionRevokeMembership(read, 'a-member-id');
+      // @ts-expect-error nor the membership lock
+      await lockOrgMembership(read);
+      // What the types cannot say: a statement is text, so one that writes still compiles on
+      // the read handle. The database refuses it (SQLSTATE 25006).
+      await read.query('UPDATE display SET name = $1', ['compiles']);
+      // And the handle has a query, so it is an Autocommit: a lookup of sec.ts takes it, and so
+      // would a wrapper typed for any handle that writes (loginStatePut, the purges).
+      takesEither(read);
+    };
+    expect(cases).toBeTypeOf('function');
+    expectTypeOf<OrgReadTx>().not.toExtend<OrgTx>();
+    expectTypeOf<OrgReadTx>().not.toExtend<Tx>();
+    expectTypeOf<OrgReadTx>().not.toExtend<PreOrgTx>();
+    expectTypeOf<OrgTx>().toExtend<OrgReadTx>();
+    expectTypeOf<PreOrgTx>().not.toExtend<OrgReadTx>();
+    expectTypeOf(readOrg).parameter(1).toEqualTypeOf<OrgId>();
   });
 });

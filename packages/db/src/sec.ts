@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 // Types only (D19): the audit vocabulary has one source, packages/contracts/src/audit.ts. Lint
 // refuses a value import here, so nothing of that package, zod included, loads with this one.
 import type { AuditAction, AuditEventOf } from '@tinnox/contracts';
+import { noteAuditRow } from './audit-note.ts';
 import { mintOrgId } from './org-id.ts';
 import type { Pool } from './pool.ts';
 import { statementsOf } from './pre-org.ts';
@@ -572,6 +573,7 @@ export async function auditScoped(tx: OrgTx, event: AuditInput): Promise<void> {
       event.detail === null ? null : JSON.stringify(event.detail),
     ],
   );
+  noteAuditRow(tx, event.action);
 }
 
 function writeUnscoped(handle: Autocommit, event: AuditInput): Promise<unknown> {
@@ -593,6 +595,7 @@ function writeUnscoped(handle: Autocommit, event: AuditInput): Promise<unknown> 
  */
 export async function auditUnscoped(tx: PreOrgTx, event: AuditInput): Promise<void> {
   await writeUnscoped(statementsOf(tx), event);
+  noteAuditRow(tx, event.action);
 }
 
 /** The event of `action`, narrowed to no actor id and no object: nothing it could name changed. */
@@ -638,7 +641,7 @@ export async function auditStandalone(pool: Pool, event: StandaloneAuditEvent): 
     poolAsTx(pool, {
       opener: 'auditStandalone',
       instead:
-        'Write the event on the outer tx with auditUnscoped(tx, event), or with auditScoped(tx, event) when the outer transaction is withOrg.',
+        'Write the event on the outer tx with auditUnscoped(tx, event), or with auditScoped(tx, event) when the outer transaction is withOrg; inside changeOrg or changePreOrg, return it as { value, audit } and the wrapper writes it there.',
     }),
     event,
   );

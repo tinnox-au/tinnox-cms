@@ -67,6 +67,21 @@ export const AUDIT_ACTIONS = [
 export const AuditActionSchema = z.enum(AUDIT_ACTIONS);
 export type AuditAction = z.infer<typeof AuditActionSchema>;
 
+/**
+ * Why no audit row is written (D3). Closed: a new reason is a decision, recorded here. A route
+ * gives one in the tables of apps/api/src/route-audit.ts, and a change that records nothing
+ * gives one to `unaudited` of `@tinnox/db`, which takes this type (D19: types only).
+ */
+export const NO_AUDIT_REASONS = {
+  read_only:
+    'the route only reads. The session activity or the device lookup behind it is not audited (D3)',
+  telemetry:
+    'what the route stores is telemetry: a heartbeat and the delivery state it reports (D3)',
+  login_state:
+    'the route stores pre-sign-in login state, which grants nothing; the outcome of the sign-in it belongs to is audited at the callback (D3)',
+} as const;
+export type NoAuditReason = keyof typeof NO_AUDIT_REASONS;
+
 /** The references and staff ids a provisioning run records: never a name or an address. */
 interface ProvisioningRun {
   readonly requestRef?: string;

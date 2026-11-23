@@ -91,7 +91,8 @@ const RELATIVE = /Do not reach into another workspace by relative path\. Import 
 const DEEP = /Do not import a file inside another package\. Import its entry/;
 const TEST_CODE = /Product code does not import test code\. Move what both need into a module/;
 // LINT-3: the pg message names only what the file group may use instead.
-const PG = /Only packages\/db talks to PostgreSQL\. Use createPool and withOrg from @tinnox\/db/;
+const PG =
+  /Only packages\/db talks to PostgreSQL\. Use createPool and the transaction openers of @tinnox\/db \(readOrg, changeOrg, changePreOrg\)/;
 // The browser apps' sentence is true for their Node build files too (vite.config.ts, build/).
 const PG_BROWSER =
   /^(?!.*@tinnox\/db).*Only packages\/db talks to PostgreSQL, and apps\/(portal|player-web) has no database connection\. Its browser code calls the API through apps\/(portal\/src\/api|player-web\/src\/platform\/api\.ts); its build files .* run in Node/;

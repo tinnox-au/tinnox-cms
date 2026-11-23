@@ -75,10 +75,10 @@ const refusalInOrg = {
 // The refusal names the function that was called and what to call on the outer tx instead
 // (plan section 3.4): neither function takes a tx, so "pass the outer tx" would not help.
 const nested = (opener: string, instead: string): string =>
-  `${opener} was called while a transaction is open on the same asynchronous path (inside the callback of withOrg, withoutOrg or withResolvedOrg, or in a helper it called). This opens a second transaction on another connection that commits independently. ${instead}`;
+  `${opener} was called while a transaction is open on the same asynchronous path (inside the callback of withOrg, withoutOrg, withResolvedOrg, readOrg, changeOrg or changePreOrg, or in a helper it called). This opens a second transaction on another connection that commits independently. ${instead}`;
 const NESTED_AUDIT = nested(
   'auditStandalone',
-  'Write the event on the outer tx with auditUnscoped(tx, event), or with auditScoped(tx, event) when the outer transaction is withOrg.',
+  'Write the event on the outer tx with auditUnscoped(tx, event), or with auditScoped(tx, event) when the outer transaction is withOrg; inside changeOrg or changePreOrg, return it as { value, audit } and the wrapper writes it there.',
 );
 const NESTED_REVOKE = nested(
   'sessionRevokeUnaudited',

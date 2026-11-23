@@ -7,9 +7,14 @@
  * - `permissionGuard` decides each request from the session's role before the handler runs:
  *   a refusal is the same 403 for every id (own, unknown, another organisation's), because it
  *   is decided before any lookup.
- * - Every write transaction re-reads the member row FOR SHARE as its first statement
- *   (`withOrgAllowed`), so no write commits under a role, or a session, that was taken away
- *   while the request was on its way.
+ * - Every write transaction re-reads the member row FOR SHARE as its first statement, so no
+ *   write commits under a role, or a session, that was taken away while the request was on its
+ *   way. `changeOrg` of @tinnox/db runs no change without a `WritePermit`, and this module is
+ *   the only one that issues it (`changeAsOperator`; `withOrgAllowed` for the route files that
+ *   still write their audit rows by hand): the permit's re-check is that first statement
+ *   (SCR-34, adoption plan step 19). `changePreOrg` and `withResolvedOrg` enter an
+ *   organisation with no permit, so lint keeps them to the files of PRE_ORG_CHANGE_FILES
+ *   (eslint.config.js), whose transactions start before the organisation is known.
  *
  * Who holds which key: ROLE_PERMISSIONS in packages/domain/src/permissions.ts.
  */
@@ -23,7 +28,16 @@ import {
   type Role,
   type TagScope,
 } from '@tinnox/contracts';
-import { lockOrgMembership, membershipForCheck, withOrg, type OrgTx } from '@tinnox/db';
+import {
+  changeOrg,
+  issueWritePermit,
+  legacyAudit,
+  lockOrgMembership,
+  membershipForCheck,
+  type Change,
+  type OrgTx,
+  type WritePermit,
+} from '@tinnox/db';
 import { permissionsOf } from '@tinnox/domain';
 import type { FastifyReply, FastifyRequest, RouteOptions } from 'fastify';
 import type { AppContext } from '../context.ts';
@@ -495,30 +509,86 @@ async function settle(
   return lockTimeoutAsUnavailable(request, error);
 }
 
+/** What a write may ask of the role guard beyond the route's own row. */
+export interface WriteOptions {
+  /** The requirement a handler narrowed from a stored row; the guard's otherwise. */
+  readonly required?: Requirement;
+  /** Take the organisation's membership lock before the role is read again. */
+  readonly lockMembership?: boolean;
+}
+
 /**
- * withOrg for writes: [lockOrgMembership when lockMembership] → assertStillAllowed → fn(tx, role).
+ * The permit of this request's write, from what `permissionGuard` resolved for it: the one place
+ * a `WritePermit` is issued (SCR-34). Its re-check is [lockOrgMembership when lockMembership] →
+ * assertStillAllowed, and hands the change the role it read. It also carries what the route's
+ * row says it audits, which `changeOrg` holds the change to.
+ */
+function writePermit(
+  request: FastifyRequest,
+  session: OperatorSession,
+  options: WriteOptions | undefined,
+): WritePermit<Role> {
+  const required = requirementOf(request, options);
+  const key = routeKey(request.method, request.routeOptions.url ?? '');
+  const rule = ruleOf(key, ROUTE_PERMISSIONS);
+  // The guard marks every request it lets through, and lets none through without a row. A
+  // requirement the handler brought itself does not stand in for that.
+  if (request.permission === null || rule === undefined) {
+    throw new Error('a write ran outside the permission guard');
+  }
+  return issueWritePermit({
+    recheck: async (tx) => {
+      if (options?.lockMembership === true) await lockOrgMembership(tx);
+      return assertStillAllowed(tx, session, required);
+    },
+    stated: rule.audit,
+    statedIn: `the row of ${key} in ROUTE_PERMISSIONS (apps/api/src/auth/permissions.ts)`,
+  });
+}
+
+/**
+ * A change by the signed-in operator, on `changeOrg`: [lockOrgMembership when lockMembership] →
+ * assertStillAllowed → fn(tx, role) → the audit rows `fn` returned → COMMIT. `fn` returns
+ * `{ value, audit }` and writes no audit row itself.
  * A PermissionDeniedError thrown anywhere inside rolls back, is recorded with
  * recordPermissionDenied in its own transaction, and is rethrown. A lock timeout (55P03)
  * raised anywhere inside (membership lock, actor row, target row, any other lock) becomes
  * 503 service_unavailable with retry-after 2.
  */
+export async function changeAsOperator<T>(
+  ctx: AppContext,
+  request: FastifyRequest,
+  fn: (tx: OrgTx, role: Role) => Promise<Change<T>>,
+  options?: WriteOptions,
+): Promise<T> {
+  const session = operatorOf(request);
+  const permit = writePermit(request, session, options);
+  try {
+    return await changeOrg(ctx.pool, session.orgId, permit, fn);
+  } catch (error) {
+    throw await settle(ctx, request, session, error);
+  }
+}
+
+/**
+ * `changeAsOperator` for a callback that still writes its audit rows itself, with
+ * `auditScoped(tx, event)`, and returns its value bare: the route files of
+ * LEGACY_TRANSACTION_FILES (eslint.config.js). The same statements in the same order, and the
+ * same refusals. A route moves by calling `changeAsOperator` and returning `{ value, audit }`
+ * (adoption plan step 20); this goes with the last of them.
+ */
 export async function withOrgAllowed<T>(
   ctx: AppContext,
   request: FastifyRequest,
   fn: (tx: OrgTx, role: Role) => Promise<T>,
-  options?: { readonly required?: Requirement; readonly lockMembership?: boolean },
+  options?: WriteOptions,
 ): Promise<T> {
-  const session = operatorOf(request);
-  const required = requirementOf(request, options);
-  try {
-    return await withOrg(ctx.pool, session.orgId, async (tx) => {
-      if (options?.lockMembership === true) await lockOrgMembership(tx);
-      const role = await assertStillAllowed(tx, session, required);
-      return fn(tx, role);
-    });
-  } catch (error) {
-    throw await settle(ctx, request, session, error);
-  }
+  return changeAsOperator(
+    ctx,
+    request,
+    async (tx, role) => ({ value: await fn(tx, role), audit: legacyAudit() }),
+    options,
+  );
 }
 
 /** The same around withOrgDecision: commits a refusal's trace, then throws the refusal. */
@@ -526,7 +596,7 @@ export async function withOrgDecisionAllowed<T>(
   ctx: AppContext,
   request: FastifyRequest,
   fn: (tx: OrgTx, role: Role) => Promise<Decision<T>>,
-  options?: { readonly required?: Requirement; readonly lockMembership?: boolean },
+  options?: WriteOptions,
 ): Promise<T> {
   const decision = await withOrgAllowed(ctx, request, fn, options);
   if (!decision.ok) throw decision.error;

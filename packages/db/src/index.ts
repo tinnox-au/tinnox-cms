@@ -7,6 +7,7 @@
 export * from './pool.ts';
 export * from './tx.ts';
 export * from './sec.ts';
+export * from './change.ts';
 export * from './sql.ts';
 export * from './members.ts';
 export * from './constraints.ts';

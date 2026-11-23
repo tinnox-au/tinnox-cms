@@ -284,10 +284,12 @@ const NO_MIGRATOR_POOL_CAST = [
 // together, and which of the two it is says whether an organisation is set: an OrgTx takes a
 // tenant statement, a PreOrgTx only the sec.* wrappers. The audit writers and those wrappers
 // rely on that alone, so nothing may make one by a cast: in every file, tests included, and in
-// packages/db too, where run() and asDefiner build them without one. Tx is either of the two, and
-// DefinerTx the handle asDefiner gives its work. Matched like MigratorPool above, with the same
+// packages/db too, where run() and asDefiner build them without one. Tx is either of the two,
+// OrgReadTx the read-only form of an OrgTx that the callback of readOrg receives (a cast from it
+// to OrgTx would hand a read-only handle to what writes), and DefinerTx the handle asDefiner
+// gives its work. Matched like MigratorPool above, with the same
 // three forms left to review (a value typed `any`, an alias of the type, `as never`).
-const HANDLE = '/^(Tx|OrgTx|PreOrgTx|DefinerTx)$/';
+const HANDLE = '/^(Tx|OrgTx|OrgReadTx|PreOrgTx|DefinerTx)$/';
 const TX = `:matches([typeName.name=${HANDLE}], [typeName.right.name=${HANDLE}])`;
 const NO_TX_CAST = [
   {
@@ -296,7 +298,7 @@ const NO_TX_CAST = [
       `:matches(TSAsExpression, TSTypeAssertion) > .typeAnnotation TSTypeReference${TX}`,
     ].join(', '),
     message:
-      'Do not cast to a transaction handle (Tx, OrgTx, PreOrgTx, DefinerTx): the type says the handle is inside a transaction, so an audit row written on it commits with the change it records, and whether an organisation is set, so a tenant statement runs under row-level security. Use the tx that the callback of withOrg receives or that enterOrg returns (an OrgTx), or the one the callback of withoutOrg or withResolvedOrg receives (a PreOrgTx, for the sec.* wrappers before the organisation is known), all from @tinnox/db; a test opens one the same way (inTx from @tinnox/db/testing). A refusal with no change to pair with is written with auditStandalone(pool, event).',
+      'Do not cast to a transaction handle (Tx, OrgTx, OrgReadTx, PreOrgTx, DefinerTx): the type says the handle is inside a transaction, so an audit row written on it commits with the change it records, and whether an organisation is set, so a tenant statement runs under row-level security. Use the tx that the callback of readOrg receives (an OrgReadTx) or of changeOrg (an OrgTx; an operator route calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts), or, before the organisation is known, the one the callback of changePreOrg receives (a PreOrgTx, for the sec.* wrappers) and the OrgTx its enterOrg returns, all from @tinnox/db; withOrg, withoutOrg and withResolvedOrg give the same handles in a file of LEGACY_TRANSACTION_FILES (eslint.config.js). A test opens one the same way (inTx from @tinnox/db/testing). A refusal with no change to pair with is written with auditStandalone(pool, event).',
   },
 ];
 // OTH-12: a SqlFragment says the text was written in the source (sql`...`, sqlParameter, joinSql
@@ -351,12 +353,30 @@ const NO_ORG_ID_FORGERY = [
       'Do not make an OrgId here (AG-2.3): not by a cast, a type predicate, or a type argument of a call such as the row type of query(). The type says the database named the organisation. In the API it comes from operatorOf(request).orgId, the device credential (deviceByTokenHash) or another lookup of packages/db/src/sec.ts, never from the request; a lookup that is missing is added there. An offline tool that creates an organisation calls newOrgId(), and one that looks a member or an invite up reads its org_id through asDefiner (both from @tinnox/db/migrate). A test names its organisation with testOrgId(id) from @tinnox/db/testing.',
   },
 ];
+// SCR-34 (adoption plan step 19): a WritePermit says the role guard issued it, so its re-check of
+// the member's role is the first statement of the change, and changeOrg of @tinnox/db runs no
+// change without one. A cast would let a write past the role check as far as the types go
+// (changeOrg then refuses the value when it runs: it holds no terms). In every file, tests
+// included, and in packages/db too, where issueWritePermit builds one without a cast. Matched
+// like MigratorPool above, with the same three forms left to review.
+const WRITE_PERMIT = ":matches([typeName.name='WritePermit'], [typeName.right.name='WritePermit'])";
+const NO_WRITE_PERMIT_CAST = [
+  {
+    selector: [
+      `:matches(TSAsExpression, TSTypeAssertion) > TSTypeReference.typeAnnotation${WRITE_PERMIT}`,
+      `:matches(TSAsExpression, TSTypeAssertion) > .typeAnnotation TSTypeReference${WRITE_PERMIT}`,
+    ].join(', '),
+    message:
+      'Do not cast to WritePermit: the type says the role guard issued the permit, so the role is read again as the first statement of the change (SCR-34). An operator route calls changeAsOperator(ctx, request, fn) (apps/api/src/auth/permissions.ts), which issues the permit and gives it to changeOrg; a test issues one with issueWritePermit({ recheck, stated, statedIn }) from @tinnox/db.',
+  },
+];
 // The types only packages/db may make.
 const NO_BRAND_CAST = [
   ...NO_MIGRATOR_POOL_CAST,
   ...NO_TX_CAST,
   ...NO_SQL_FRAGMENT_CAST,
   ...NO_ORG_ID_FORGERY,
+  ...NO_WRITE_PERMIT_CAST,
 ];
 
 // Adoption plan section 3.2: the API reads the time from one injected clock, so tests can set it.
@@ -645,13 +665,13 @@ export const DB_ENTRIES = {
   migrate: {
     refusedIn: (dir) => dir.startsWith('apps/'),
     message:
-      '@tinnox/db/migrate is for the offline tools that connect as tinnox_migrator: the migration runner, the seed and provisioning under scripts/, and tests (AG-1.10). The API holds only the tinnox_app connection: use createPool, withOrg and the typed sec.* wrappers from @tinnox/db. Work that needs the migrator is a script under scripts/, run from a controlled host.',
+      '@tinnox/db/migrate is for the offline tools that connect as tinnox_migrator: the migration runner, the seed and provisioning under scripts/, and tests (AG-1.10). The API holds only the tinnox_app connection: use createPool, readOrg, changeOrg (through changeAsOperator in apps/api/src/auth/permissions.ts) and the typed sec.* wrappers from @tinnox/db. Work that needs the migrator is a script under scripts/, run from a controlled host.',
   },
   // What only tests may use: refused in every file that is not a test.
   testing: {
     refusedIn: () => true,
     message:
-      '@tinnox/db/testing is for test files only. Outside a test, open the transaction with withOrg from @tinnox/db, or with withResolvedOrg while a credential is still being resolved to its organisation.',
+      '@tinnox/db/testing is for test files only. Outside a test, open the transaction with readOrg or changeOrg from @tinnox/db (an operator route calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts), or with changePreOrg while a credential is still being resolved to its organisation (the files of PRE_ORG_CHANGE_FILES in eslint.config.js).',
   },
 };
 
@@ -695,6 +715,37 @@ export const UNSCOPED_HELPER_FILES = {
     'the provisioning exception of AGENTS.md section 1: withoutOrg for `pending`, which expires and lists the invites of every organisation as tinnox_definer (asDefiner from @tinnox/db/migrate)',
 };
 const UNSCOPED_HELPERS = ['withoutOrg', 'poolAsTx'];
+
+// SCR-34 (adoption plan step 19): changeOrg of @tinnox/db runs no change without a WritePermit,
+// and issueWritePermit makes one from any re-check, so only the role guard may import it: there
+// the re-check is assertStillAllowed, and the audit statement is the route's row of
+// ROUTE_PERMISSIONS. legacyAudit is the guard's too: it lets the callback of withOrgAllowed
+// write its audit rows by hand, until the last file of LEGACY_TRANSACTION_FILES has moved. Test
+// files are outside the rule. Not seen: the names taken from a dynamic import.
+export const WRITE_PERMIT_ISSUERS = {
+  'apps/api/src/auth/permissions.ts':
+    'the role guard: changeAsOperator issues the permit of an operator write from what permissionGuard resolved for the request, and withOrgAllowed returns legacyAudit for the callbacks that still write their audit rows by hand',
+};
+const PERMIT_MAKERS = ['issueWritePermit', 'legacyAudit'];
+
+// SCR-34 (adoption plan step 19): changePreOrg, and withResolvedOrg of which it is the new form,
+// hand their callback enterOrg, which turns any OrgId into a handle that writes, with no permit
+// and no role check: operatorOf(request).orgId would do. So an operator write could skip the
+// role guard through them, and only the files whose transactions really start before the
+// organisation is known may import them, each with its reason. Inside these files that misuse
+// is left to review (alert-recipients.ts holds operator routes too). Test files are outside the
+// rule. Not seen: the names taken from a dynamic import.
+export const PRE_ORG_CHANGE_FILES = {
+  'apps/api/src/routes/auth.ts':
+    'sign-in and sign-out: the identity, or the session being ended, is resolved to its member and organisation inside the transaction that records it, so no role has been checked yet',
+  'apps/api/src/routes/player.ts':
+    'pairing: the polling token of a pairing session is resolved to the organisation that claimed it inside the transaction that registers the display; a device has no role',
+  'apps/api/src/routes/alert-recipients.ts':
+    'the confirmation link of an alert address: its token is resolved to the organisation and recipient inside the transaction that confirms it, with no session',
+  'scripts/lib/provision.ts':
+    'the provisioning commands, run by TINNOX from a controlled host: each reads its member or invite as tinnox_definer and enters that organisation; there is no operator',
+};
+const PRE_ORG_OPENERS = ['changePreOrg', 'withResolvedOrg'];
 
 // D25: newOrgId (the '@tinnox/db/migrate' entry) names an organisation that is being created,
 // so it turns any string into an OrgId. Only these offline tools may import it, each with its
@@ -752,6 +803,51 @@ export const RAW_AUDIT_INSERTS = {
 // The one file that holds INSERT INTO audit_event for everybody else: auditScoped (the unscoped
 // writer calls sec.audit_unscoped, a function of the migrations).
 const AUDIT_WRITERS = ['packages/db/src/sec.ts'];
+
+// AG-3.1, SCR-34 (adoption plan steps 19 and 20): the files that used the legacy transaction API
+// (withOrg, withoutOrg, withResolvedOrg, a hand-written auditScoped or auditUnscoped, and the
+// API's wrappers withOrgAllowed, withOrgDecisionAllowed and withOrgDecision) when changeOrg,
+// changePreOrg and readOrg landed. tinnox/no-legacy-transaction refuses the legacy API in every
+// other file of the API's source and the offline tools, and refuses a file here that no longer
+// uses it. THE LIST ONLY SHRINKS: step 20 moves one file at a time to the new API and removes
+// its line; nothing is added (scripts/lib/legacy-transaction-lint.test.ts holds the list to
+// what step 19 found). Test files are outside the rule: they arrange data with withOrg.
+export const LEGACY_TRANSACTION_FILES = [
+  // The operator routes: reads in plain withOrg, writes through withOrgAllowed or
+  // withOrgDecisionAllowed with auditScoped in the callback.
+  'apps/api/src/routes/alert-recipients.ts',
+  'apps/api/src/routes/apps.ts',
+  'apps/api/src/routes/audit.ts',
+  'apps/api/src/routes/displays.ts',
+  'apps/api/src/routes/folders.ts',
+  'apps/api/src/routes/layouts.ts',
+  'apps/api/src/routes/media.ts',
+  'apps/api/src/routes/members.ts',
+  'apps/api/src/routes/overview.ts',
+  'apps/api/src/routes/playlists.ts',
+  'apps/api/src/routes/push.ts',
+  'apps/api/src/routes/schedules.ts',
+  'apps/api/src/routes/tags.ts',
+  // Sign-in, sign-out and the player protocol: no role, and partly before the organisation is
+  // known.
+  'apps/api/src/routes/auth.ts',
+  'apps/api/src/routes/player.ts',
+  // The legacy wrappers themselves (withOrgAllowed and withOrgDecisionAllowed, already on
+  // changeOrg; withOrgDecision), deleted when their last caller has moved.
+  'apps/api/src/auth/permissions.ts',
+  'apps/api/src/db-helpers.ts',
+  // The refusal-only audit transactions of SCR-32 (permission denied, CSRF rejected).
+  'apps/api/src/auth/permission-audit.ts',
+  'apps/api/src/auth/session.ts',
+  // Helpers that write an audit row on the tx of their caller, and the two jobs that run with
+  // no request: the alert check and the media pipeline.
+  'apps/api/src/publishing.ts',
+  'apps/api/src/alerts.ts',
+  'apps/api/src/media/pipeline.ts',
+  // The offline tools.
+  'scripts/lib/provision.ts',
+  'scripts/seed.ts',
+];
 
 // OTH-12: the two places in packages/db that hand query() a statement another file wrote, and
 // the local name it has there. tinnox/sql-fragments checks the statement where it is written.
@@ -1001,7 +1097,7 @@ function pgMessage(dir) {
     const offline = dir.startsWith('apps/')
       ? ''
       : ' (connectMigrator from @tinnox/db/migrate for an offline tool that needs tinnox_migrator)';
-    return `Only packages/db talks to PostgreSQL. Use createPool and withOrg from @tinnox/db${offline}; ${why}`;
+    return `Only packages/db talks to PostgreSQL. Use createPool and the transaction openers of @tinnox/db (readOrg, changeOrg, changePreOrg)${offline}; ${why}`;
   }
   // packages/app-render is bundled for the browser too, but a package may not import an app, so
   // it gets the package sentence below.
@@ -1011,7 +1107,7 @@ function pgMessage(dir) {
   if (dir === 'apps/media-worker') {
     return 'Only packages/db talks to PostgreSQL. The media worker has no database: it takes jobs from the API and reports verdicts through the job directory (inbox and outbox, described in apps/media-worker/src/main.ts).';
   }
-  return `Only packages/db talks to PostgreSQL. ${dir} may not import @tinnox/db: take the data you need as a parameter from the caller, which reads it with withOrg.`;
+  return `Only packages/db talks to PostgreSQL. ${dir} may not import @tinnox/db: take the data you need as a parameter from the caller, which reads it with readOrg.`;
 }
 
 /** The whole outbound half of a no-restricted-syntax list: loads and destructured globals. */
@@ -1054,7 +1150,36 @@ const IMPORT_FACETS = [
         regex: '^@tinnox/db$',
         importNames: UNSCOPED_HELPERS,
         message:
-          'withoutOrg and poolAsTx run without an organisation (AG-2.2). Use withOrg(pool, session.orgId, fn), where row-level security limits every statement to that organisation. If the organisation really is not known yet (a credential is still being resolved, or a sec.* wrapper works across every organisation), add this file to UNSCOPED_HELPER_FILES in eslint.config.js with its reason, and say why in the pull request.',
+          'withoutOrg and poolAsTx run without an organisation (AG-2.2). Use readOrg(pool, orgId, fn) for a read, or changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts for an operator change (it runs changeOrg of @tinnox/db), where row-level security limits every statement to that organisation; withOrg(pool, session.orgId, fn) is left to the files of LEGACY_TRANSACTION_FILES. If the organisation really is not known yet (a credential is still being resolved, or a sec.* wrapper works across every organisation), add this file to UNSCOPED_HELPER_FILES in eslint.config.js with its reason, and say why in the pull request.',
+      },
+    ],
+  },
+  {
+    // SCR-34: the permit of a write, outside the role guard that issues it.
+    only: DB_CALLERS,
+    files: [CODE_FILES],
+    ignores: [...TEST_FILES, ...Object.keys(WRITE_PERMIT_ISSUERS)],
+    patterns: [
+      {
+        regex: '^@tinnox/db$',
+        importNames: PERMIT_MAKERS,
+        message:
+          "Only the role guard issues a WritePermit (SCR-34): its re-check of the member's role is the first statement of the change, and legacyAudit is for its withOrgAllowed alone. An operator route calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts and returns { value, audit }; it never holds the permit. A change with no operator behind it (a player, a job, an offline tool) does not make a permit of its own: say so in the pull request, where a permit-free opener for that kind of caller is decided.",
+      },
+    ],
+  },
+  {
+    // SCR-34: the openers that enter an organisation without a permit, outside the files whose
+    // transactions start before the organisation is known.
+    only: DB_CALLERS,
+    files: [CODE_FILES],
+    ignores: [...TEST_FILES, ...Object.keys(PRE_ORG_CHANGE_FILES)],
+    patterns: [
+      {
+        regex: '^@tinnox/db$',
+        importNames: PRE_ORG_OPENERS,
+        message:
+          'changePreOrg and withResolvedOrg are for a transaction that starts before the organisation is known (SCR-34): their enterOrg gives a handle that writes for any OrgId, with no permit and no role check. An operator change calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts, which checks the role again first, and returns { value, audit }; a read calls readOrg(pool, orgId, fn) from @tinnox/db. If this file really resolves a credential to its organisation inside the transaction, add it to PRE_ORG_CHANGE_FILES in eslint.config.js with its reason, and say why in the pull request.',
       },
     ],
   },
@@ -1606,6 +1731,26 @@ export default tseslint.config(
     plugins: { tinnox },
     rules: {
       'tinnox/no-query-off-transaction': ['error', { allowed }],
+    },
+  })),
+  {
+    // AG-3.1, SCR-34: no legacy transaction API outside the files that still use it
+    // (scripts/eslint-rules/no-legacy-transaction.ts). The API's source and the offline tools;
+    // tests arrange data with withOrg. A rule of its own, so no other block replaces its options.
+    files: DB_CALLER_FILES,
+    ignores: TEST_FILES,
+    plugins: { tinnox },
+    rules: {
+      'tinnox/no-legacy-transaction': 'error',
+    },
+  },
+  // ...and in a file of the list, the rule reports the entry once the file needs it no more.
+  // One block per file, so the last file to leave the list leaves no block without files.
+  ...LEGACY_TRANSACTION_FILES.map((file) => ({
+    files: [file],
+    plugins: { tinnox },
+    rules: {
+      'tinnox/no-legacy-transaction': ['error', { listed: true }],
     },
   })),
   {

@@ -14,23 +14,29 @@
  * AUDIT_ACTIONS has a writer (a route, a guard, or one of OFF_ROUTE_AUDIT), so an action nothing
  * writes cannot stay in the list.
  *
+ * An operator route is also held to its statement on every request: the permit of its write
+ * carries the row's `audit` (auth/permissions.ts), and changeOrg of @tinnox/db rolls the write
+ * back when it recorded an action the row does not name (adoption plan step 19). The other
+ * way round, an action a row names and its route never writes, is what the case per action
+ * above finds.
+ *
  * Whether a new kind of event must be audited at all is the reviewer's call (D3): every
  * successful change to tenant or security state; every attempt at sign-in, pairing, revocation,
  * upload and publishing; and authentication and authorisation refusals, thresholded.
  */
-import { PLAYER_PREFIX, ROUTES, type AuditAction } from '@tinnox/contracts';
+import {
+  NO_AUDIT_REASONS,
+  PLAYER_PREFIX,
+  ROUTES,
+  type AuditAction,
+  type NoAuditReason,
+} from '@tinnox/contracts';
 import type { RouteOptions } from 'fastify';
 
-/** Why a route writes no audit row (D3). Closed: a new reason is a decision, recorded here. */
-export const NO_AUDIT_REASONS = {
-  read_only:
-    'the route only reads. The session activity or the device lookup behind it is not audited (D3)',
-  telemetry:
-    'what the route stores is telemetry: a heartbeat and the delivery state it reports (D3)',
-  login_state:
-    'the route stores pre-sign-in login state, which grants nothing; the outcome of the sign-in it belongs to is audited at the callback (D3)',
-} as const;
-export type NoAuditReason = keyof typeof NO_AUDIT_REASONS;
+// Why a route writes no audit row (D3): the closed list is in packages/contracts/src/audit.ts,
+// beside the audit actions, because `unaudited` of @tinnox/db takes the same reasons for one
+// change (adoption plan step 19). Exported from here as before, for the tables below.
+export { NO_AUDIT_REASONS, type NoAuditReason };
 
 /** What a route's own work audits: at least one action, or none with a reason. */
 export type RouteAudit =

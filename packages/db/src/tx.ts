@@ -39,13 +39,27 @@ export interface Autocommit {
 const inTransaction: unique symbol = Symbol('inTransaction');
 
 /**
- * A transaction with the organisation set: the callback of `withOrg` receives it, and so does
- * the caller of `enterOrg`. Row-level security limits every statement on it to that
- * organisation. This is the only handle request code can send a statement of its own on, so a
- * tenant query cannot run where no organisation is set (AG-2.1). The scoped audit writer and
- * the sec.* wrappers that need the organisation take it.
+ * A transaction with the organisation set, as far as reading goes: the callback of `readOrg`
+ * receives exactly this, in a transaction the database keeps READ ONLY, and every `OrgTx` is
+ * one too. A helper that only reads takes this type, so a read handler and a change can both
+ * call it. Whatever writes takes an `OrgTx` (the scoped audit writer, the sec.* wrappers that
+ * need the organisation, a helper with an INSERT in it), and the handle of `readOrg` is not
+ * one, so it cannot be handed to them (SCR-34). Types do not read SQL: a statement that writes,
+ * sent on this handle by `query`, compiles, and the database refuses it with SQLSTATE 25006.
  */
-export interface OrgTx extends Autocommit {
+export interface OrgReadTx extends Autocommit {
+  readonly [inTransaction]: 'org' | 'read';
+}
+
+/**
+ * A transaction with the organisation set: the callback of `withOrg` and of `changeOrg`
+ * receives it, and so does the caller of `enterOrg`. Row-level security limits every statement
+ * on it to that organisation. With `OrgReadTx`, its read-only form, this is the only handle
+ * request code can send a statement of its own on, so a tenant query cannot run where no
+ * organisation is set (AG-2.1). The scoped audit writer and the sec.* wrappers that need the
+ * organisation take it.
+ */
+export interface OrgTx extends OrgReadTx {
   readonly [inTransaction]: 'org';
 }
 
@@ -61,13 +75,17 @@ export interface PreOrgTx {
 }
 
 /**
- * Any handle inside a transaction, whichever of the two it is. A pool, and the handle
- * `poolAsTx` returns, are neither. So a function that takes an `OrgTx` or a `PreOrgTx` (the
- * audit writers, and every sec.* wrapper that changes data) cannot be given a handle that
- * commits each statement on its own, and the audit row commits or rolls back with the change
- * it records (CX-01, D2). Code that sends a statement names the one it needs: `tx: OrgTx`.
+ * Any handle inside a transaction that may change data, whichever of the two it is. A pool, the
+ * handle `poolAsTx` returns and the read-only handle of `readOrg` are neither. So a function
+ * that takes an `OrgTx` or a `PreOrgTx` (the audit writers, and every sec.* wrapper that changes
+ * data) cannot be given a handle that commits each statement on its own, and the audit row
+ * commits or rolls back with the change it records (CX-01, D2). Code that sends a statement
+ * names the one it needs: `tx: OrgTx`, or `tx: OrgReadTx` when it only reads.
  */
 export type Tx = OrgTx | PreOrgTx;
+
+/** The functions that open a transaction and give their callback its handle, for the messages. */
+const OPENERS = 'withOrg, withoutOrg, withResolvedOrg, readOrg, changeOrg or changePreOrg';
 
 /** One transaction of run(): `open` from BEGIN until its callback returns or throws. */
 interface Transaction {
@@ -91,7 +109,7 @@ const current = new AsyncLocalStorage<Transaction>();
 function refuseNested(opener: string, instead = 'Pass the outer tx to the helper.'): void {
   if (current.getStore()?.open === true) {
     throw new Error(
-      `${opener} was called while a transaction is open on the same asynchronous path (inside the callback of withOrg, withoutOrg or withResolvedOrg, or in a helper it called). This opens a second transaction on another connection that commits independently. ${instead}`,
+      `${opener} was called while a transaction is open on the same asynchronous path (inside the callback of ${OPENERS}, or in a helper it called). This opens a second transaction on another connection that commits independently. ${instead}`,
     );
   }
 }
@@ -109,7 +127,7 @@ function statementsOn(client: PoolClient, transaction: Transaction): Autocommit 
       if (!transaction.open) {
         return Promise.reject<QueryResult<R>>(
           new Error(
-            'a transaction handle was used after its transaction ended: the callback given to withOrg, withoutOrg or withResolvedOrg had already returned or thrown, so the statement was not sent. Await every query inside the callback, and do not keep tx, or pass it to work that outlives the callback.',
+            `a transaction handle was used after its transaction ended: the callback given to ${OPENERS} had already returned or thrown, so the statement was not sent. Await every query inside the callback, and do not keep tx, or pass it to work that outlives the callback.`,
           ),
         );
       }
@@ -128,6 +146,19 @@ function orgHandle(statements: Autocommit, pool: Pool): OrgTx {
   keepStatements(tx, statements);
   rememberPool(tx, pool);
   return tx;
+}
+
+/**
+ * The handle of a READ ONLY transaction whose organisation is set. Nothing is kept for it in
+ * ./pre-org.ts or ./tx-pool.ts: a lookup of ./sec.ts sends on the handle's own `query`, and
+ * asDefiner takes a `Tx`, which this is not.
+ */
+function readHandle(statements: Autocommit): OrgReadTx {
+  return {
+    [inTransaction]: 'read',
+    query: <R extends QueryResultRow = QueryResultRow>(text: string, values?: readonly unknown[]) =>
+      statements.query<R>(text, values),
+  };
 }
 
 /**
@@ -184,6 +215,7 @@ async function run<T>(
   pool: Pool,
   begin: (client: PoolClient) => Promise<void>,
   fn: (statements: Autocommit) => Promise<T>,
+  access: 'read write' | 'read only' = 'read write',
 ): Promise<T> {
   refuseNested(opener);
   const client = await pool.connect();
@@ -197,7 +229,8 @@ async function run<T>(
   };
   client.on('error', onLost);
   try {
-    await client.query('BEGIN');
+    if (access === 'read only') await client.query('BEGIN READ ONLY');
+    else await client.query('BEGIN');
     await begin(client);
     let result: T;
     try {
@@ -238,20 +271,52 @@ async function run<T>(
  * `orgId` is an `OrgId`: it comes from a verified session or device credential, never from
  * request input. The setting is transaction-local, so it cannot leak to the
  * next user of the pooled connection. Rolls back when `fn` throws.
+ *
+ * `opener` is for `changeOrg` (./change.ts), which is this transaction with the audit rows
+ * written before COMMIT: the name a refusal gives, as `poolAsTx` takes a `StandaloneCaller`.
  */
 export async function withOrg<T>(
   pool: Pool,
   orgId: OrgId,
   fn: (tx: OrgTx) => Promise<T>,
+  opener = 'withOrg',
 ): Promise<T> {
-  requireOrgId('withOrg', orgId);
+  requireOrgId(opener, orgId);
   return run(
-    'withOrg',
+    opener,
     pool,
     async (client) => {
       await client.query("SELECT set_config('app.org_id', $1, true)", [orgId]);
     },
     (statements) => fn(orgHandle(statements, pool)),
+  );
+}
+
+/**
+ * Runs `fn` in one READ ONLY transaction with the tenant context set, as `withOrg` sets it:
+ *
+ *   BEGIN READ ONLY; SELECT set_config('app.org_id', $1, true); ...fn...; COMMIT
+ *
+ * For a handler that only reads. The database refuses every INSERT, UPDATE, DELETE and row
+ * lock (FOR UPDATE, FOR SHARE) in it with SQLSTATE 25006, and a function that writes too, so a
+ * write cannot hide in a read (SCR-34); and its handle is an `OrgReadTx`, which the audit
+ * writer and every helper typed `tx: OrgTx` refuse. No role is checked again here: the guard of
+ * the route decided the read.
+ */
+export async function readOrg<T>(
+  pool: Pool,
+  orgId: OrgId,
+  fn: (tx: OrgReadTx) => Promise<T>,
+): Promise<T> {
+  requireOrgId('readOrg', orgId);
+  return run(
+    'readOrg',
+    pool,
+    async (client) => {
+      await client.query("SELECT set_config('app.org_id', $1, true)", [orgId]);
+    },
+    (statements) => fn(readHandle(statements)),
+    'read only',
   );
 }
 
@@ -280,13 +345,16 @@ export async function withoutOrg<T>(pool: Pool, fn: (tx: PreOrgTx) => Promise<T>
  * input. Call `enterOrg` once: nothing stops a second call, which would move the
  * transaction, and the handle the first call returned with it, to another
  * organisation.
+ *
+ * `opener` is for `changePreOrg` (./change.ts), as the one of `withOrg` is for `changeOrg`.
  */
 export async function withResolvedOrg<T>(
   pool: Pool,
   fn: (tx: PreOrgTx, enterOrg: (orgId: OrgId) => Promise<OrgTx>) => Promise<T>,
+  opener = 'withResolvedOrg',
 ): Promise<T> {
   return run(
-    'withResolvedOrg',
+    opener,
     pool,
     async () => undefined,
     (statements) =>
