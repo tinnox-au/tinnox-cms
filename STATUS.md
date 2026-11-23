@@ -26,7 +26,6 @@ None.
 | Id | Card | Agreed | PR | Since |
 |---|---|---|---|---|
 | CMS-3 | Apps that use outside data (weather and similar); needs the P2-06 threat review first | proposed | - | 17 Nov |
-| CMS-4 | Real-hardware check on Raspberry Pi 5 (8GB) under Linux: the browser player in Chromium kiosk mode on a monitor | proposed | - | 17 Nov |
 | CMS-6 | Screen-reader listening pass (VoiceOver or NVDA) on the portal before customers rely on it; start with the schedule editor | proposed | - | 17 Nov |
 | CMS-14 | Emergency messages and takeover (stage C): override what chosen screens show, then return them to their content | proposed | - | 19 Nov |
 | CMS-16 | Playback report (stage C): what each screen played and when, from player reports | proposed | - | 19 Nov |
@@ -47,6 +46,7 @@ None.
 | Id | Card | Agreed | PR | Since |
 |---|---|---|---|---|
 | CMS-30 | Poteto pyramid refactor, group B: the database API (steps 13 to 22 of the adoption plan), built locally first | Michael 23 Nov | - | 23 Nov |
+| CMS-4 | Real-hardware check on Raspberry Pi 5 (8GB) under Linux: the browser player in Chromium kiosk mode on a monitor | Michael 23 Nov | - | 23 Nov |
 
 ## In review
 
