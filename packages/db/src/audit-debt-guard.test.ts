@@ -10,6 +10,7 @@ import {
   CREATE_TRIGGERS,
   EXEMPT_COLUMNS,
   EXEMPT_FUNCTIONS,
+  EXEMPT_SHAPES,
   EXEMPT_TABLES,
   NOTE_FUNCTION,
   PAID_FUNCTION,
@@ -66,11 +67,38 @@ describe('the exempt lists of the audit-debt guard (D3)', () => {
     }
   });
 
-  it('name nothing D3 does not name: the noting function lets no table through by name, and skips only what the lists say', () => {
-    // A write D3 does not exempt (the alert check's silent close, the pairing expiry mark) is
-    // judged until Michael decides it (step 16 report); it never gets a branch of its own here.
+  it('let no table through by name: the noting function skips only what the lists say', () => {
+    // A table's exemption travels as a trigger argument from the lists above, so the function
+    // itself names no table and every exemption is in a list a reviewer reads.
     expect(NOTE_FUNCTION).not.toMatch(/TG_TABLE_NAME =/);
     expect(UNWATCHED_TABLES).toEqual(['schema_migrations', 'audit_event']);
+  });
+
+  it('let through only the shape of the writes the step 20 ruling leaves unaudited (DEC-38, CMS-36)', () => {
+    // The guard does not believe a declared unaudited(reason): it knows the shape of today's
+    // write, the alert check's DELETE and the pairing functions' expiry mark, and judges every
+    // other write on those tables.
+    expect(Object.entries(EXEMPT_SHAPES).map(([table, { shape }]) => [table, shape])).toEqual([
+      ['display_alert', 'delete'],
+      ['pairing_session', 'expired_by_time'],
+    ]);
+    expect(EXEMPT_SHAPES['display_alert']?.why).toMatch(
+      /^step 20 ruling \(DEC-38\), alert_closed_silently: \S.{20,}Open: CMS-36$/,
+    );
+    expect(EXEMPT_SHAPES['pairing_session']?.why).toMatch(
+      /^step 20 ruling \(DEC-38\), pairing_expired_by_time: \S.{20,}Open: CMS-36$/,
+    );
+    // One branch per shape, each as narrow as today's write.
+    expect(NOTE_FUNCTION).toContain("IF TG_ARGV[2] = 'delete' AND TG_OP = 'DELETE' THEN");
+    expect(NOTE_FUNCTION).toContain("IF TG_ARGV[2] = 'expired_by_time' AND TG_OP = 'UPDATE'");
+    for (const condition of [
+      "(n - 'status') = (o - 'status')",
+      "o->>'status' IN ('pending', 'claimed') AND n->>'status' = 'expired'",
+      "(o->>'expires_at')::timestamptz <= now()",
+    ]) {
+      expect(NOTE_FUNCTION).toContain(condition);
+    }
+    expect(NOTE_FUNCTION.match(/TG_ARGV\[2\] = '/g)).toHaveLength(2);
   });
 
   it('audit every other table, a new one included', () => {
@@ -93,13 +121,17 @@ describe('the exempt lists of the audit-debt guard (D3)', () => {
       staleListProblems(TABLES.filter((name) => name !== 'pairing_session')).map(
         (problem) => problem.split(' ')[0],
       ),
-    ).toEqual(['EXEMPT_COLUMNS']);
+    ).toEqual(['EXEMPT_COLUMNS', 'EXEMPT_SHAPES']);
+    expect(staleListProblems(TABLES.filter((name) => name !== 'display_alert'))).toEqual([
+      'EXEMPT_SHAPES of packages/db/src/audit-debt-guard.ts names table display_alert, which is not in schema public: remove the entry, or rename it with the table.',
+    ]);
   });
 
-  it('reach the database as settings: the tables to skip, the exempt columns and the purge frames', () => {
+  it('reach the database as settings: the tables to skip, the exempt columns and shapes, and the purge frames', () => {
     expect(guardSettings()).toEqual({
       skippedTables: 'schema_migrations,audit_event,heartbeat_log,display_delivery,login_state',
       exemptColumns: '{"session":"last_seen_at","pairing_session":"failed_attempts"}',
+      exemptShapes: '{"display_alert":"delete","pairing_session":"expired_by_time"}',
       purgeStack: String.raw`function (sec\.session_purge_expired|sec\.pairing_purge|sec\.heartbeat_log_purge)\(`,
     });
     // The pattern meets a frame as PG_CONTEXT prints it, and not a function that only has a

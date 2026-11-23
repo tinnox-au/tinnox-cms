@@ -320,10 +320,58 @@ describe('what a change records against what its route states (D3)', () => {
           Promise.resolve({ value: 1, audit: unaudited('counter_under_threshold') }),
         ),
       ).rejects.toThrow(
-        `changeOrg: the change returned unaudited('counter_under_threshold'), but ${STATED_IN} does not grant it. 'counter_under_threshold' leaves a write unaudited on purpose, which only a route that counts attempts may do: its entry in OTHER_ROUTE_AUDIT (apps/api/src/route-audit.ts) grants the reason (D3). Return the audit event of what changed, or unaudited('nothing_changed') when this run changed nothing. Nothing was committed.`,
+        `changeOrg: the change returned unaudited('counter_under_threshold'), but ${STATED_IN} does not grant it. 'counter_under_threshold' leaves a write unaudited on purpose, which only the route, job or tool that makes that write may do: its entry in OTHER_ROUTE_AUDIT or its row of JOB_AUDIT (apps/api/src/route-audit.ts) grants the reason (D3; UNAUDITED_REASONS in packages/contracts/src/audit.ts says who makes each). Return the audit event of what changed, or unaudited('nothing_changed') when this run changed nothing. Nothing was committed.`,
       );
     }
     expect(statements).not.toContain('COMMIT');
+  });
+
+  it('takes the three writes the step 20 ruling leaves unaudited only where each is granted (DEC-38, CMS-36)', async () => {
+    // Today's behaviour, named: the alert check's silent close, the pairing expiry mark and the
+    // seed. Each is the grant of the one job, routes or tool that makes the write.
+    for (const [reason, statedIn, stated] of [
+      [
+        'alert_closed_silently',
+        'the row of display_alerts in JOB_AUDIT (fixture)',
+        { actions: ['display.offline_alert', 'display.online_alert'] },
+      ],
+      [
+        'pairing_expired_by_time',
+        'the entry of GET /player/pairing/:id in OTHER_ROUTE_AUDIT (fixture)',
+        { actions: ['pairing.complete', 'pairing.lock'] },
+      ],
+      ['development_seed', 'the development seed (fixture)', { actions: [] }],
+    ] as const) {
+      const granted = fakePool();
+      await changeOrg(
+        granted.pool,
+        ORG,
+        issueWritePermit({ recheck: () => Promise.resolve(), stated, statedIn, grants: [reason] }),
+        () => Promise.resolve({ value: 1, audit: unaudited(reason) }),
+      );
+      expect(granted.statements.at(-1), reason).toBe('COMMIT');
+
+      // The same statement without the grant, and a grant of another reason, are refused.
+      const { pool, statements } = fakePool();
+      for (const grants of [[], ['counter_under_threshold']] as const) {
+        await expect(
+          changeOrg(
+            pool,
+            ORG,
+            issueWritePermit({ recheck: () => Promise.resolve(), stated, statedIn, grants }),
+            () => Promise.resolve({ value: 1, audit: unaudited(reason) }),
+          ),
+        ).rejects.toThrow(
+          `changeOrg: the change returned unaudited('${reason}'), but ${statedIn} does not grant it.`,
+        );
+      }
+      await expect(
+        changeOrg(pool, ORG, FOLDER_WRITES, () =>
+          Promise.resolve({ value: 1, audit: unaudited(reason) }),
+        ),
+      ).rejects.toThrow(`but ${STATED_IN} does not grant it`);
+      expect(statements, reason).not.toContain('COMMIT');
+    }
   });
 
   it('names a statement with no action as such, not as an empty list (step 20 review)', async () => {
@@ -609,7 +657,13 @@ describe('a change needs a permit, and a permit comes from the role guard (SCR-3
     expectTypeOf(unaudited)
       .parameter(0)
       .toEqualTypeOf<
-        'nothing_changed' | 'idempotent_replay' | 'telemetry' | 'counter_under_threshold'
+        | 'nothing_changed'
+        | 'idempotent_replay'
+        | 'telemetry'
+        | 'counter_under_threshold'
+        | 'alert_closed_silently'
+        | 'pairing_expired_by_time'
+        | 'development_seed'
       >();
   });
 

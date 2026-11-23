@@ -6,7 +6,7 @@
 import { AUDIT_ACTIONS, ROUTES, type AuditAction } from '@tinnox/contracts';
 import { issueAuditStatement, termsOfStatement, type AuditStatement } from '@tinnox/db';
 import type { FastifyInstance, RouteOptions } from 'fastify';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import { buildApp } from './app.ts';
 import { ROUTE_PERMISSIONS, type RouteRule } from './auth/permissions.ts';
 import { loadConfig } from './config.ts';
@@ -19,6 +19,7 @@ import {
   createRouteAuditCheck,
   declaredRouteAudit,
   JOB_AUDIT,
+  jobStatement,
   NO_AUDIT_REASONS,
   noAudit,
   OFF_ROUTE_AUDIT,
@@ -26,7 +27,9 @@ import {
   OTHER_ROUTE_AUDIT,
   refusalStatement,
   routeStatement,
+  type JobGrant,
   type OtherRouteAudit,
+  type RouteGrant,
 } from './route-audit.ts';
 
 const OPERATOR: Record<string, RouteRule> = {
@@ -212,13 +215,49 @@ describe('the statements of the changes with no operator behind them (D3)', () =
   });
 
   it('only the pairing poll grants an unaudited counter: its wrong token under the limit (D3, step 20 review)', () => {
+    const counting = Object.entries(OTHER_ROUTE_AUDIT)
+      .filter(([, entry]) => entry.grants?.includes('counter_under_threshold') === true)
+      .map(([key]) => key);
+    expect(counting).toEqual([`GET ${ROUTES.playerPairingPollPattern}`]);
+    expect(terms(routeStatement(at('POST', '/player/pairing'))).grants).not.toContain(
+      'counter_under_threshold',
+    );
+  });
+
+  it('grants each write the step 20 ruling leaves unaudited to what makes it, and to nothing else (DEC-38, CMS-36)', () => {
+    // Who may say unaudited(reason) for a write that changed something: the pairing routes for
+    // the expiry mark of sec.pairing_create and sec.pairing_poll, the alert check for its silent
+    // close. The seed's reason is granted by no table: only by the offline permit
+    // (changeOrgAsMigrator of @tinnox/db/migrate), which the API cannot import.
     const granting = Object.entries(OTHER_ROUTE_AUDIT)
       .filter(([, entry]) => entry.grants !== undefined)
       .map(([key, entry]) => [key, entry.grants]);
     expect(granting).toEqual([
-      [`GET ${ROUTES.playerPairingPollPattern}`, ['counter_under_threshold']],
+      [`POST ${ROUTES.playerPairing}`, ['pairing_expired_by_time']],
+      [
+        `GET ${ROUTES.playerPairingPollPattern}`,
+        ['counter_under_threshold', 'pairing_expired_by_time'],
+      ],
     ]);
-    expect(terms(routeStatement(at('POST', '/player/pairing'))).grants).toBeUndefined();
+    const jobGrants = Object.entries(JOB_AUDIT).map(([name, row]) => [
+      name,
+      'grants' in row ? row.grants : undefined,
+    ]);
+    expect(jobGrants).toEqual([
+      ['display_alerts', ['alert_closed_silently']],
+      ['media_pipeline', undefined],
+    ]);
+    expect(terms(routeStatement(at('GET', ROUTES.playerPairingPollPattern))).grants).toEqual([
+      'counter_under_threshold',
+      'pairing_expired_by_time',
+    ]);
+    expect(terms(jobStatement('display_alerts')).grants).toEqual(['alert_closed_silently']);
+    expect(terms(jobStatement('media_pipeline')).grants).toBeUndefined();
+    // A route's grants and a job's are typed apart, and neither can name the seed.
+    expectTypeOf<RouteGrant>().toEqualTypeOf<
+      'counter_under_threshold' | 'pairing_expired_by_time'
+    >();
+    expectTypeOf<JobGrant>().toEqualTypeOf<'alert_closed_silently'>();
   });
 
   it('refuses an operator route and an unknown one: their changes go through the role guard', () => {

@@ -15,6 +15,7 @@ import {
   heartbeatLogPurge,
   loginStatePut,
   loginStateTake,
+  pairingCancelClaims,
   pairingCreate,
   pairingPoll,
   pairingPurge,
@@ -332,59 +333,208 @@ describe('what D3 exempts owes nothing', () => {
   });
 });
 
-// Neither write is exempt by D3, so the guard refuses both. Whether they are audited or exempt is
-// a decision for Michael (step 16 report); until then only the product tests that make them let
-// them pass, each with whileUnauditedAllowed and the reason "undecided".
-describe('writes D3 does not name are judged until they are decided', () => {
-  it('the alert check closing an offline episode without an e-mail', async () => {
-    const offlineSince = new Date(Date.now() - 3_600_000);
-    // Opening an episode is audited state: without its row it is refused.
-    const opening = await refusalOf(
-      withOrg(judged, org.orgId, (tx) =>
-        tx.query(
-          'INSERT INTO display_alert (display_id, org_id, offline_since) VALUES ($1, app_org_id(), $2)',
-          [org.displayId, offlineSince],
-        ),
-      ),
+// The step 20 ruling (DEC-38) keeps two writes unaudited as they are today, each named by a
+// reason of UNAUDITED_REASONS; whether they are audited is open (CMS-36). The guard does not take
+// a declared reason's word: EXEMPT_SHAPES lets through the shape of today's write, and these
+// cases show it is that narrow, the neighbouring writes on the same tables still refused.
+describe('the writes the step 20 ruling leaves unaudited owe nothing, in their shape only (DEC-38, CMS-36)', () => {
+  const status = async (id: string): Promise<string | undefined> => {
+    const [row] = await asDefiner<{ status: string }>(
+      migrator,
+      'SELECT status FROM public.pairing_session WHERE id = $1',
+      [id],
     );
-    expect(opening).toContain('public.display_alert (INSERT)');
-    await withOrg(judged, org.orgId, async (tx) => {
-      await tx.query(
+    return row?.status;
+  };
+  const pastItsTime = (id: string) =>
+    asDefiner(
+      migrator,
+      `UPDATE public.pairing_session SET expires_at = now() - interval '1 second' WHERE id = $1`,
+      [id],
+    );
+
+  it('the alert check closing an offline episode without an e-mail, and not opening one', async () => {
+    const offlineSince = new Date(Date.now() - 3_600_000);
+    const open = (tx: OrgTx) =>
+      tx.query(
         'INSERT INTO display_alert (display_id, org_id, offline_since) VALUES ($1, app_org_id(), $2)',
         [org.displayId, offlineSince],
       );
+    // Opening an episode is audited state: without its row it is refused.
+    const opening = await refusalOf(withOrg(judged, org.orgId, open));
+    expect(opening).toContain('public.display_alert (INSERT)');
+    await withOrg(judged, org.orgId, async (tx) => {
+      await open(tx);
       await auditScoped(tx, { ...ALERT_AUDIT, action: 'display.offline_alert' });
     });
-    const closing = await refusalOf(
-      withOrg(judged, org.orgId, (tx) =>
-        tx.query('DELETE FROM display_alert WHERE display_id = $1', [org.displayId]),
-      ),
+    // The silent close: alert_closed_silently.
+    await withOrg(judged, org.orgId, (tx) =>
+      tx.query('DELETE FROM display_alert WHERE display_id = $1', [org.displayId]),
     );
-    expect(closing).toContain('public.display_alert (DELETE)');
+    expect(refusals.take()).toEqual([]);
     // A close with its e-mail writes display.online_alert in the same transaction.
+    await withOrg(judged, org.orgId, async (tx) => {
+      await open(tx);
+      await auditScoped(tx, { ...ALERT_AUDIT, action: 'display.offline_alert' });
+    });
     await withOrg(judged, org.orgId, async (tx) => {
       await tx.query('DELETE FROM display_alert WHERE display_id = $1', [org.displayId]);
       await auditScoped(tx, { ...ALERT_AUDIT, action: 'display.online_alert' });
     });
+    // The exemption is the DELETE, not the table: a close that also opens again is refused.
+    const reopening = await refusalOf(
+      withOrg(judged, org.orgId, async (tx) => {
+        await open(tx);
+        await tx.query('DELETE FROM display_alert WHERE display_id = $1', [org.displayId]);
+        await open(tx);
+      }),
+    );
+    expect(reopening).toContain('public.display_alert (INSERT)');
   });
 
-  it('a pairing session past its expiry, marked expired by the next poll of it', async () => {
+  it('a pairing session past its time, marked expired by the next poll of it', async () => {
     const pairing = await newPairing();
-    await asDefiner(
-      migrator,
-      `UPDATE public.pairing_session SET expires_at = now() - interval '1 second' WHERE id = $1`,
-      [pairing.id],
+    await pastItsTime(pairing.id);
+    const polled = await withoutOrg(judged, (tx) =>
+      pairingPoll(tx, {
+        pairingId: pairing.id,
+        pollingTokenHash: pairing.token,
+        maxWrongAttempts: 5,
+      }),
     );
-    const message = await refusalOf(
+    expect(polled.outcome).toBe('expired');
+    expect(refusals.take()).toEqual([]);
+    expect(await status(pairing.id)).toBe('expired');
+  });
+
+  it('pending sessions past their time, marked expired by a pairing request that is then refused', async () => {
+    // sec.pairing_create expires every pending session whose time has passed first, also when
+    // it then creates none: here the client is over its limit (rate_limited).
+    const clientKey = `audit-debt-${randomUUID()}`;
+    const create = (tx: Parameters<Parameters<typeof withoutOrg>[1]>[0]) =>
+      pairingCreate(tx, {
+        code: pairingCode(),
+        pollingTokenHash: hash(),
+        clientKey,
+        ttlSeconds: 600,
+        maxSessionsPerClient: 1,
+        windowSeconds: 600,
+      });
+    const first = await withoutOrg(testSql, create);
+    if (first.outcome !== 'created') throw new Error(`pairing not created: ${first.outcome}`);
+    await pastItsTime(first.pairingId);
+    expect((await withoutOrg(judged, create)).outcome).toBe('rate_limited');
+    expect(refusals.take()).toEqual([]);
+    expect(await status(first.pairingId)).toBe('expired');
+  });
+
+  it('but not a pairing session created, locked or ended before its time without its audit row', async () => {
+    // A session created with no pairing.create row.
+    const created = await refusalOf(
       withoutOrg(judged, (tx) =>
-        pairingPoll(tx, {
-          pairingId: pairing.id,
-          pollingTokenHash: pairing.token,
-          maxWrongAttempts: 5,
+        pairingCreate(tx, {
+          code: pairingCode(),
+          pollingTokenHash: hash(),
+          clientKey: `audit-debt-${randomUUID()}`,
+          ttlSeconds: 600,
+          maxSessionsPerClient: 5,
+          windowSeconds: 600,
         }),
       ),
     );
-    expect(message).toContain('public.pairing_session (UPDATE)');
+    expect(created).toContain('public.pairing_session (INSERT)');
+
+    // The lock of a session past its time changes more than its status.
+    const locked = await newPairing();
+    await pastItsTime(locked.id);
+    const locking = await refusalOf(
+      withoutOrg(judged, (tx) =>
+        pairingPoll(tx, { pairingId: locked.id, pollingTokenHash: hash(), maxWrongAttempts: 1 }),
+      ),
+    );
+    expect(locking).toContain('public.pairing_session (UPDATE)');
+    expect(await status(locked.id)).toBe('pending');
+
+    // A claim ended before its expiry: the revocation of the screen's player audits it.
+    const claimed = await newPairing();
+    await asDefiner(
+      migrator,
+      `UPDATE public.pairing_session
+       SET status = 'claimed', org_id = $2, display_id = $3, claimed_at = now()
+       WHERE id = $1`,
+      [claimed.id, org.orgId, org.displayId],
+    );
+    const ending = await refusalOf(
+      withOrg(judged, org.orgId, (tx) => pairingCancelClaims(tx, org.displayId)),
+    );
+    expect(ending).toContain('public.pairing_session (UPDATE)');
+    expect(await status(claimed.id)).toBe('claimed');
+    // Left as no other case finds it: cancelled, with the row the revocation writes.
+    await withOrg(judged, org.orgId, async (tx) => {
+      expect(await pairingCancelClaims(tx, org.displayId)).toEqual([claimed.id]);
+      await auditScoped(tx, {
+        ...AUDIT,
+        action: 'player.revoke',
+        objectType: 'display',
+        detail: {
+          reason: 'operator',
+          displayId: org.displayId,
+          hadActiveRegistration: false,
+          cancelledPairingIds: [claimed.id],
+        },
+      });
+    });
+  });
+
+  it('nor an expiry by time that changes another column with the status', async () => {
+    // No sec.* function today expires a session and changes anything else in one UPDATE, and
+    // tinnox_app has no privilege on the table, so a throwaway function of tinnox_definer makes
+    // the write: an expiry alone, as the pairing functions make it, or one that also changes the
+    // client key. It is dropped before the test ends, so no later invariant check sees it.
+    await migrator.query(
+      `BEGIN;
+       SET LOCAL ROLE tinnox_definer;
+       CREATE FUNCTION sec.guard_probe_expire(p_id uuid, p_touch boolean) RETURNS void
+         LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+         UPDATE public.pairing_session
+         SET status = 'expired',
+             client_key = CASE WHEN p_touch THEN client_key || '-touched' ELSE client_key END
+         WHERE id = p_id
+       $$;
+       REVOKE ALL ON FUNCTION sec.guard_probe_expire(uuid, boolean) FROM PUBLIC;
+       GRANT EXECUTE ON FUNCTION sec.guard_probe_expire(uuid, boolean) TO tinnox_app;
+       RESET ROLE;
+       COMMIT`,
+    );
+    const expire = async (id: string, touch: boolean): Promise<void> => {
+      const client = await judged.connect();
+      try {
+        await client.query('SELECT sec.guard_probe_expire($1, $2)', [id, touch]);
+      } finally {
+        client.release();
+      }
+    };
+    try {
+      const alone = await newPairing();
+      await pastItsTime(alone.id);
+      await expire(alone.id, false);
+      expect(refusals.take()).toEqual([]);
+      expect(await status(alone.id)).toBe('expired');
+
+      const touched = await newPairing();
+      await pastItsTime(touched.id);
+      const touching = await refusalOf(expire(touched.id, true));
+      expect(touching).toContain('public.pairing_session (UPDATE)');
+      expect(await status(touched.id)).toBe('pending');
+    } finally {
+      await migrator.query(
+        `BEGIN;
+         SET LOCAL ROLE tinnox_definer;
+         DROP FUNCTION sec.guard_probe_expire(uuid, boolean);
+         RESET ROLE;
+         COMMIT`,
+      );
+    }
   });
 });
 

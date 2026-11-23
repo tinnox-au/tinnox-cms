@@ -104,6 +104,30 @@ describe('a change by a job on changeOrg (SCR-34)', () => {
     ).rejects.toThrow(/^changeOrg: the change returned an empty list of audit events/);
   });
 
+  it('lets the alert check alone close an episode without an e-mail and no audit row (step 20 ruling, CMS-36)', async () => {
+    const { pool, transactions } = fakePool();
+    await changeAsJob(pool, 'display_alerts', ORG, async (tx) => {
+      await tx.query('DELETE DISPLAY ALERT');
+      return { value: 1, audit: unaudited('alert_closed_silently') };
+    });
+    expect(transactions).toEqual([['BEGIN', SET_ORG, 'DELETE DISPLAY ALERT', 'COMMIT']]);
+    await expect(
+      changeAsJob(pool, 'media_pipeline', ORG, () =>
+        Promise.resolve({ value: 1, audit: unaudited('alert_closed_silently') }),
+      ),
+    ).rejects.toThrow(
+      "changeOrg: the change returned unaudited('alert_closed_silently'), but the row of media_pipeline in JOB_AUDIT (apps/api/src/route-audit.ts) does not grant it.",
+    );
+    // Nor does the alert check take the reasons of the pairing routes or the seed.
+    for (const reason of ['pairing_expired_by_time', 'development_seed'] as const) {
+      await expect(
+        changeAsJob(pool, 'display_alerts', ORG, () =>
+          Promise.resolve({ value: 1, audit: unaudited(reason) }),
+        ),
+      ).rejects.toThrow(`unaudited('${reason}'), but the row of display_alerts in JOB_AUDIT`);
+    }
+  });
+
   it('refuses a job that has no row, before any statement', async () => {
     const { pool, transactions } = fakePool();
     await expect(
@@ -120,10 +144,13 @@ describe('a change by a job on changeOrg (SCR-34)', () => {
     expect(Object.keys(JOB_AUDIT).sort()).toEqual(['display_alerts', 'media_pipeline']);
     for (const name of Object.keys(JOB_AUDIT) as JobName[]) {
       // Made by issueAuditStatement, as changePreOrg and changeOrgAsMigrator require (review).
+      const row = JOB_AUDIT[name];
       expect(jobStatement(name)).toEqual(
         issueAuditStatement({
-          stated: JOB_AUDIT[name].audit,
+          stated: row.audit,
           statedIn: `the row of ${name} in JOB_AUDIT (apps/api/src/route-audit.ts)`,
+          // The grants too: the alert check's silent close (step 20 ruling, CMS-36).
+          ...('grants' in row ? { grants: row.grants } : {}),
         }),
       );
     }

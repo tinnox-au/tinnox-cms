@@ -95,19 +95,24 @@ export type NoAuditReason = keyof typeof NO_AUDIT_REASONS;
  *  - a reason in this list alone is what one run found. A change may give `nothing_changed` or
  *    `idempotent_replay` whatever its route states, because a route that audits its changes
  *    still has runs that change nothing;
- *  - `counter_under_threshold` (GRANTED_UNAUDITED_REASONS) is a run that did change something
- *    and is deliberately not audited, so a change may give it only when its route grants it:
- *    the `grants` of the route's entry in OTHER_ROUTE_AUDIT (apps/api/src/route-audit.ts),
- *    which only the pairing poll has;
+ *  - a reason of GRANTED_UNAUDITED_REASONS is a run that did change something and is
+ *    deliberately not audited, so a change may give it only where it is granted: the `grants`
+ *    of a route's entry in OTHER_ROUTE_AUDIT or of a job's row in JOB_AUDIT
+ *    (apps/api/src/route-audit.ts), or, for `development_seed`, the permit of an offline tool
+ *    whose statement names no action (`changeOrgAsMigrator` of @tinnox/db/migrate);
  *  - a reason in `NO_AUDIT_REASONS` alone (`read_only`, `login_state`) is never given by a
  *    change, and `unaudited` does not take it: a route that only reads opens `readOrg`, whose
  *    transaction refuses a write, and the login state is stored through the sec.* wrappers
  *    that take an `Autocommit`, outside any change (D2).
  *
- * No reason says "this was changed and deliberately not audited" beyond the two D3 names here
- * (telemetry, a counter under its threshold). A path like that which D3 does not name has no
- * reason to give until it is decided: it is audited, or D3 gains the exemption and this list
- * its reason.
+ * Two reasons say "this was changed and deliberately not audited" because D3 says so
+ * (telemetry, a counter under its threshold). Three more record what three writes do today,
+ * by the ruling of adoption plan step 20 (made under the plan's delegation, DEC-38) that the
+ * refactor does not change what is audited: `alert_closed_silently`, `pairing_expired_by_time`
+ * and `development_seed`. They are not a judgement that the writes need no audit row; that is
+ * still open (status card CMS-36 for the first two). A decision to audit one deletes its
+ * reason here, and its job or route states the action instead. Any other path like that has
+ * no reason to give until it is decided: it is audited, or this list gains its reason.
  */
 export const UNAUDITED_REASONS = {
   nothing_changed:
@@ -117,6 +122,17 @@ export const UNAUDITED_REASONS = {
   telemetry: NO_AUDIT_REASONS.telemetry,
   counter_under_threshold:
     'this run only counted a refused attempt that is still under its threshold: the wrong polling token of a pairing poll. The attempt that reaches the threshold locks the session and is audited as pairing.lock (D3)',
+  // Today's behaviour, kept by the step 20 ruling; CMS-36 decides whether it is audited instead.
+  // One reason per write, not one for "ended by time or by no one", so a search for either
+  // finds that write alone and a decision on one deletes only its own reason.
+  alert_closed_silently:
+    'this run of the alert check closed an offline episode without an e-mail (the screen reports again with the back-online e-mail off, alerts were switched off, or the screen was unpaired or re-paired): the DELETE on display_alert, with no actor. Recorded as today (docs/portal-v2/stage-c-alerts.md section 9 rows 7 and 22); whether it is audited is open (CMS-36)',
+  // Today's behaviour, kept by the step 20 ruling; CMS-36 decides whether it is audited instead.
+  pairing_expired_by_time:
+    'this run marked expired a pairing session whose time had passed: sec.pairing_create does it for every pending session, sec.pairing_poll for the one it polls. Only the status changes, by the passing of time and with no actor. Recorded as today; whether it is audited is open (CMS-36)',
+  // Today's behaviour, kept by the step 20 ruling; a later decision may audit the seed instead.
+  development_seed:
+    'this run of the development seed (scripts/seed.ts) wrote synthetic development data: its organisations, sites and members, under fixed ids. It runs as tinnox_migrator against a development or test database, never production. Recorded as today; a later decision may audit it',
 } as const;
 export type UnauditedReason = keyof typeof UNAUDITED_REASONS;
 
@@ -131,11 +147,15 @@ export type StatedUnauditedReason = UnauditedReason & NoAuditReason;
 
 /**
  * The reasons of this list alone that are still a write left unaudited: a change gives one only
- * when its route's statement grants it (the `grants` of an entry in OTHER_ROUTE_AUDIT), so a
- * route that does not count attempts cannot use it to skip an audit row. ./audit.test.ts pins it.
+ * where it is granted (see `UNAUDITED_REASONS`), so a route, job or tool that does not make
+ * that write cannot use it to skip an audit row. ./audit.test.ts pins it, and
+ * apps/api/src/route-audit.test.ts which statement grants which.
  */
 export const GRANTED_UNAUDITED_REASONS = [
   'counter_under_threshold',
+  'alert_closed_silently',
+  'pairing_expired_by_time',
+  'development_seed',
 ] as const satisfies readonly Exclude<UnauditedReason, NoAuditReason>[];
 export type GrantedUnauditedReason = (typeof GRANTED_UNAUDITED_REASONS)[number];
 

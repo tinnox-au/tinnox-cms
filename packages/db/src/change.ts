@@ -65,8 +65,10 @@ export interface Unaudited {
  * UNAUDITED_REASONS (packages/contracts/src/audit.ts, D3): `nothing_changed` when it found
  * nothing to change, `idempotent_replay` when an earlier request already did the work, and
  * `telemetry` or `counter_under_threshold` when what it stored is one of the things D3 leaves
- * unaudited, which only a route that states or grants the reason may give. A new reason is a
- * decision, recorded in that list. `read_only` is not one: a read
+ * unaudited, which only a route that states or grants the reason may give. The three writes the
+ * step 20 ruling leaves as they are today (`alert_closed_silently`, `pairing_expired_by_time`,
+ * `development_seed`) are granted the same way, each to the job, routes or tool that makes it.
+ * A new reason is a decision, recorded in that list. `read_only` is not one: a read
  * belongs in `readOrg`, whose transaction refuses a write. Nothing checks at run time that a
  * `nothing_changed` run wrote nothing (see the head of this file).
  */
@@ -87,6 +89,9 @@ const GIVEN_BY = {
   idempotent_replay: 'any',
   telemetry: 'stated',
   counter_under_threshold: 'granted',
+  alert_closed_silently: 'granted',
+  pairing_expired_by_time: 'granted',
+  development_seed: 'granted',
 } as const satisfies {
   readonly [R in UnauditedReason]: R extends StatedUnauditedReason
     ? 'stated'
@@ -144,8 +149,10 @@ export interface StatementTerms {
   /** Where that is written, for the refusal: "the row of POST /api/apps in ROUTE_PERMISSIONS". */
   readonly statedIn: string;
   /**
-   * The reasons of GRANTED_UNAUDITED_REASONS the route lets one run give: the `grants` of its
-   * entry in OTHER_ROUTE_AUDIT (apps/api/src/route-audit.ts). None when absent.
+   * The reasons of GRANTED_UNAUDITED_REASONS the route, job or tool lets one run give: the
+   * `grants` of its entry in OTHER_ROUTE_AUDIT or its row of JOB_AUDIT
+   * (apps/api/src/route-audit.ts), or what `changeOrgAsMigrator` adds for the seed. None when
+   * absent.
    */
   readonly grants?: readonly GrantedUnauditedReason[];
 }
@@ -299,7 +306,7 @@ async function record<T>(
   }
   if (givenBy === 'granted' && !(held.grants ?? []).some((granted) => granted === reason)) {
     throw new Error(
-      `${opener}: the change returned unaudited('${String(reason)}'), but ${statedIn} does not grant it. '${String(reason)}' leaves a write unaudited on purpose, which only a route that counts attempts may do: its entry in OTHER_ROUTE_AUDIT (apps/api/src/route-audit.ts) grants the reason (D3). Return the audit event of what changed, or unaudited('nothing_changed') when this run changed nothing. Nothing was committed.`,
+      `${opener}: the change returned unaudited('${String(reason)}'), but ${statedIn} does not grant it. '${String(reason)}' leaves a write unaudited on purpose, which only the route, job or tool that makes that write may do: its entry in OTHER_ROUTE_AUDIT or its row of JOB_AUDIT (apps/api/src/route-audit.ts) grants the reason (D3; UNAUDITED_REASONS in packages/contracts/src/audit.ts says who makes each). Return the audit event of what changed, or unaudited('nothing_changed') when this run changed nothing. Nothing was committed.`,
     );
   }
   return change.value;

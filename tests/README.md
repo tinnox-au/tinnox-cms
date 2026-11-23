@@ -98,7 +98,15 @@ ran, also when the route answered 500 or product code caught the error.
 - **Exempt, by D3**: the tables `heartbeat_log`, `display_delivery` and `login_state`; the columns
   `session.last_seen_at` and `pairing_session.failed_attempts`; writes made inside the three
   purge functions. The lists, with their reasons, are at the top of the guard's file.
-- **Not judged**: `tinnox_migrator` and the superuser, which is how test helpers arrange data.
+- **Exempt by shape, by the step 20 ruling** (DEC-38; whether they are audited is open, CMS-36):
+  a `DELETE` on `display_alert`, which is the alert check closing an offline episode without an
+  e-mail (`alert_closed_silently`); and an `UPDATE` of `pairing_session` that changes only its
+  `status`, from pending or claimed to expired, on a row whose time has passed, which is
+  `sec.pairing_create` or `sec.pairing_poll` marking it expired (`pairing_expired_by_time`).
+  Every other write on those two tables is judged. The list, `EXEMPT_SHAPES`, is in the
+  guard's file with its reasons.
+- **Not judged**: `tinnox_migrator` and the superuser, which is how test helpers arrange data,
+  and how the development seed writes (its `development_seed` reason has no backstop here).
   A test that must write as `tinnox_app` itself (to try row-level security, a grant, a `sec.*`
   function, or to arrange what only that role can) uses a connection named by
   `unjudgedSql(why)`, and says what its SQL is: `appPool(why)` in `packages/db/test/support.ts`,
@@ -108,11 +116,6 @@ ran, also when the route answered 500 or product code caught the error.
 - **One path is unaudited by decision**: the sign-out fallback (`sessionRevokeUnaudited`, the
   CX-01 residual). Its test says so with `whileUnauditedAllowed(...)`, which lets one table
   through for the length of one call.
-- **Two writes wait for Michael's decision** (step 16 report), and the guard refuses both: the
-  alert check closing an offline episode without an e-mail (`docs/portal-v2/stage-c-alerts.md`
-  section 9 row 7 says silently, D3 audits every change to tenant state), and a pairing session
-  past its expiry being marked expired by the next poll. Only the product tests that make them
-  let them pass, with `whileUnauditedAllowed` and a reason that starts "undecided".
 
 The browser suite's database (`tinnox_e2e_test`) does not get the guard.
 

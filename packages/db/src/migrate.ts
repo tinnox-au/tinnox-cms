@@ -12,6 +12,7 @@ import {
   termsOfStatement,
   type AuditStatement,
   type Change,
+  type StatedAudit,
 } from './change.ts';
 import { errorField } from './error-field.ts';
 import { mintOrgId } from './org-id.ts';
@@ -98,6 +99,18 @@ export async function connectMigrator(
 }
 
 /**
+ * A tool statement that names no audit action: the seed's, never a provisioning command's (each
+ * names at least one, PROVISION_COMMANDS in scripts/lib/provision.ts). This reads the shape of
+ * the statement, not who issued it: refusalStatement of apps/api/src/route-audit.ts also issues
+ * statements with no action, and only the lint that keeps this entry out of the API (AG-1.10)
+ * stops one reaching changeOrgAsMigrator. The seed has no statement of its own yet; when
+ * scripts/seed.ts moves to the change API, it gets a named issuer that grants development_seed
+ * itself, and this inference goes.
+ */
+const seedsOnly = (stated: StatedAudit): boolean =>
+  'actions' in stated && stated.actions.length === 0;
+
+/**
  * A change for an organisation by an offline tool, with its audit rows (adoption plan step 20;
  * SCR-34): `changeOrg` of the runtime entry, with the permit this entry issues to the
  * migrator's connection. A tool has no operator whose role could be read again, so what stands
@@ -110,7 +123,8 @@ export async function connectMigrator(
  * of scripts/lib/provision.ts, the `audits` of the command's row in PROVISION_COMMANDS: a tool
  * cannot write a statement in place), and the change is refused before COMMIT when it
  * recorded an action the statement does not name. `fn` returns `{ value, audit }` and writes no
- * audit row itself.
+ * audit row itself. A change under a statement that names no action, which is what the seed
+ * states, may give `unaudited('development_seed')`; no other change may.
  */
 export async function changeOrgAsMigrator<T>(
   pool: MigratorPool,
@@ -124,8 +138,16 @@ export async function changeOrgAsMigrator<T>(
       'changeOrgAsMigrator requires the pool that connectMigrator returned: call connectMigrator(connectionString, { applicationName }) from @tinnox/db/migrate and pass that pool. The API has no migrator connection: an operator route calls changeAsOperator(ctx, request, fn) (apps/api/src/auth/permissions.ts)',
     );
   }
+  const terms = termsOfStatement('changeOrgAsMigrator', statement);
   const permit = issueWritePermit({
-    ...termsOfStatement('changeOrgAsMigrator', statement),
+    ...terms,
+    // The step 20 ruling (DEC-38) keeps the seed's synthetic data unaudited, as today, and
+    // names it development_seed. Only this permit grants it, so the API, which cannot import
+    // this entry, never can; and only for a statement that names no action, which is what the
+    // seed states, so no provisioning command (each states the actions it writes) can either.
+    ...(seedsOnly(terms.stated)
+      ? { grants: [...(terms.grants ?? []), 'development_seed' as const] }
+      : {}),
     // Nothing to read again: the connection was checked when it was opened.
     recheck: () => Promise.resolve(),
   });

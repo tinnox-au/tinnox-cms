@@ -9,7 +9,6 @@
 import { randomBytes } from 'node:crypto';
 import { localWallClock, type AlertRecipientDto } from '@tinnox/contracts';
 import { alertRecipientByTokenHash, poolAsTx, sha256 } from '@tinnox/db';
-import { whileUnauditedAllowed } from '@tinnox/db/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   addAlertAddress,
@@ -23,7 +22,6 @@ import {
   createOrg,
   heartbeatBody,
   lastConfirmationToken,
-  migratorUrl,
   pairPlayer,
   PORTAL_ORIGIN,
   sendHeartbeat,
@@ -80,22 +78,10 @@ describe('e-mail alerts for screens', () => {
       t.advanceClock(-DELAY_MS);
     }
   }
+  // A close without an e-mail writes no audit row, as today (alert_closed_silently, the step 20
+  // ruling; open on CMS-36): the audit-debt guard lets its DELETE through (EXEMPT_SHAPES).
   async function check(): Promise<void> {
     expect((await checkAlerts(t)).failed).toBe(0);
-  }
-  /**
-   * The check where it closes an episode without an e-mail, which writes no audit row. Undecided,
-   * so the audit-debt guard refuses it everywhere else: docs/portal-v2/stage-c-alerts.md section 9
-   * row 7 closes the episode silently by design, and D3 audits every successful change to tenant
-   * state. The step 16 report puts it to Michael; until he decides, only these calls let it pass.
-   */
-  async function checkClosingSilently(): Promise<void> {
-    await whileUnauditedAllowed(
-      migratorUrl(),
-      'display_alert',
-      'undecided (step 16 report): the alert check closes an episode without an e-mail and writes no audit row (stage-c-alerts.md section 9 row 7), which D3 does not exempt',
-      check,
-    );
   }
   const openEpisodes = async (displayId: string) => {
     const client = await appClient('reads the open episodes of a screen, as the runtime role');
@@ -170,7 +156,7 @@ describe('e-mail alerts for screens', () => {
       await check();
       expect(mailFor('Alert repaired')).toHaveLength(1);
       await pairPlayer(t, owner, screen.id);
-      await checkClosingSilently();
+      await check();
     });
     expect(mailFor('Alert repaired')).toHaveLength(1);
     expect(await openEpisodes(screen.id)).toBe(0);
@@ -214,7 +200,7 @@ describe('e-mail alerts for screens', () => {
     await later(async () => {
       await check();
       await report(screen.id, screen.player);
-      await checkClosingSilently();
+      await check();
     });
     expect(mailFor('Alert no recovery').map((m) => m.subject)).toEqual([
       'Screen not reporting: Alert no recovery',
@@ -238,7 +224,7 @@ describe('e-mail alerts for screens', () => {
       });
       expect(off.status).toBe(200);
       expect(await off.json()).toMatchObject({ alertOfflineMinutes: null, alertBackOnline: false });
-      await checkClosingSilently();
+      await check();
       await report(screen.id, screen.player);
       await check();
     });

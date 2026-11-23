@@ -18,9 +18,12 @@ describe('the reasons for writing no audit row (D3)', () => {
   it('pins what a route may state, and what one run of a change may say', () => {
     expect(Object.keys(NO_AUDIT_REASONS).sort()).toEqual(['login_state', 'read_only', 'telemetry']);
     expect(Object.keys(UNAUDITED_REASONS).sort()).toEqual([
+      'alert_closed_silently',
       'counter_under_threshold',
+      'development_seed',
       'idempotent_replay',
       'nothing_changed',
+      'pairing_expired_by_time',
       'telemetry',
     ]);
     for (const [reason, why] of [
@@ -51,7 +54,12 @@ describe('the reasons for writing no audit row (D3)', () => {
   it('a write left unaudited on purpose is granted by its route, not open to every change (step 20 review)', () => {
     // Every reason that is not what one run found (nothing changed, a replay) is held to the
     // route: by the route's own statement (telemetry) or by its grant (a counter).
-    expect([...GRANTED_UNAUDITED_REASONS]).toEqual(['counter_under_threshold']);
+    expect([...GRANTED_UNAUDITED_REASONS]).toEqual([
+      'counter_under_threshold',
+      'alert_closed_silently',
+      'pairing_expired_by_time',
+      'development_seed',
+    ]);
     const open = Object.keys(UNAUDITED_REASONS).filter(
       (reason) =>
         !(STATED_UNAUDITED_REASONS as readonly string[]).includes(reason) &&
@@ -68,5 +76,19 @@ describe('the reasons for writing no audit row (D3)', () => {
     expectTypeOf<'nothing_changed'>().not.toExtend<NoAuditReason>();
     expectTypeOf<'idempotent_replay'>().not.toExtend<NoAuditReason>();
     expectTypeOf<'counter_under_threshold'>().not.toExtend<NoAuditReason>();
+    // Nor a route that it closes, expires or seeds: those are granted, never stated.
+    expectTypeOf<'alert_closed_silently'>().not.toExtend<NoAuditReason>();
+    expectTypeOf<'pairing_expired_by_time'>().not.toExtend<NoAuditReason>();
+    expectTypeOf<'development_seed'>().not.toExtend<NoAuditReason>();
+  });
+
+  it('the three writes the step 20 ruling leaves unaudited (DEC-38) name their write and the open decision', () => {
+    // Today's behaviour, recorded so it can be searched for; not a decision that it needs no
+    // audit row (CMS-36 for the first two).
+    expect(UNAUDITED_REASONS.alert_closed_silently).toMatch(/display_alert.*CMS-36/);
+    expect(UNAUDITED_REASONS.pairing_expired_by_time).toMatch(
+      /sec\.pairing_create.*sec\.pairing_poll.*CMS-36/,
+    );
+    expect(UNAUDITED_REASONS.development_seed).toMatch(/scripts\/seed\.ts.*tinnox_migrator/);
   });
 });

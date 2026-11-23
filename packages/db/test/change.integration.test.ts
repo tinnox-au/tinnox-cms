@@ -336,6 +336,30 @@ describe('changeOrgAsMigrator against the database (AG-3.1, SCR-34)', () => {
     expect(await committed('Offline and unstated')).toEqual({ folders: 0, audited: [] });
   });
 
+  it('takes the seed’s synthetic data unaudited only under a statement that names no action (step 20 ruling, DEC-38)', async () => {
+    // The seed states no action: its change may say development_seed, and commits no row.
+    const SEED = issueAuditStatement({
+      stated: { actions: [] },
+      statedIn: 'the development seed (test)',
+    });
+    await changeOrgAsMigrator(pool, org.orgId, SEED, async (tx) => {
+      await newFolder(tx, 'Seeded');
+      return { value: undefined, audit: unaudited('development_seed') };
+    });
+    expect(await committed('Seeded')).toEqual({ folders: 1, audited: [] });
+    // A provisioning command states the actions it writes, so it cannot say it.
+    const error = await rejection(
+      changeOrgAsMigrator(pool, org.orgId, PROVISIONING, async (tx) => {
+        await newFolder(tx, 'Provisioned as seed');
+        return { value: undefined, audit: unaudited('development_seed') };
+      }),
+    );
+    expect((error as Error).message).toMatch(
+      /^changeOrg: the change returned unaudited\('development_seed'\), but the audits of the command in PROVISION_COMMANDS \(test\) does not grant it\./,
+    );
+    expect(await committed('Provisioned as seed')).toEqual({ folders: 0, audited: [] });
+  });
+
   it('refuses the runtime pool, which connectMigrator never checked', async () => {
     await expect(
       changeOrgAsMigrator(judged as never, org.orgId, PROVISIONING, async (tx) => {

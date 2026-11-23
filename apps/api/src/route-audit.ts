@@ -54,6 +54,19 @@ export const audits = (...actions: [AuditAction, ...AuditAction[]]): RouteAudit 
 /** The route writes no audit row, for a reason of NO_AUDIT_REASONS. */
 export const noAudit = (none: NoAuditReason): RouteAudit => Object.freeze({ none });
 
+/**
+ * The reasons of GRANTED_UNAUDITED_REASONS (packages/contracts/src/audit.ts) a route outside the
+ * operator table may grant: what the pairing routes count or mark. The others are a job's
+ * (JobGrant) or the seed's, which only the offline permit grants (changeOrgAsMigrator of
+ * @tinnox/db/migrate), so no route can name them. route-audit.test.ts pins who grants what.
+ */
+export type RouteGrant = Extract<
+  GrantedUnauditedReason,
+  'counter_under_threshold' | 'pairing_expired_by_time'
+>;
+/** The reasons of GRANTED_UNAUDITED_REASONS a job may grant: the alert check's silent close. */
+export type JobGrant = Extract<GrantedUnauditedReason, 'alert_closed_silently'>;
+
 /** A route outside the operator table: its own audit, and the refusals its guard records. */
 export interface OtherRouteAudit {
   readonly audit: RouteAudit;
@@ -64,7 +77,7 @@ export interface OtherRouteAudit {
    * (packages/contracts/src/audit.ts): a change of this route may return unaudited(reason) for
    * these, and a change of any other route may not (D3).
    */
-  readonly grants?: readonly GrantedUnauditedReason[];
+  readonly grants?: readonly RouteGrant[];
 }
 
 /**
@@ -96,7 +109,7 @@ const NO_GUARD: readonly AuditAction[] = Object.freeze([]);
 const other = (
   audit: RouteAudit,
   guard: readonly AuditAction[] = NO_GUARD,
-  grants?: readonly GrantedUnauditedReason[],
+  grants?: readonly RouteGrant[],
 ): OtherRouteAudit =>
   Object.freeze(grants === undefined ? { audit, guard } : { audit, guard, grants });
 
@@ -118,14 +131,22 @@ export const OTHER_ROUTE_AUDIT: Readonly<Record<string, OtherRouteAudit>> = Obje
 
   [`POST ${ROUTES.alertRecipientConfirm}`]: other(audits('alert_recipient.confirm')),
 
-  [`POST ${ROUTES.playerPairing}`]: other(audits('pairing.create')),
+  // sec.pairing_create first marks expired every pending session whose time has passed, also
+  // when this request is then rate-limited and creates none: that mark is not audited, as
+  // today (pairing_expired_by_time; the step 20 ruling, CMS-36).
+  [`POST ${ROUTES.playerPairing}`]: other(
+    audits('pairing.create'),
+    NO_GUARD,
+    Object.freeze(['pairing_expired_by_time'] as const),
+  ),
   // A GET that changes state: the poll that collects the credential completes the pairing, and
   // the wrong polling token that reaches the limit locks the session. A wrong token under the
-  // limit is only counted, and that count is not audited (D3).
+  // limit is only counted, and that count is not audited (D3). A poll of a session whose time
+  // has passed marks it expired, unaudited as today (the step 20 ruling, CMS-36).
   [`GET ${ROUTES.playerPairingPollPattern}`]: other(
     audits('pairing.complete', 'pairing.lock'),
     NO_GUARD,
-    Object.freeze(['counter_under_threshold'] as const),
+    Object.freeze(['counter_under_threshold', 'pairing_expired_by_time'] as const),
   ),
   // Not in ROUTES: the player gives up its own credential (docs/player-protocol-v1.md).
   [`DELETE ${PLAYER_PREFIX}/registration`]: other(audits('player.revoke'), DEVICE_GUARD),
@@ -159,6 +180,14 @@ export const OFF_ROUTE_AUDIT: Readonly<Partial<Record<AuditAction, string>>> = O
     'migration 0012 alone, once, for claims accepted before migration 0010; it stays in the list because databases that ran it hold the rows',
 });
 
+/** A row of JOB_AUDIT. */
+interface JobAudit {
+  readonly file: string;
+  readonly audit: RouteAudit;
+  /** As the `grants` of OtherRouteAudit: the writes this job leaves unaudited on purpose. */
+  readonly grants?: readonly JobGrant[];
+}
+
 /**
  * What each job that runs with no request audits: the alert check and the media pipeline. Its
  * actions are the ones OFF_ROUTE_AUDIT gives to the job's file (route-audit.test.ts), and the
@@ -169,27 +198,32 @@ export const JOB_AUDIT = Object.freeze({
   display_alerts: Object.freeze({
     file: 'apps/api/src/alerts.ts',
     audit: audits('display.offline_alert', 'display.online_alert'),
+    // An episode closed without an e-mail is not audited, as today (alert_closed_silently; the
+    // step 20 ruling, CMS-36; docs/portal-v2/stage-c-alerts.md section 9 rows 7 and 22).
+    grants: Object.freeze(['alert_closed_silently'] as const),
   }),
   media_pipeline: Object.freeze({
     file: 'apps/api/src/media/pipeline.ts',
     audit: audits('media.validate'),
   }),
-} satisfies Record<string, { readonly file: string; readonly audit: RouteAudit }>);
+} satisfies Record<string, JobAudit>);
 export type JobName = keyof typeof JOB_AUDIT;
 
 /** The statement a change of the job `name` is held to. */
 export function jobStatement(name: JobName): AuditStatement {
   // A name the type checker did not read reaches no row.
-  const row = own<{ readonly audit: RouteAudit }>(JOB_AUDIT, name);
+  const row = own<JobAudit>(JOB_AUDIT, name);
   if (row === undefined) {
     throw new Error(
       `no job is called ${String(name)}: a job that changes an organisation gets a row in JOB_AUDIT (apps/api/src/route-audit.ts) with the audit actions it writes, and each action its case in tests/integration/audit-failure.test.ts`,
     );
   }
-  return issueAuditStatement({
-    stated: row.audit,
-    statedIn: `the row of ${name} in JOB_AUDIT (apps/api/src/route-audit.ts)`,
-  });
+  const statedIn = `the row of ${name} in JOB_AUDIT (apps/api/src/route-audit.ts)`;
+  return issueAuditStatement(
+    row.grants === undefined
+      ? { stated: row.audit, statedIn }
+      : { stated: row.audit, statedIn, grants: row.grants },
+  );
 }
 
 /** A row of the operator table, as far as this module reads it. */

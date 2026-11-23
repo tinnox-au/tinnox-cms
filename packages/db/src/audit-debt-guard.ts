@@ -10,7 +10,8 @@
  *
  * How, with no table of its own and no privilege for anybody:
  *  - audit_debt_note, a row trigger on every audited table, writes the table into the
- *    transaction-local setting audit_debt.owed, unless the write is one D3 exempts;
+ *    transaction-local setting audit_debt.owed, unless the write is one D3 exempts or one of
+ *    the shapes the step 20 ruling leaves unaudited (EXEMPT_SHAPES);
  *  - audit_debt_paid, a row trigger on audit_event, sets audit_debt.paid;
  *  - audit_debt_settle, a deferred constraint trigger on every audited table, runs at COMMIT and
  *    raises when something is owed and nothing was paid.
@@ -19,7 +20,8 @@
  *
  * Who is judged: sessions that log in as tinnox_app, the API's own pool in the test harness
  * among them. Not judged: tinnox_migrator and the superuser (test helpers that arrange data, the
- * offline tools, the incident scripts), told apart by session_user; and a tinnox_app connection
+ * offline tools, the incident scripts), told apart by session_user, so the development seed's
+ * unaudited('development_seed') has no backstop here; and a tinnox_app connection
  * whose application_name is TEST_SQL_APPLICATION_NAME, which is how a test says "this SQL is the
  * test's own, not product code" when it has to act as the runtime role (the tests of row-level
  * security, grants and the sec.* functions). Tests get that name only from unjudgedSql(why), so
@@ -119,6 +121,35 @@ export const EXEMPT_FUNCTIONS: Readonly<Record<string, string>> = {
   'sec.heartbeat_log_purge': 'D3: purge; deletes heartbeat history past its retention',
 };
 
+/** The shapes of write that EXEMPT_SHAPES can name; NOTE_FUNCTION has a branch for each. */
+export type ExemptShape = 'delete' | 'expired_by_time';
+
+/**
+ * The writes that change audited state and still owe nothing, by their shape, because the step
+ * 20 ruling (adoption plan, made under DEC-38) keeps them unaudited as they are today and names
+ * each with a reason of UNAUDITED_REASONS (packages/contracts/src/audit.ts). The guard is the
+ * backstop for a false reason, so it does not take the reason's word: it lets through the
+ * shape of today's write and judges every other write on the table. CMS-36 decides whether
+ * these are audited; if so, the entry goes with its reason.
+ *  - `delete`: a DELETE, whatever row it removes. An INSERT or UPDATE is judged.
+ *  - `expired_by_time`: an UPDATE that changes nothing but `status`, from 'pending' or 'claimed'
+ *    to 'expired', on a row whose `expires_at` is not later than now() (the transaction's
+ *    start, the clock the pairing functions compare with). A claim ended before its expiry, a
+ *    lock, a completion or any other column is judged.
+ */
+export const EXEMPT_SHAPES: Readonly<
+  Record<string, { readonly shape: ExemptShape; readonly why: string }>
+> = {
+  display_alert: {
+    shape: 'delete',
+    why: 'step 20 ruling (DEC-38), alert_closed_silently: the alert check (apps/api/src/alerts.ts) closes an offline episode without an e-mail and writes no audit row, as today (docs/portal-v2/stage-c-alerts.md section 9 rows 7 and 22); it is the only code that deletes from display_alert, and a close with its e-mail writes display.online_alert. Open: CMS-36',
+  },
+  pairing_session: {
+    shape: 'expired_by_time',
+    why: 'step 20 ruling (DEC-38), pairing_expired_by_time: sec.pairing_create and sec.pairing_poll mark expired a pending or claimed session whose time has passed and write no audit row, as today. Open: CMS-36',
+  },
+};
+
 /** The triggers of the guard, which carry the names of its three functions. */
 const GUARD_TRIGGERS = ['audit_debt_note', 'audit_debt_settle', 'audit_debt_paid'] as const;
 
@@ -127,7 +158,8 @@ const JUDGED = `session_user = 'tinnox_app' AND current_setting('application_nam
 
 /**
  * Notes the debt. TG_ARGV[0]: the exempt columns of the table, comma-separated, or empty.
- * TG_ARGV[1]: a pattern that matches the call stack inside a purge function.
+ * TG_ARGV[1]: a pattern that matches the call stack inside a purge function. TG_ARGV[2]: the
+ * exempt shape of the table (EXEMPT_SHAPES), or empty.
  */
 export const NOTE_FUNCTION = `
   CREATE FUNCTION public.audit_debt_note() RETURNS trigger LANGUAGE plpgsql
@@ -142,6 +174,16 @@ export const NOTE_FUNCTION = `
   BEGIN
     -- EXEMPT_COLUMNS: an UPDATE that changed nothing else.
     IF TG_OP = 'UPDATE' AND TG_ARGV[0] <> '' AND (n - exempt_columns) = (o - exempt_columns) THEN
+      RETURN NULL;
+    END IF;
+    -- EXEMPT_SHAPES: today's unaudited write on this table, and nothing else on it.
+    IF TG_ARGV[2] = 'delete' AND TG_OP = 'DELETE' THEN
+      RETURN NULL;
+    END IF;
+    IF TG_ARGV[2] = 'expired_by_time' AND TG_OP = 'UPDATE'
+       AND (n - 'status') = (o - 'status')
+       AND o->>'status' IN ('pending', 'claimed') AND n->>'status' = 'expired'
+       AND (o->>'expires_at')::timestamptz <= now() THEN
       RETURN NULL;
     END IF;
     -- EXEMPT_FUNCTIONS: with the search_path above, the stack names each function with its schema.
@@ -170,7 +212,7 @@ export const SETTLE_FUNCTION = `
     owed text := coalesce(current_setting('audit_debt.owed', true), '');
   BEGIN
     IF owed <> '' AND coalesce(current_setting('audit_debt.paid', true), '') = '' THEN
-      RAISE EXCEPTION 'audit debt: this transaction changed % as tinnox_app and commits no audit_event row. Write the audit row on the same Tx as the change, with auditScoped(tx, event) or auditUnscoped(tx, event) from @tinnox/db, so both commit or neither does (AGENTS.md section 3). Only a write that decision D3 exempts goes in the lists of packages/db/src/audit-debt-guard.ts, with D3''s reason; product code never moves to a connection the guard does not judge.', owed
+      RAISE EXCEPTION 'audit debt: this transaction changed % as tinnox_app and commits no audit_event row. Write the audit row on the same Tx as the change, with auditScoped(tx, event) or auditUnscoped(tx, event) from @tinnox/db, so both commit or neither does (AGENTS.md section 3). Only a write that a recorded decision exempts (D3, or the step 20 ruling for EXEMPT_SHAPES) goes in the lists of packages/db/src/audit-debt-guard.ts, with that decision''s reason; product code never moves to a connection the guard does not judge.', owed
         USING ERRCODE = '${AUDIT_DEBT_SQLSTATE}', CONSTRAINT = 'audit_debt';
     END IF;
     RETURN NULL;
@@ -192,6 +234,7 @@ export const CREATE_TRIGGERS = `
   DECLARE
     skipped text[] := string_to_array(current_setting('audit_debt.skipped_tables'), ',');
     exempt_columns jsonb := current_setting('audit_debt.exempt_columns')::jsonb;
+    exempt_shapes jsonb := current_setting('audit_debt.exempt_shapes')::jsonb;
     purges text := current_setting('audit_debt.purge_stack');
     audited text;
   BEGIN
@@ -205,8 +248,8 @@ export const CREATE_TRIGGERS = `
     LOOP
       EXECUTE format(
         $trigger$CREATE TRIGGER audit_debt_note AFTER INSERT OR UPDATE OR DELETE ON public.%I
-          FOR EACH ROW WHEN (${JUDGED}) EXECUTE FUNCTION public.audit_debt_note(%L, %L)$trigger$,
-        audited, coalesce(exempt_columns->>audited, ''), purges);
+          FOR EACH ROW WHEN (${JUDGED}) EXECUTE FUNCTION public.audit_debt_note(%L, %L, %L)$trigger$,
+        audited, coalesce(exempt_columns->>audited, ''), purges, coalesce(exempt_shapes->>audited, ''));
       EXECUTE format(
         $trigger$CREATE CONSTRAINT TRIGGER audit_debt_settle AFTER INSERT OR UPDATE OR DELETE ON public.%I
           DEFERRABLE INITIALLY DEFERRED
@@ -269,6 +312,7 @@ export function staleListProblems(tables: readonly string[]): string[] {
   const named = [
     ...Object.keys(EXEMPT_TABLES).map((table) => ({ table, list: 'EXEMPT_TABLES' })),
     ...Object.keys(EXEMPT_COLUMNS).map((table) => ({ table, list: 'EXEMPT_COLUMNS' })),
+    ...Object.keys(EXEMPT_SHAPES).map((table) => ({ table, list: 'EXEMPT_SHAPES' })),
   ];
   return named
     .filter(({ table }) => !tables.includes(table))
@@ -282,6 +326,7 @@ export function staleListProblems(tables: readonly string[]): string[] {
 export function guardSettings(): {
   readonly skippedTables: string;
   readonly exemptColumns: string;
+  readonly exemptShapes: string;
   readonly purgeStack: string;
 } {
   const purges = Object.keys(EXEMPT_FUNCTIONS).map((name) => name.replaceAll('.', '\\.'));
@@ -294,6 +339,9 @@ export function guardSettings(): {
           Object.keys(columns).join(','),
         ]),
       ),
+    ),
+    exemptShapes: JSON.stringify(
+      Object.fromEntries(Object.entries(EXEMPT_SHAPES).map(([table, { shape }]) => [table, shape])),
     ),
     // As PG_CONTEXT prints a frame: "PL/pgSQL function sec.pairing_purge(integer) line 9 ...".
     purgeStack: `function (${purges.join('|')})\\(`,
@@ -413,11 +461,13 @@ async function install(client: pg.ClientBase, state: GuardState): Promise<void> 
   await client.query(
     `SELECT set_config('audit_debt.skipped_tables', $1, true),
             set_config('audit_debt.exempt_columns', $2, true),
-            set_config('audit_debt.purge_stack', $3, true),
-            set_config('audit_debt.fingerprint', $4, true)`,
+            set_config('audit_debt.exempt_shapes', $3, true),
+            set_config('audit_debt.purge_stack', $4, true),
+            set_config('audit_debt.fingerprint', $5, true)`,
     [
       settings.skippedTables,
       settings.exemptColumns,
+      settings.exemptShapes,
       settings.purgeStack,
       fingerprint(state.tables),
     ],
@@ -474,11 +524,10 @@ export async function removeAuditDebtGuard(migratorUrl: string): Promise<void> {
 
 /**
  * Runs `work` while changes to `table` owe no audit row, for the test of a path that is
- * unaudited by a recorded decision (`why` names it). While a decision is still open (the step
- * 16 report put two to Michael), `why` starts "undecided" and says so; the guard itself lets
- * nothing through for them. Everything else stays judged, and the guard is whole again when
- * this returns. Not for arranging data: do that as tinnox_migrator,
- * or on a connection named by unjudgedSql.
+ * unaudited by a recorded decision (`why` names it): today the sign-out fallback, the CX-01
+ * residual. A write that is unaudited by its shape is in EXEMPT_SHAPES instead, and needs no
+ * wrapper. Everything else stays judged, and the guard is whole again when this returns. Not for
+ * arranging data: do that as tinnox_migrator, or on a connection named by unjudgedSql.
  */
 export async function whileUnauditedAllowed<T>(
   migratorUrl: string,
