@@ -265,6 +265,7 @@ from: CMS-30
 
 **Notes**
 - 24 Nov: Steps: 29 fast-check and the LYX-03 planner fix; 30 property tests; 31 twins test with a new migration; 32 model-based tests; 33 fault harness; 34 migrate-forward chain; 35 axe rules; 36 e2e workflow; 37 e2e as a required check.
+- 24 Nov: Waits on Michael: step 37 needs the ruleset on main (CMS-26) and nightly runs; step 30 needs a decision on how to treat an unknown time zone.
 
 ### CMS-33
 from: CMS-30
