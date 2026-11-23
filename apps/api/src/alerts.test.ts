@@ -44,6 +44,58 @@ describe('alert e-mails', () => {
       expect(`${mail.subject} ${mail.text}`).not.toMatch(/online|offline/i);
   });
 
+  // D23: these are the whole messages, written out by hand, so a new field (another fact about the
+  // screen, a member's name, an HTML part) fails here and is reviewed against DEC-13 and T12 of
+  // docs/security/threat-model.md section 15 before it reaches a mail provider.
+  it('D23: the e-mail when a screen stops reporting is exactly this', () => {
+    expect(offlineEmail(screen, at, 60)).toStrictEqual({
+      subject: 'Screen not reporting: Foyer wall',
+      text: [
+        'Screen: Foyer wall',
+        'Site: Head office',
+        'Organisation: Acme Pty Ltd',
+        'Last report: 21 Nov 2026, 3:04 pm (Australia/Melbourne)',
+        '',
+        'This alert was sent because the screen has not reported for 1 hour.',
+        '',
+        'Open the screen: https://portal.example/screens/00000000-0000-4000-8000-000000000003',
+        '',
+        'You receive this because this address is on the alert list of Acme Pty Ltd in TINNOX CMS. To stop, ask an Admin of that organisation to remove it.',
+        '',
+      ].join('\n'),
+    });
+  });
+
+  it('D23: the e-mail when a screen reports again is exactly this', () => {
+    expect(onlineEmail(screen, at)).toStrictEqual({
+      subject: 'Screen reporting again: Foyer wall',
+      text: [
+        'Screen: Foyer wall',
+        'Site: Head office',
+        'Reported again: 21 Nov 2026, 3:04 pm (Australia/Melbourne)',
+        '',
+        'Open the screen: https://portal.example/screens/00000000-0000-4000-8000-000000000003',
+        '',
+        'You receive this because this address is on the alert list of Acme Pty Ltd in TINNOX CMS. To stop, ask an Admin of that organisation to remove it.',
+        '',
+      ].join('\n'),
+    });
+  });
+
+  it('D23: the confirmation e-mail is exactly this', () => {
+    expect(confirmationEmail('Acme Pty Ltd', 'https://portal.example', 'TOKEN', 7)).toStrictEqual({
+      subject: 'Confirm alert e-mails from TINNOX CMS',
+      text: [
+        'Acme Pty Ltd asked to send screen alerts to this address. To agree, open this link within 7 days:',
+        '',
+        'https://portal.example/alerts/confirm#TOKEN',
+        '',
+        'If you did not expect this, ignore this e-mail and nothing more will be sent.',
+        '',
+      ].join('\n'),
+    });
+  });
+
   it('puts the confirmation token in the fragment and names nobody who added it', () => {
     const mail = confirmationEmail('Acme Pty Ltd', 'https://portal.example', 'TOKEN', 7);
     expect(mail.subject).toBe('Confirm alert e-mails from TINNOX CMS');

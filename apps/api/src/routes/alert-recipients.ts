@@ -24,7 +24,7 @@ import {
 } from '@tinnox/db';
 import type { FastifyInstance } from 'fastify';
 import { confirmationEmail, mailErrorCode } from '../alerts.ts';
-import { withOrgAllowed } from '../auth/permissions.ts';
+import { lockTimeoutAsUnavailable, withOrgAllowed } from '../auth/permissions.ts';
 import { operatorOf } from '../auth/session.ts';
 import { perMinute, type AppContext } from '../context.ts';
 import { iso } from '../db-helpers.ts';
@@ -38,10 +38,28 @@ interface RecipientRow {
   created_at: Date;
 }
 
+/**
+ * D22 (the RCX-01 rule for alert addresses): a pending address dies with the access of the
+ * member who added it. True while that member is still in the organisation and the address is
+ * newer than their cut-off, which removal, demotion, sign out everywhere, mfa-reset, owner
+ * recovery and the incident script all set and a reactivation keeps. No recorded adder: dead.
+ * Both are database times and a cut-off is stamped after the member row is locked, so an
+ * address added first is earlier; a tie is dead.
+ *
+ * Written once, over `alert_recipient`: the confirmation and the list's status both read it,
+ * so a link that would be refused never shows as waiting. A confirmed address is not asked.
+ */
+const ADDER_STILL_HAS_ACCESS = `EXISTS (
+    SELECT 1 FROM membership adder
+    WHERE adder.id = alert_recipient.created_by AND adder.org_id = alert_recipient.org_id
+      AND adder.removed_at IS NULL
+      AND (adder.sessions_valid_after IS NULL
+           OR alert_recipient.created_at > adder.sessions_valid_after))`;
+
 // The status by the database clock, the one the expiry was set with.
 const RECIPIENT_COLUMNS = `id, email, created_at,
   CASE WHEN confirmed_at IS NOT NULL THEN 'confirmed'
-       WHEN confirm_expires_at > now() THEN 'waiting'
+       WHEN confirm_expires_at > now() AND ${ADDER_STILL_HAS_ACCESS} THEN 'waiting'
        ELSE 'expired' END AS status`;
 
 function toDto(row: RecipientRow): AlertRecipientDto {
@@ -170,7 +188,9 @@ export function registerAlertRecipientRoutes(app: FastifyInstance, ctx: AppConte
 
 /**
  * Public: the confirmation link's page posts the token from its fragment. Unknown, used and
- * expired tokens all get the same 404. Rate-limited per client address.
+ * expired tokens, and the token of an address whose adder has lost access since (D22), all get
+ * the same 404. A wait for a row lock past the pool's lock timeout answers 503 with
+ * Retry-After. Rate-limited per client address.
  */
 export function registerAlertConfirmRoute(app: FastifyInstance, ctx: AppContext): void {
   app.post(
@@ -179,16 +199,31 @@ export function registerAlertConfirmRoute(app: FastifyInstance, ctx: AppContext)
     async (request, reply) => {
       const { token } = parseInput(AlertRecipientConfirmSchema, request.body, 'link');
       const tokenHash = sha256(token);
+      // A member change that holds the adder's member row past lock_timeout answers 503, as
+      // every write does; nothing was confirmed or audited (SEC-3, BEH-3).
       const confirmed = await withResolvedOrg(ctx.pool, async (tx, enterOrg) => {
         const found = await alertRecipientByTokenHash(tx, tokenHash);
         if (found === null) return false;
         await enterOrg(found.orgId);
+        // The recipient row, then the adder's member row: a member change never locks a
+        // recipient row, so the order has no cycle. FOR SHARE waits for a removal or a cut-off
+        // that is committing, and the UPDATE, a later statement, then reads it and refuses
+        // (READ COMMITTED); one that starts later waits for this transaction, so the address
+        // was confirmed first.
+        const pending = await tx.query<{ created_by: string | null }>(
+          'SELECT created_by FROM alert_recipient WHERE id = $1 AND org_id = app_org_id() FOR UPDATE',
+          [found.recipientId],
+        );
+        await tx.query(
+          'SELECT 1 FROM membership WHERE org_id = app_org_id() AND id = $1 FOR SHARE',
+          [pending.rows[0]?.created_by ?? null],
+        );
         // Conditional, so two clicks at once confirm (and audit) once.
         const updated = await tx.query(
           `UPDATE alert_recipient
            SET confirmed_at = now(), confirm_token_hash = NULL, confirm_expires_at = NULL
            WHERE id = $1 AND org_id = app_org_id() AND confirm_token_hash = $2
-             AND confirm_expires_at > now()
+             AND confirm_expires_at > now() AND ${ADDER_STILL_HAS_ACCESS}
            RETURNING id`,
           [found.recipientId, tokenHash],
         );
@@ -203,6 +238,8 @@ export function registerAlertConfirmRoute(app: FastifyInstance, ctx: AppContext)
           detail: null,
         });
         return true;
+      }).catch((error: unknown) => {
+        throw lockTimeoutAsUnavailable(request, error);
       });
       if (!confirmed) throw new HttpError(404, 'not_found', 'This link is not valid any more.');
       return reply.code(204).send();

@@ -259,6 +259,7 @@ export function ScreenDetail({ data, refreshError, back, onReload, onChanged }: 
 
       <ConfirmDialog
         open={revoke?.confirming === true}
+        returnFocus="opener"
         title={endPairing.dialogTitle}
         confirmLabel={endPairing.confirmLabel}
         cancelLabel={endPairing.cancelLabel}

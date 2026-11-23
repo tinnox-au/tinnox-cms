@@ -2,63 +2,21 @@
  * D19 and brief section 6: the real API entry point, started with NODE_ENV=production
  * and the development configuration, must exit without ever listening.
  */
-import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { createServer } from 'node:net';
-import { join } from 'node:path';
-import { parseEnv } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { repoRoot } from './support.ts';
+import {
+  apiEnvironment,
+  developmentEnv,
+  freePort,
+  listening,
+  runApiEntryPoint,
+} from './support.ts';
 
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const address = server.address();
-      const port = typeof address === 'object' && address !== null ? address.port : 0;
-      server.close(() => {
-        resolve(port);
-      });
-    });
-  });
-}
-
-function runApi(env: Record<string, string>): Promise<{ code: number | null; output: string }> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', 'src/main.ts'], {
-      cwd: join(repoRoot, 'apps', 'api'),
-      env: { PATH: process.env['PATH'] ?? '', ...env },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let output = '';
-    child.stdout.on('data', (chunk: Buffer) => (output += chunk.toString('utf8')));
-    child.stderr.on('data', (chunk: Buffer) => (output += chunk.toString('utf8')));
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      reject(new Error(`the API kept running with an unacceptable configuration:\n${output}`));
-    }, 20_000);
-    child.once('exit', (code) => {
-      clearTimeout(timer);
-      resolve({ code, output });
-    });
-  });
-}
-
-async function listening(port: number): Promise<boolean> {
-  try {
-    await fetch(`http://127.0.0.1:${port}/healthz`, { signal: AbortSignal.timeout(500) });
-    return true;
-  } catch {
-    return false;
-  }
-}
+const runApi = (env: Record<string, string>) => runApiEntryPoint('src/main.ts', env);
 
 describe('production start-up', () => {
-  const envFile = join(repoRoot, '.env');
-  const devEnv: Record<string, string> = existsSync(envFile)
-    ? (parseEnv(readFileSync(envFile, 'utf8')) as Record<string, string>)
-    : {};
+  // The names the API reads; the whole file would be refused for another reason (D5,
+  // administrator-credential-refusal.test.ts).
+  const devEnv = apiEnvironment(developmentEnv());
 
   it('has a generated development configuration to test with', () => {
     expect(devEnv['SESSION_SECRET'] ?? '').toMatch(/^dev-/);
@@ -76,18 +34,23 @@ describe('production start-up', () => {
       'OIDC_ISSUER points at the development realm tinnox-dev',
       'must use https in production',
       'production requires MFA evidence',
+      // npm run setup always points SMTP_HOST at the development Mailpit, 127.0.0.1 (D23).
+      'SMTP_HOST is not a reviewed mail host',
     ]) {
       expect(result.output).toContain(expected);
     }
-    for (const name of [
+    const secrets: [string, string][] = [
       'SESSION_SECRET',
       'MEDIA_URL_HMAC_SECRET',
       'PAIRING_CLIENT_KEY_SECRET',
       'OIDC_CLIENT_SECRET',
-      'TINNOX_APP_PASSWORD',
-    ]) {
-      const value = devEnv[name] ?? '';
-      expect(value.length).toBeGreaterThan(8);
+    ].map((name) => [name, devEnv[name] ?? '']);
+    secrets.push([
+      'the DATABASE_URL password',
+      decodeURIComponent(new URL(devEnv['DATABASE_URL'] ?? '').password),
+    ]);
+    for (const [name, value] of secrets) {
+      expect(value.length, name).toBeGreaterThan(8);
       expect(result.output, `${name} must not be printed`).not.toContain(value);
     }
   });
@@ -110,6 +73,8 @@ describe('production start-up', () => {
       SESSION_SECRET: strong('session'),
       MEDIA_URL_HMAC_SECRET: strong('media'),
       PAIRING_CLIENT_KEY_SECRET: strong('pairing'),
+      // No e-mail: no host is reviewed yet (D23), so the development Mailpit would be refused too.
+      SMTP_HOST: '',
     };
     const cases: [string, Record<string, string>, string][] = [
       [
@@ -132,6 +97,16 @@ describe('production start-up', () => {
         'a development SMTP password',
         { SMTP_USER: 'alerts', SMTP_PASSWORD: 'dev-smtp-password' },
         'SMTP_PASSWORD is a development or placeholder value',
+      ],
+      [
+        'the development Mailpit host (D23)',
+        { SMTP_HOST: '127.0.0.1' },
+        'SMTP_HOST is not a reviewed mail host',
+      ],
+      [
+        'a public mail host nobody reviewed (D23)',
+        { SMTP_HOST: 'smtp.unreviewed.example' },
+        'SMTP_HOST is not a reviewed mail host',
       ],
     ];
     for (const [what, override, message] of cases) {

@@ -1,19 +1,26 @@
 /**
  * Runs the e-mail alert check once and exits: `npm run alerts:once -w @tinnox/api`, for a cloud
- * scheduler after deployment. Same configuration and role as the API (config.ts). Exits non-zero
- * when the configuration is refused, e-mail is not configured, the run fails or an e-mail is
- * refused. Safe beside running API instances (alerts.ts).
+ * scheduler after deployment. Same configuration, read the same way, and same role as the API
+ * (config.ts). Exits non-zero when the configuration or the database role is refused, e-mail is
+ * not configured, the run fails or an e-mail is refused. Safe beside running API instances
+ * (alerts.ts).
+ *
+ * Do not schedule it in production yet: until REVIEWED_SMTP_HOSTS (config.ts) names a host, it
+ * exits 1 there on every run. With SMTP_HOST set, loadConfig refuses the unreviewed host; with
+ * it unset, there is no mailer and the run stops below. The provider review (item 4 of the
+ * pre-customer-release checklist) is what adds a host. It also exits 1 when PostgreSQL does not
+ * answer at start-up.
  */
-import { assertConnectionRole, createPool } from '@tinnox/db';
+import { assertConnectionRole, assertRuntimeRole, createPool, RuntimeRoleError } from '@tinnox/db';
 import { runDisplayAlerts } from './alerts.ts';
-import { ConfigError, loadConfig } from './config.ts';
+import { ConfigError, loadConfig, runtimeEnv } from './config.ts';
 import { createLogger } from './logger.ts';
 import { createMailer } from './mail.ts';
 
 async function main(): Promise<number> {
   let config;
   try {
-    config = loadConfig(process.env);
+    config = loadConfig(runtimeEnv(process.env));
     assertConnectionRole(config.databaseUrl, 'tinnox_app');
   } catch (error) {
     // Problem text names variables only, never values.
@@ -34,6 +41,22 @@ async function main(): Promise<number> {
     max: 2,
   });
   try {
+    // Before the run (AG-1.3): the session must be tinnox_app as infra/postgres/init/01-roles.sh
+    // makes it, read from the catalogue. The problems never carry the connection string.
+    try {
+      await assertRuntimeRole(pool);
+    } catch (error) {
+      if (error instanceof RuntimeRoleError) {
+        console.error('TINNOX alert check database role is not acceptable:');
+        for (const problem of error.problems) console.error(`  - ${problem}`);
+      } else {
+        console.error(
+          'TINNOX alert check could not check its database role:',
+          (error as Error).message,
+        );
+      }
+      return 1;
+    }
     const result = await runDisplayAlerts({
       pool,
       now: new Date(),

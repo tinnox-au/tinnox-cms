@@ -261,6 +261,7 @@ test('the schedule is assigned on the screen page, and a push brings the screen 
   await page.goto(`${PORTAL_URL}/schedules`);
   const row = await pushRow(page, displayId);
   await expect(row).toContainText(`Schedule: ${scheduleName}`);
+  // This screen has a change waiting, so the dialog must offer the push and its Cancel.
   await page.getByTestId('push-cancel').click();
   await expect(page.getByTestId('push-dialog-body')).toBeHidden();
 

@@ -468,6 +468,50 @@ describe('rule 4: text rules (AG-4.3, AG-4.8, AG-4.9, AG-4.10, AG-4.11)', () => 
     ).toEqual([]);
     expect(checkSql('0014_display_alerts.sql', sql)).toEqual([]);
   });
+
+  it('tells a new file not to paste a guard the runner now holds, and leaves the merged copies (EAX-12)', () => {
+    // The sec.* guard as 0013 has it, fail-open form included.
+    const guard = [
+      'DO $$',
+      'DECLARE',
+      '  bad text;',
+      'BEGIN',
+      "  SELECT string_agg(p.proname, ', ') INTO bad",
+      '  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace',
+      "  WHERE n.nspname = 'sec'",
+      "    AND NOT (p.prosecdef AND p.proconfig @> ARRAY['search_path=pg_catalog, pg_temp']);",
+      '  IF bad IS NOT NULL THEN',
+      "    RAISE EXCEPTION 'sec functions with unsafe definition: %', bad;",
+      '  END IF;',
+      'END $$;',
+      '',
+    ].join('\n');
+    expect(checkSql('0015_more.sql', `CREATE TABLE public.t (id int);\n${guard}`)).toEqual([
+      expect.stringMatching(
+        /^db\/migrations\/0015_more\.sql:11 pastes the "sec functions with unsafe definition" guard .* Delete the DO block: the migration runner checks this itself after every file and before its COMMIT.*packages\/db\/src\/schema-invariants\.ts/,
+      ),
+    ]);
+    for (const raised of [
+      'tables without forced row-level security: %',
+      'tables without a tenant policy: %',
+      'triggers left disabled: %',
+    ]) {
+      expect(
+        checkSql('0016_more.sql', `DO $$ BEGIN\n  RAISE EXCEPTION '${raised}', 'x';\nEND $$;\n`),
+        raised,
+      ).toEqual([expect.stringMatching(/^db\/migrations\/0016_more\.sql:2 pastes the "/)]);
+    }
+    // Merged files keep their copies; a comment about the guard, and a function's own
+    // exception, are not copies.
+    expect(checkSql('0014_display_alerts.sql', guard)).toEqual([]);
+    expect(
+      checkSql(
+        '0015_more.sql',
+        "-- No guard here: RAISE EXCEPTION 'triggers left disabled' is the runner's job now.\n" +
+          "DO $$ BEGIN RAISE EXCEPTION 'nothing to backfill'; END $$;\n",
+      ),
+    ).toEqual([]);
+  });
 });
 
 describe('rule 5: db/upgrade-tests.json (AG-4.13)', () => {

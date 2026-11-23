@@ -85,6 +85,38 @@ Before either suite: `npm run setup`, `npm run infra:up`, and for E2E also
 `npm run db:migrate` and `npm run db:seed -- --second-org`. For E2E the API (4000), the
 portal (5173) and the player (5174) must **not** be running: Playwright starts them.
 
+## A run is green only when every test ran
+
+A skipped, todo or focused test is a red run (U-15): the lint refuses the declared forms, and
+two checks catch what happens at run time. `vitest.config.ts` (and `apps/api/vitest.config.ts`,
+the API's own `npm run test:integration -w @tinnox/api`) adds
+`scripts/vitest-results-reporter.ts` to the reporters, which fails a unit, component or
+integration run that reports a test skipped, todo or never started (`ctx.skip()` included; a
+run that selects some tests of its files, by `-t`, a `file:line`, an editor's test ids, a tag
+filter or the watch mode's `t`, is not checked). When every file of a project ran, the reporter also
+fails it below its floor under `"vitest"` in `test-counts.json` (a describe or a loop that
+lost its tests); raise the floor as the project grows. After the browser suite, `npm run check:test-results`
+reads `tests/.run/e2e-results.json` and fails on a test skipped at run time
+(`testInfo.skip()`), one that did not run behind a failure in a serial file, a flaky one, a
+failure, an error outside any test (such as a global teardown that could not sign a session
+out), and a spec file whose number of tests is not the one in `test-counts.json`: change that
+count in the same change that adds or deletes a test. `skip-allowlist.json` may excuse a test
+that did not run or was flaky until its review date, with an owner and a reason; a skip has no
+entry. The CI e2e job runs the check whether the suite passed or failed, and keeps the result
+file. Run the check on a full run: a run of some spec files fails the counts. `npm run test:e2e`
+first removes the last run's result file, so a run that never wrote one is "no report", not the
+previous verdict. The quality job runs the stackless checks (`playwright.layout.config.ts`) and
+then `npm run check:test-results -- --counts layout`, which reads `tests/.run/layout-results.json`
+against the `"layout"` counts.
+
+## What CI runs
+
+`.github/workflows/ci.yml` has four jobs. The quality job runs lint, `npm run format:check`, `check:docs`, `check:migrations`, typecheck, the unit tests, the component tests, the stackless browser checks and their results gate, the build and the audit. The integration job starts PostgreSQL, Keycloak and the worker, runs `npm run verify:oidc` against the real Keycloak, then `npm run test:integration`. The secret scan is its own job. The end-to-end job (the full browser suite, then `npm run check:test-results`) runs only when started by hand or when the repository variable `RUN_E2E` is "true". The steps added on 2026-11-23 (the stackless browser checks and their gate, `verify:oidc`) had not run in GitHub Actions on 2026-11-23.
+
+## Adding a test
+
+A new test in a Vitest project (unit, component or integration) needs no registration: the project's file globs find it, and `tests/test-counts.json` holds only a floor under `"vitest"` that a full run must reach, which the reporter checks. After adding tests, run the project in full (`npm test`, `npm run test:component` or `npm run test:integration`) and read its `Tests N passed` line; raise that project's floor to N in the same change (a test under `apps/api/test` also counts toward `"api-integration"`: run `npm run test:integration -w @tinnox/api` and raise that floor too), because a floor left below the count lets the same number of tests vanish unnoticed. `npx vitest list` is not the number: it does not expand `it.each`. A browser test needs its spec file's count under `"e2e"` (or `"layout"` for `tests/playwright.layout.config.ts`) in the same change, as the gate says. `npx playwright test --list -c tests/playwright.config.ts tests/e2e/<file>.spec.ts` prints `Total: N tests in 1 file` without a stack; give `-c tests/playwright.layout.config.ts` and no file for the layout suite.
+
 ## What is substituted, and where
 
 - `integration/`: operator sessions are created through the same `sec.session_create`
@@ -109,6 +141,17 @@ are off because they would record the sign-in form.
 The run uses its own database, `tinnox_e2e_test`, rebuilt from the migrations and the seed
 at the start (created once as the PostgreSQL superuser), so the development database gets
 no test rows. It still restarts the shared PostgreSQL container once (E2E 13).
+
+The E2E API's environment is an allow-list (`e2eApiEnvironment` in `e2e/support/stack.ts`):
+its addresses, database, media directory and the local Mailpit are set there, the secrets and
+the Keycloak client come from the root `.env`, and every other name the API reads is passed
+empty, so nothing exported in the shell reaches it. Before anything else, global set-up refuses
+to run unless every host and URL of the run (those settings, the database set-up's connection,
+the previews, Mailpit and the API origin, which `playwright.config.ts` also gives the player
+build as `VITE_API_BASE_URL`) is `localhost`, 127.0.0.0/8 or `::1`, including any `host` or
+`hostaddr` parameter of a database URL (EAX-09; the rules are in
+`scripts/lib/loopback-targets.ts`). The previews are started by
+Playwright just before global set-up; they listen on 127.0.0.1 only.
 
 Keycloak accepts each one-time code once, so a run that starts within the same 30 seconds
 as the previous sign-in of that user waits for the next code.

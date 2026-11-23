@@ -1,5 +1,5 @@
 import { playwright } from '@vitest/browser-playwright';
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 
 /**
  * Three projects:
@@ -13,6 +13,10 @@ import { defineConfig } from 'vitest/config';
  */
 export default defineConfig({
   test: {
+    // Vitest's own reporters, then the results check: a test skipped or todo at run time, or
+    // never started, or a full project below its floor in tests/test-counts.json, fails the run
+    // of any project (U-15, scripts/vitest-results-reporter.ts).
+    reporters: [...configDefaults.reporters, './scripts/vitest-results-reporter.ts'],
     projects: [
       {
         test: {

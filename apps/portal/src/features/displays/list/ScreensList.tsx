@@ -1000,6 +1000,7 @@ export function ScreensList() {
 
         <ConfirmDialog
           open={revoke.open}
+          returnFocus="opener"
           title="Revoke this player?"
           confirmLabel="Revoke player"
           tone="danger"

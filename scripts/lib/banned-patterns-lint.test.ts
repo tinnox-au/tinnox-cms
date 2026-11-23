@@ -1,8 +1,8 @@
-// The step 10 bans of eslint.config.js (adoption plan section 3.2), run against fixture text.
-// Each case takes the rule entries and globals that eslint.config.js resolves for a real path, so
-// the file globs are tested with the selectors: a block that took a rule away from a file group,
-// or a missing exception, fails here. Every flagged case also checks that the message says what
-// to use instead (section 3.4).
+// The step 10 and step 11 bans of eslint.config.js (adoption plan section 3.2), run against
+// fixture text. Each case takes the rule entries and globals that eslint.config.js resolves for a
+// real path, so the file globs are tested with the selectors: a block that took a rule away from a
+// file group, or a missing exception, fails here. Every flagged case also checks that the message
+// says what to use instead (section 3.4).
 import { ESLint, type Linter } from 'eslint';
 import tseslint from 'typescript-eslint';
 import { describe, expect, it } from 'vitest';
@@ -620,24 +620,51 @@ describe('credential names (AG-1.9, AG-1.17, D4, D5)', () => {
     /^Product code never names the migrator, superuser or provisioning credentials/;
   const MIGRATOR = /^Only the offline tools in MIGRATOR_URL_READERS of eslint\.config\.js/;
 
+  const NAMES = [
+    "requireEnv('DATABASE_MIGRATOR_URL');",
+    'const p = env.TINNOX_MIGRATOR_PASSWORD;',
+    "const s = 'POSTGRES_SUPERUSER_PASSWORD';",
+    'const k = `PROVISION_IDP_CLIENT_SECRET`;',
+  ];
+
   it.each([
     'apps/api/src/fixture.ts',
-    // No override yet: step 12 adds it with loadConfig's refusal (D5).
-    'apps/api/src/config.ts',
+    // The files beside the one override: the entry points that call it, and its neighbours.
+    'apps/api/src/config-fixture.ts',
+    'apps/api/src/alerts-once.ts',
+    'apps/api/src/mail.ts',
+    'apps/api/src/auth/oidc.ts',
     'apps/api/src/main.ts',
     'apps/media-worker/src/main.ts',
     'apps/portal/src/features/fixture.tsx',
     'apps/player-web/sw/sw.ts',
     'packages/db/src/migrate.ts',
   ])('flags them in %s', async (path) => {
-    for (const code of [
-      "requireEnv('DATABASE_MIGRATOR_URL');",
-      'const p = env.TINNOX_MIGRATOR_PASSWORD;',
-      "const s = 'POSTGRES_SUPERUSER_PASSWORD';",
-      'const k = `PROVISION_IDP_CLIENT_SECRET`;',
-    ]) {
+    for (const code of NAMES) {
       await expectOne(path, code, CREDENTIAL);
     }
+  });
+
+  it('allows them in apps/api/src/config.ts only, whose refusal names them (D5)', async () => {
+    const path = 'apps/api/src/config.ts';
+    for (const code of NAMES) {
+      expect(await flagged(path, code)).toEqual([]);
+    }
+  });
+
+  it('keeps the other API selectors and the process.env rule in apps/api/src/config.ts', async () => {
+    const path = 'apps/api/src/config.ts';
+    // The clock, a non-null assertion, an inline cast, an organisation id from the request, an
+    // outbound import() and loadConfig's test-only argument.
+    const messages = await flagged(
+      path,
+      [
+        'const t = Date.now(); const n = v!.a; const c = (e as { a: 1 }).a;',
+        "const o = request.body.orgId; await import('node:http'); loadConfig(env, options);",
+      ].join('\n'),
+    );
+    expect(messages).toHaveLength(6);
+    await expectOne(path, "const u = process.env['DATABASE_MIGRATOR_URL'];", /^'process\.env' is/);
   });
 
   it.each(['apps/api/src/config.test.ts', 'packages/db/test/support.ts'])(
@@ -702,6 +729,60 @@ describe('bare userEvent.keyboard in component tests (SCR-16)', () => {
   });
 });
 
+describe('list keys taken from display text in the portal (LYX-04)', () => {
+  const TEXT_KEY =
+    /^Key a list by the row id, or by index for plain strings from the API\. .*\(LYX-04\)\.$/;
+
+  it.each(['name', 'line', 'label', 'title', 'message', 'text'])('flags key={%s}', async (name) => {
+    await expectOne(
+      'apps/portal/src/features/fixture.tsx',
+      `export const x = names.map((${name}) => <li key={${name}}>{${name}}</li>);`,
+      TEXT_KEY,
+    );
+  });
+
+  it.each([
+    'apps/portal/src/features/layouts/DeleteLayoutDialog.tsx',
+    'apps/portal/src/features/shared/InUseList.tsx',
+    'apps/portal/src/App.tsx',
+  ])('holds in %s', async (path) => {
+    await expectOne(path, 'export const x = <li key={name}>{name}</li>;', TEXT_KEY);
+  });
+
+  it('allows an id, an index and a key that only holds a name', async () => {
+    const code = [
+      'export const a = rows.map((row) => <li key={row.id}>{row.name}</li>);',
+      'export const b = names.map((name, index) => <li key={index}>{name}</li>);',
+      'export const c = WEEKDAYS.map((name, day) => <Checkbox key={day} label={name} />);',
+      'export const d = items.map((id) => <li key={id}>{label}</li>);',
+      // `name` as a prop, not a key, is not a list key.
+      'export const e = <Field name={name} label={label} />;',
+    ].join('\n');
+    expect(await flagged('apps/portal/src/features/fixture.tsx', code)).toEqual([]);
+  });
+
+  it('is for portal source only, not portal tests or the player', async () => {
+    const code = 'export const x = <li key={name}>{name}</li>;';
+    expect(await flagged('apps/portal/src/features/fixture.test.tsx', code)).toEqual([]);
+    expect(await flagged('packages/app-render/src/fixture.tsx', code)).toEqual([]);
+  });
+
+  it('keeps the portal selectors next to it', async () => {
+    const messages = await flagged(
+      'apps/portal/src/features/fixture.tsx',
+      'export const x = <li key={label}>Online</li>; const c = (e as { a: 1 }).a;',
+    );
+    expect(messages).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(TEXT_KEY),
+        expect.stringMatching(/^Status wording stays honest/),
+        expect.stringMatching(/^Do not cast to an inline object type/),
+      ]),
+    );
+    expect(messages).toHaveLength(3);
+  });
+});
+
 describe('the organisation id from the request (AG-2.3)', () => {
   const ORG = /^The organisation comes from operatorOf\(request\)\.orgId or the device credential/;
 
@@ -734,6 +815,49 @@ describe('the organisation id from the request (AG-2.3)', () => {
     ].join('\n');
     expect(await flagged('apps/api/src/routes/fixture.ts', code)).toEqual([]);
   });
+});
+
+describe("loadConfig's reviewed-host stand-in outside its test (D23, DEC-13)", () => {
+  const OPTIONS = /^Call loadConfig\(env\) with the environment only, under its own name \(D23\)/;
+
+  it.each([
+    'apps/api/src/main.ts',
+    'apps/api/src/alerts-once.ts',
+    'apps/api/src/fixture.ts',
+    'apps/api/src/mail.ts',
+    'packages/db/src/fixture.ts',
+  ])('flags a second argument, a namespace call and a renamed import in %s', async (path) => {
+    for (const code of [
+      "const c = loadConfig(env, { reviewedSmtpHosts: ['smtp.example'] });",
+      'const c = loadConfig(env, options);',
+      'const c = config.loadConfig(env, {});',
+      "import { loadConfig as load } from './config.ts';",
+    ]) {
+      await expectOne(path, code, OPTIONS);
+    }
+  });
+
+  it('names REVIEWED_SMTP_HOSTS and the provider review', async () => {
+    const [message] = await flagged('apps/api/src/main.ts', 'loadConfig(env, options);');
+    expect(message).toContain('add the host to REVIEWED_SMTP_HOSTS in apps/api/src/config.ts');
+    expect(message).toContain('data-location review under DEC-13');
+  });
+
+  it('leaves a call with the environment only alone', async () => {
+    const code = [
+      "import { loadConfig } from './config.ts';",
+      'const a = loadConfig(env);',
+      'const b = config.loadConfig(env);',
+    ].join('\n');
+    expect(await flagged('apps/api/src/alerts-once.ts', code)).toEqual([]);
+  });
+
+  it.each(['apps/api/src/config.test.ts', 'apps/api/test/support.ts'])(
+    'leaves the test %s alone',
+    async (path) => {
+      expect(await flagged(path, 'const c = loadConfig(env, reviewed);')).toEqual([]);
+    },
+  );
 });
 
 describe('warning comments (LINT-10, PLAN-6)', () => {

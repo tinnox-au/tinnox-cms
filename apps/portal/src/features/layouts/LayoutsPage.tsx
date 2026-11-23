@@ -38,6 +38,7 @@ import {
   useToast,
   type DataTableColumn,
 } from '../../ui/index.ts';
+import { elementByTestId, rowByTestId } from '../shared/index.ts';
 import { CreateLayoutDialog } from './CreateLayoutDialog.tsx';
 import { DeleteLayoutDialog } from './DeleteLayoutDialog.tsx';
 import './layouts.css';
@@ -204,6 +205,12 @@ export function LayoutsPage() {
         onDeleted={(layout) => {
           reload();
           toast.success(`${layout.name} deleted`);
+        }}
+        rowFocus={{
+          mode: 'row',
+          order: rows.map((layout) => layout.id),
+          row: rowByTestId('layouts-row-'),
+          primary: elementByTestId('layouts-create'),
         }}
       />
     </>

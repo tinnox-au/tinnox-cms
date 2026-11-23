@@ -56,6 +56,18 @@ jobs:
       # Portal components render in real Chromium (the portal relies on the popover attribute).
       - run: npx playwright install --with-deps chromium
       - run: npm run test:component
+      # The browser checks that need no running service (tests/playwright.layout.config.ts: the
+      # player's information screens and the app renderer, FCU-01 and FCU-02), in the Chromium
+      # installed above and before the build, which they do not need. The full e2e suite also
+      # runs them, but only in the manual job below. scripts/lib/playwright-configs.test.ts fails
+      # when no workflow step runs a Playwright config (the manual e2e job counts until step 36).
+      - id: layout
+        run: npx playwright test -c tests/playwright.layout.config.ts
+      # Playwright exits 0 with a test skipped at run time: the gate reads the step's report
+      # whether it passed or failed, but not when an earlier failure skipped it (CHK-2, U-15).
+      - name: Every expected layout check ran once and passed
+        if: ${{ !cancelled() && steps.layout.outcome != 'skipped' }}
+        run: npm run check:test-results -- --counts layout
       - run: npm run build
       # Fails on high or critical advisories, apart from the dated development-only exceptions in
       # scripts/audit-exceptions.json. Lower-severity findings are tracked in the docs.
@@ -80,6 +92,13 @@ jobs:
       # real worker container against real sample files.
       - run: npm run setup -- --quiet
       - run: npm run infra:up
+      # The real Keycloak sign-in, against the realm infra:up imported and waited healthy for:
+      # PKCE, password and one-time code, auth_time and the forced re-sign-in after prompt=login
+      # (SCR-25), the MFA probe, and the provisioning reader holding view-users only (SCR-22).
+      # It reads .env and infra/.generated from npm run setup and prints no secret. It waits
+      # for the next 30-second one-time code once, so it takes up to about a minute.
+      - run: npm run verify:oidc
+        timeout-minutes: 3
       - run: npm run fixtures
       # The vitest global setup rebuilds tinnox_test from db/migrations before the tests run.
       - run: npm run test:integration
@@ -127,8 +146,14 @@ jobs:
       - run: npm run db:seed -- --second-org
       # Playwright builds the portal and the player and starts them and the API itself.
       - run: npm run test:e2e
+      # Playwright exits 0 with a test skipped at run time or a spec file missing. The gate reads
+      # its result file whether the suite passed or failed, so it also names the tests that did
+      # not run behind a failure (U-15, scripts/check-test-results.ts, tests/test-counts.json).
+      - name: Every expected test ran once and passed
+        if: ${{ !cancelled() }}
+        run: npm run check:test-results
       - name: Keep the result file (test names and outcomes only; traces and videos are off)
-        if: ${{ failure() }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: e2e-results

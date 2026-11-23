@@ -13,7 +13,7 @@ Run everything from the repository root. You should not need `npm install`; `nod
 | `npm run setup` | Writes `.env`, `infra/.generated/tinnox-dev-realm.json`, `infra/.generated/dev-credentials.json`. Idempotent. `-- --quiet` hides the sign-in details, `-- --force` regenerates every secret. |
 | `npm run infra:up` | Builds the media-worker image if needed, starts PostgreSQL, Keycloak and the worker, and waits until all three are healthy. |
 | `npm run infra:down` / `npm run infra:logs` | Stops the containers (data kept) / shows recent logs. |
-| `npm run db:migrate` | Applies `db/migrations` as `tinnox_migrator`. `-- --test` targets `tinnox_test`. |
+| `npm run db:migrate` | Applies `db/migrations` as `tinnox_migrator`. `-- --test` targets `tinnox_test`. It also checks the schema invariants, also with nothing pending, and exits 1 on a database changed outside the migrations; the repair is in operations checklist section 8. |
 | `npm run db:seed` | Creates "TINNOX Internal", site "Melbourne Workshop" (Australia/Melbourne) and one member per role: the operator (Owner, "Dev Owner"), `org-admin` (Admin), `editor` and `viewer`. `-- --second-org` also creates "Isolation Test Organisation" with the second test user as its Owner ("Second Owner"). |
 | `npm run verify:oidc` | Signs the test operator in to Keycloak over HTTP (PKCE, password, TOTP) and exchanges the code; checks `auth_time`, a forced re-authentication (`prompt=login`) and the provisioning reader (`view-users` only). Takes a user key (`operator`, `secondOrgOperator`, `admin`, `editor`, `viewer`). Prints no secret. |
 | `npm run dev` | Runs `dev` in `@tinnox/api`, `@tinnox/portal`, `@tinnox/player-web` together. |
@@ -55,7 +55,7 @@ To add or change a dependency use `npx npm@11.21.2 install <pkg>@<exact version>
 
 `NODE_ENV`, `LOG_LEVEL`, `POSTGRES_HOST_PORT`, `POSTGRES_SUPERUSER_PASSWORD`, `TINNOX_MIGRATOR_PASSWORD`, `TINNOX_APP_PASSWORD`, `DATABASE_URL`, `DATABASE_MIGRATOR_URL`, `TEST_DATABASE_URL`, `TEST_DATABASE_MIGRATOR_URL`, `API_HOST`, `API_PORT`, `API_PUBLIC_ORIGIN`, `PORTAL_ORIGIN`, `PLAYER_ORIGIN`, `SESSION_SECRET`, `SESSION_TTL_SECONDS`, `SESSION_IDLE_TIMEOUT_SECONDS`, `MEDIA_URL_HMAC_SECRET`, `PAIRING_CLIENT_KEY_SECRET`, `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_REDIRECT_URI`, `OIDC_POST_LOGOUT_REDIRECT_URI`, `KC_BOOTSTRAP_ADMIN_USERNAME`, `KC_BOOTSTRAP_ADMIN_PASSWORD`, `DEV_OPERATOR_OIDC_SUB`, `DEV_SECOND_ORG_OIDC_SUB`, `DEV_ADMIN_OIDC_SUB`, `DEV_EDITOR_OIDC_SUB`, `DEV_VIEWER_OIDC_SUB`, `PROVISION_IDP_CLIENT_ID`, `PROVISION_IDP_CLIENT_SECRET` (and optional `PROVISION_IDP_ISSUER`; read only by `scripts/provision-member.ts`, never set for the API, compose or the worker outside development), `MEDIA_ROOT`, `MEDIA_JOBS_DIR`, and optional `LIMIT_*` overrides (names in `LIMIT_ENV_VARS`).
 
-The API's `dev` and `start` scripts load `../../.env` through tsx's `--env-file`. `MEDIA_ROOT` and `MEDIA_JOBS_DIR` are relative to the repository root; resolve them against it, not against `apps/api`.
+The API's `dev`, `start` and `alerts:once` scripts pass no `--env-file`. The entry points read the root `.env` themselves and take from it only the names the API reads (`RUNTIME_ENV_NAMES` in `apps/api/src/config.ts`: the keys of `EnvSchema` and the `LIMIT_*` names); a variable set in the shell wins, even when empty. The migrator, superuser, Keycloak-administrator and `PROVISION_*` variables of the same file never enter the process, and `loadConfig` refuses to start in every mode when one of them is in the process environment (so do not export `.env` into the shell that starts the API). `MEDIA_ROOT` and `MEDIA_JOBS_DIR` are relative to the repository root; resolve them against it, not against `apps/api`.
 
 **Every generated secret starts with `dev-`.** D19: when `NODE_ENV=production` the API must refuse to start if any secret starts with `dev-`, if the issuer or an origin is `http://`, or if the issuer ends in `/realms/tinnox-dev`.
 
@@ -72,7 +72,7 @@ The API's `dev` and `start` scripts load `../../.env` through tsx's `--env-file`
 
 Form: `postgres://<role>:<password>@127.0.0.1:<POSTGRES_HOST_PORT>/<database>`.
 
-Roles: `tinnox_migrator` owns the schema. `tinnox_app` is `NOSUPERUSER NOBYPASSRLS`, owns nothing, has a 15 s statement timeout. `tinnox_definer` cannot log in, has `BYPASSRLS`, and owns only the functions in schema `sec`. The API should call `assertConnectionRole(DATABASE_URL, 'tinnox_app')` at start-up.
+Roles: `tinnox_migrator` owns the schema. `tinnox_app` is `NOSUPERUSER NOBYPASSRLS`, owns nothing, has a 15 s statement timeout. `tinnox_definer` cannot log in, has `BYPASSRLS`, and owns only the functions in schema `sec`. Both API entry points (`main.ts`, `alerts-once.ts`) call `assertConnectionRole(DATABASE_URL, 'tinnox_app')` on the configuration and then `await assertRuntimeRole(pool)`, which reads the session and the role from the catalogue (not superuser, no `BYPASSRLS`, `REPLICATION`, `CREATEROLE` or `CREATEDB`, a member of no role, owning nothing) and makes them exit non-zero before they listen or run. The same call needs the database to answer within the pool's 5 s connect timeout, so a database that is down at start-up is an exit 1, not a degraded start (operations checklist section 8). `createPool` also refuses, on every new connection, a session that does not log in and act as `tinnox_app`.
 
 ### Tenant context: `@tinnox/db`
 
@@ -83,6 +83,7 @@ withoutOrg<T>(pool: Pool, fn: (tx: Tx) => Promise<T>): Promise<T>
 poolAsTx(pool: Pool): Tx            // single-statement sec.* calls
 interface Tx { query<R>(text: string, values?: readonly unknown[]): Promise<QueryResult<R>> }
 assertConnectionRole(connectionString: string, expectedRole: string): void
+assertRuntimeRole(pool: Pool): Promise<void>   // rejects with RuntimeRoleError, problems listed
 sha256(value: string | Uint8Array): Buffer
 ```
 
@@ -219,7 +220,7 @@ Keys are `<org uuid>/<object uuid>` and nothing else is accepted. `put` never re
 
 | Directory | What exists | What is missing |
 |---|---|---|
-| `apps/api` | `package.json` (all dependencies; scripts `dev`, `start`, `typecheck`), `tsconfig.json`, `src/index.ts` placeholder | Everything. `dev` runs `tsx watch --env-file=../../.env src/main.ts`, so the entry point is `src/main.ts`; delete `src/index.ts`. |
+| `apps/api` | `package.json` (all dependencies; scripts `dev`, `start`, `typecheck`), `tsconfig.json`, `src/index.ts` placeholder | Everything. `dev` runs `tsx watch src/main.ts`, so the entry point is `src/main.ts`; delete `src/index.ts`. |
 | `apps/media-worker` | `package.json` (sharp, file-type, zod), `tsconfig.json`, placeholder | The worker and `apps/media-worker/Dockerfile`. The compose service `media-worker` (profile `worker`) already applies no network, read-only root, uid 10001, no capabilities, `no-new-privileges`, 128 PIDs, 768 MB, 1 CPU, a tmpfs `/tmp`, and mounts only `./data/jobs` at `/jobs`. The image needs ffprobe and a user with uid 10001. Create `data/jobs/inbox` and `data/jobs/outbox` writable by that uid. |
 | `apps/portal` | `package.json`, `tsconfig.json`, `vite.config.ts` (127.0.0.1:5173, strict port, `/api` proxied to 127.0.0.1:4000), placeholder `index.html` and `src/index.ts` | The React application. |
 | `apps/player-web` | `package.json` (idb; fake-indexeddb for tests), `tsconfig.json`, `vite.config.ts` (127.0.0.1:5174), placeholders | The player and its service worker. |

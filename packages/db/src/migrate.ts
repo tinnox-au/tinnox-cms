@@ -2,7 +2,13 @@ import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import pg from 'pg';
+import { errorField } from './error-field.ts';
 import type { Pool } from './pool.ts';
+import {
+  SchemaInvariantError,
+  assertSchemaInvariants,
+  schemaProblemsInTransaction,
+} from './schema-invariants.ts';
 
 const MIGRATOR_ROLE = 'tinnox_migrator';
 
@@ -77,6 +83,15 @@ export interface MigrationResult {
 export const MIGRATION_FILE_PATTERN = /^([0-9]{4})_[a-z0-9_]+\.sql$/;
 /** Arbitrary constant; serialises concurrent migration runs on one database. */
 const ADVISORY_LOCK_KEY = 7_411_660_001;
+/**
+ * How long a migration statement (or the wait for the advisory lock) may wait for a lock. The
+ * runner sends it on its own session, so it holds on a database whatever its role defaults say
+ * (AGENTS.md section 4, Locks). infra/postgres/init/01-roles.sh sets the same value as a default
+ * for ad-hoc sessions as tinnox_migrator.
+ */
+export const MIGRATION_LOCK_TIMEOUT = '30s';
+/** SQLSTATE lock_not_available: a lock wait passed MIGRATION_LOCK_TIMEOUT. */
+const LOCK_NOT_AVAILABLE = '55P03';
 
 export type MigrationNameProblem =
   | { readonly kind: 'pattern'; readonly name: string }
@@ -115,6 +130,19 @@ export function migrationNameMessage(problem: MigrationNameProblem): string {
  * partial migration. The directory is checked against the recorded history first:
  * an applied file that is missing or changed, or a new file numbered before an
  * applied one, is an error and nothing is applied.
+ *
+ * The runner owns the schema invariants (./schema-invariants.ts; plan section 3.3, EAX-12), so
+ * no migration pastes a guard for them. It checks them after each file and before that file's
+ * COMMIT: a file that leaves the schema outside them is rolled back with its history row, the
+ * files before it in the same run stay applied (each passed the check), and the run fails
+ * naming every object and what to do. The next run starts at the same file. A run with nothing
+ * pending checks once, so a database changed by hand is refused too, with nothing altered.
+ * Either way the run ends in the `finally` below, which gives the advisory lock back.
+ *
+ * A problem that was there before the run refuses the first pending file as well, unless that
+ * file repairs it: no file is committed on a schema outside the invariants, as the guards pasted
+ * into 0001 to 0014 never let one. So a repair is a migration that is the first one pending, or
+ * is made by hand; a repair that sorts after another pending file is never reached.
  */
 export async function runMigrations(options: MigrationOptions): Promise<MigrationResult> {
   const log = options.log ?? (() => undefined);
@@ -133,7 +161,20 @@ export async function runMigrations(options: MigrationOptions): Promise<Migratio
   const applied: string[] = [];
   const alreadyApplied: string[] = [];
   try {
-    await client.query('SELECT pg_advisory_lock($1)', [ADVISORY_LOCK_KEY]);
+    // Before the advisory lock, which a lock_timeout also bounds. Session level (is_local false):
+    // each migration's BEGIN and ROLLBACK leave it alone.
+    await client.query("SELECT set_config('lock_timeout', $1, false)", [MIGRATION_LOCK_TIMEOUT]);
+    await client
+      .query('SELECT pg_advisory_lock($1)', [ADVISORY_LOCK_KEY])
+      .catch((error: unknown) => {
+        // PostgreSQL's own text does not say whose lock it waited for (review finding BEH-2).
+        if (errorField(error, 'code') !== LOCK_NOT_AVAILABLE) throw error;
+        throw new Error(
+          `another migration run holds the runner's advisory lock and did not finish within ` +
+            `${MIGRATION_LOCK_TIMEOUT}: wait for it to finish and run db:migrate again`,
+          { cause: error },
+        );
+      });
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.schema_migrations (
         name       text PRIMARY KEY,
@@ -173,6 +214,18 @@ export async function runMigrations(options: MigrationOptions): Promise<Migratio
       }
     }
 
+    // What is already wrong before this run touches anything. With files pending this read
+    // refuses nothing by itself, because the first of them may be the repair. Only the first:
+    // the check after each file refuses every problem, the older ones included. The list lets
+    // that failure say which problems the file did not make, and how to get past them.
+    await client.query('BEGIN');
+    let knownBefore: string[];
+    try {
+      knownBefore = await schemaProblemsInTransaction(client);
+    } finally {
+      await client.query('ROLLBACK');
+    }
+
     for (const { name, sql, digest } of pending) {
       log(`applying ${name}`);
       await client.query('BEGIN');
@@ -182,13 +235,26 @@ export async function runMigrations(options: MigrationOptions): Promise<Migratio
           name,
           digest,
         ]);
+        await assertSchemaInvariants(client, knownBefore);
         await client.query('COMMIT');
       } catch (error) {
         await client.query('ROLLBACK');
         const message = error instanceof Error ? error.message : String(error);
-        throw new Error(`migration ${name} failed: ${message}`, { cause: error });
+        throw new Error(`migration ${name} failed and was rolled back: ${message}`, {
+          cause: error,
+        });
       }
       applied.push(name);
+    }
+    if (pending.length === 0 && knownBefore.length > 0) {
+      throw new SchemaInvariantError(
+        knownBefore,
+        'No migration was pending and this run changed nothing: the database was changed ' +
+          'outside the migrations, or these rules are newer than it. Put it right in a new ' +
+          'migration, or by hand as the database administrator. An object an extension or the ' +
+          'administrator created is removed from this database by the administrator instead ' +
+          "(DROP EXTENSION for an extension's object). Then run again.",
+      );
     }
   } finally {
     await client.query('SELECT pg_advisory_unlock($1)', [ADVISORY_LOCK_KEY]).catch(() => undefined);

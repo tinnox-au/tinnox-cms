@@ -421,6 +421,22 @@ function requirementOf(
   return required;
 }
 
+/**
+ * A lock timeout (55P03) as 503 service_unavailable with retry-after 2; anything else unchanged.
+ * For a write outside withOrgAllowed that waits for a row lock, such as the public alert
+ * confirmation (review findings SEC-3, BEH-3), so it answers as every other write does.
+ */
+export function lockTimeoutAsUnavailable(request: FastifyRequest, error: unknown): unknown {
+  if (pgErrorCode(error) !== LOCK_NOT_AVAILABLE) return error;
+  request.log.warn({ pgCode: LOCK_NOT_AVAILABLE }, 'a write waited too long for a lock');
+  return new HttpError(
+    503,
+    'service_unavailable',
+    'Another change is being saved. Try again in a moment.',
+    { headers: { 'retry-after': '2' } },
+  );
+}
+
 /** Records a role refusal and maps a lock timeout; anything else passes unchanged. */
 async function settle(
   ctx: AppContext,
@@ -432,16 +448,7 @@ async function settle(
     await recordPermissionDenied(ctx, request, session, error.record);
     return error;
   }
-  if (pgErrorCode(error) === LOCK_NOT_AVAILABLE) {
-    request.log.warn({ pgCode: LOCK_NOT_AVAILABLE }, 'a write waited too long for a lock');
-    return new HttpError(
-      503,
-      'service_unavailable',
-      'Another change is being saved. Try again in a moment.',
-      { headers: { 'retry-after': '2' } },
-    );
-  }
-  return error;
+  return lockTimeoutAsUnavailable(request, error);
 }
 
 /**

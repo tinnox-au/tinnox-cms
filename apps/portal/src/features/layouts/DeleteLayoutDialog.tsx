@@ -3,6 +3,7 @@ import { isApiRequestError } from '../../api/client.ts';
 import { api } from '../../api/index.ts';
 import { refusalNames, screenWording } from '../../lib/playlistsListActions.ts';
 import { Banner, ConfirmDialog, ErrorNotice } from '../../ui/index.ts';
+import { InUseList, useRowFocusReturn, type RowFocusSource } from '../shared/index.ts';
 
 /** What the dialog needs of a layout: a list row and the editor's layout both fit. */
 export interface LayoutToDelete {
@@ -16,6 +17,11 @@ export interface DeleteLayoutDialogProps {
   readonly onClose: () => void;
   /** After the server deleted it; the dialog has closed. */
   readonly onDeleted: (layout: LayoutToDelete) => void;
+  /**
+   * Where focus goes once the deleted row has left the list (EAX-14); `'opener'` where no
+   * list shows it (the editor, which leaves the page after a delete). Read when it opens.
+   */
+  readonly rowFocus: RowFocusSource | 'opener';
 }
 
 /**
@@ -23,7 +29,17 @@ export interface DeleteLayoutDialogProps {
  * (`layout_in_use`); the dialog then names those screens, so the operator knows where to
  * assign other content first. Any other refusal is shown with its error code.
  */
-export function DeleteLayoutDialog({ layout, onClose, onDeleted }: DeleteLayoutDialogProps) {
+export function DeleteLayoutDialog({
+  layout,
+  onClose,
+  onDeleted,
+  rowFocus,
+}: DeleteLayoutDialogProps) {
+  const returnFocus = useRowFocusReturn(
+    layout !== null,
+    layout === null ? [] : [layout.id],
+    rowFocus,
+  );
   // The layout as it was when the dialog opened; it also stays while the dialog fades out.
   const [shown, setShown] = useState<LayoutToDelete | null>(layout);
   // The prop as last seen, null included, so reopening for the same layout starts afresh.
@@ -70,6 +86,7 @@ export function DeleteLayoutDialog({ layout, onClose, onDeleted }: DeleteLayoutD
       onConfirm={confirm}
       onCancel={onClose}
       testId="layouts-delete-dialog"
+      returnFocus={returnFocus}
     >
       <p>
         The layout is removed for good. Screens that already show it keep it until their next push.
@@ -79,13 +96,7 @@ export function DeleteLayoutDialog({ layout, onClose, onDeleted }: DeleteLayoutD
           <p>
             {screenWording(refusal.message)} <span className="tx-code">{refusal.code}</span>
           </p>
-          {screens.length > 0 && (
-            <ul data-testid="layouts-delete-screens">
-              {screens.map((name) => (
-                <li key={name}>{name}</li>
-              ))}
-            </ul>
-          )}
+          <InUseList names={screens} testId="layouts-delete-screens" />
         </Banner>
       ) : (
         error !== null && <ErrorNotice error={error} title="The layout was not deleted" />

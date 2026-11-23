@@ -31,6 +31,7 @@ import {
   useToast,
   type DataTableColumn,
 } from '../../ui/index.ts';
+import { elementByTestId, rowByTestId } from '../shared/index.ts';
 import { APP_TYPE_ICONS } from './appIcons.ts';
 import { CreateAppDialog } from './CreateAppDialog.tsx';
 import { DeleteAppDialog } from './DeleteAppDialog.tsx';
@@ -188,6 +189,12 @@ export function AppsPage() {
         onDeleted={(app) => {
           reload();
           toast.success(`${app.name} deleted`);
+        }}
+        rowFocus={{
+          mode: 'row',
+          order: rows.map((app) => app.id),
+          row: rowByTestId('apps-row-'),
+          primary: elementByTestId('apps-create'),
         }}
       />
     </>

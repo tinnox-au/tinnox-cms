@@ -4,12 +4,14 @@
  * real PostgreSQL as the runtime role tinnox_app); the harness itself lives next to
  * the API (apps/api/test/support.ts) and is re-exported here.
  */
-import { execFileSync } from 'node:child_process';
-import { chmodSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { chmodSync, existsSync, readFileSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseEnv } from 'node:util';
 import pg from 'pg';
-import type { PairedPlayer, TestApp } from '@tinnox/api/test-support';
+import type { Operator, PairedPlayer, TestApp } from '@tinnox/api/test-support';
 
 export * from '@tinnox/api/test-support';
 
@@ -105,6 +107,27 @@ export function requestMediaUrls(
   });
 }
 
+/** Adds an address to the operator's alert list; its confirmation e-mail lands in `t.sentMail`. */
+export function addAlertAddress(operator: Operator, email: string): Promise<Response> {
+  return operator.fetch('/api/alert-recipients', { method: 'POST', json: { email } });
+}
+
+/** Posts a confirmation token as the address's owner does: with no session. */
+export function confirmAlertAddress(t: TestApp, token: string): Promise<Response> {
+  return fetch(`${t.url}/api/alert-recipients/confirm`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ token }),
+  });
+}
+
+/** The token of the newest confirmation e-mail. */
+export function lastConfirmationToken(t: TestApp): string {
+  const match = /\/alerts\/confirm#([A-Za-z0-9_-]{43})/.exec(t.sentMail.at(-1)?.text ?? '');
+  if (match?.[1] === undefined) throw new Error('no confirmation e-mail');
+  return match[1];
+}
+
 /**
  * Starts the real validation worker image on the test application's job directory, with
  * the same isolation as infra/docker-compose.yml. Returns a function that removes it.
@@ -167,4 +190,73 @@ export async function waitForVerdict(
     if (Date.now() > deadline) throw new Error(`media ${mediaId} is still processing`);
     await new Promise((resolve) => setTimeout(resolve, 300));
   }
+}
+
+/** A TCP port on loopback that nothing listens on at the moment of asking. */
+export function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      const port = typeof address === 'object' && address !== null ? address.port : 0;
+      server.close(() => {
+        resolve(port);
+      });
+    });
+  });
+}
+
+/**
+ * Runs a real entry point of the API (`src/main.ts`, `src/alerts-once.ts`) as a child process
+ * with exactly `env` (and PATH) as its environment, and resolves with its exit code and output.
+ * The entry point also reads the names it knows from the root `.env`, where `env` does not set
+ * them (runtimeEnv in apps/api/src/config.ts). Rejects if it is still running after 20 s: every
+ * caller expects it to refuse and exit.
+ */
+export function runApiEntryPoint(
+  script: string,
+  env: Record<string, string>,
+): Promise<{ code: number | null; output: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--import', 'tsx', script], {
+      cwd: join(repoRoot, 'apps', 'api'),
+      env: { PATH: process.env['PATH'] ?? '', ...env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let output = '';
+    child.stdout.on('data', (chunk: Buffer) => (output += chunk.toString('utf8')));
+    child.stderr.on('data', (chunk: Buffer) => (output += chunk.toString('utf8')));
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`${script} kept running with an unacceptable configuration:\n${output}`));
+    }, 20_000);
+    // 'close', not 'exit': it comes after stdout and stderr are drained, and the refusal the
+    // callers assert on is the last thing the entry point prints before it exits (E2E-4).
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      resolve({ code, output });
+    });
+  });
+}
+
+/** True when something answers HTTP on the loopback port. */
+export async function listening(port: number): Promise<boolean> {
+  try {
+    await fetch(`http://127.0.0.1:${port}/healthz`, { signal: AbortSignal.timeout(500) });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The root `.env` (the generated development configuration), or nothing when it is missing.
+ * It holds the administrator credentials too: give an entry point `apiEnvironment` of it.
+ */
+export function developmentEnv(): Record<string, string> {
+  const envFile = join(repoRoot, '.env');
+  return existsSync(envFile)
+    ? (parseEnv(readFileSync(envFile, 'utf8')) as Record<string, string>)
+    : {};
 }

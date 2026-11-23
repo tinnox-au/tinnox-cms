@@ -305,8 +305,8 @@ export function PushDialog({
                     <p>{report.lines[0]}</p>
                   ) : (
                     <ul>
-                      {report.lines.map((line) => (
-                        <li key={line}>{line}</li>
+                      {report.lines.map((line, index) => (
+                        <li key={index}>{line}</li>
                       ))}
                     </ul>
                   )}

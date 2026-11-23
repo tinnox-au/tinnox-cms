@@ -35,7 +35,7 @@ export {
   type DataTableSelection,
   type NameCellProps,
 } from './DataTable.tsx';
-export { Dialog, type DialogProps } from './Dialog.tsx';
+export { Dialog, type DialogProps, type ReturnFocus } from './Dialog.tsx';
 export { EmptyState, type EmptyStateProps } from './EmptyState.tsx';
 export { ErrorNotice, type ErrorNoticeProps } from './ErrorNotice.tsx';
 export { Fact, Facts, type FactProps, type FactsProps } from './Facts.tsx';

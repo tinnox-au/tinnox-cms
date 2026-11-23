@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { expect, test } from '@playwright/test';
 import { encodePng } from '../support/png.ts';
 import { operatorSession, type OperatorSession } from './support/contexts.ts';
+import { expectListedWithout } from './support/operator.ts';
 import { PORTAL_URL } from './support/stack.ts';
 
 const runId = randomUUID().slice(0, 8);
@@ -46,10 +47,12 @@ test('the second organisation sees none of the first organisation’s objects an
 
   // Lists contain nothing from the first organisation.
   for (const path of ['/api/displays', '/api/media', '/api/playlists', '/api/audit?limit=200']) {
-    const text = await (await second.api.get(path)).text();
-    for (const id of [display.id, media.id, playlist.id, published.publicationId]) {
-      expect(text, `${path} must not mention ${id}`).not.toContain(id);
-    }
+    await expectListedWithout(second.api, path, [
+      display.id,
+      media.id,
+      playlist.id,
+      published.publicationId,
+    ]);
   }
 
   // Direct requests with the real ids answer exactly like unknown ids.

@@ -1,8 +1,8 @@
 // Which suite runs each test file (adoption plan section 4.1): a test file outside every
 // include glob never runs and nothing says so, and one inside two runs twice. Read by
-// scripts/lib/test-inventory.test.ts, which builds the suites from vitest.config.ts and
-// tests/playwright.config.ts.
-import { relative } from 'node:path';
+// scripts/lib/test-inventory.test.ts, which builds the suites from vitest.config.ts and every
+// Playwright config in the repository.
+import { posix, relative } from 'node:path';
 
 /** A file that a test runner would pick up by its name. */
 export const TEST_FILE = /\.(test|spec)\.[cm]?[jt]sx?$/;
@@ -21,7 +21,7 @@ export function inventoryProblems(files: readonly string[], suites: readonly Sui
     const owners = suites.filter((suite) => suite.runs(path)).map((suite) => suite.name);
     if (owners.length === 0) {
       problems.push(
-        `${path} is run by no suite: move it under an include glob of a project in vitest.config.ts or under tests/e2e (a Playwright config with another testDir needs its own suite in scripts/lib/test-inventory.test.ts), or rename it if it is not a test`,
+        `${path} is run by no suite: move it under an include glob of a project in vitest.config.ts or under the testDir of a Playwright config (tests/e2e), or rename it if it is not a test`,
       );
     } else if (owners.length > 1) {
       problems.push(
@@ -50,4 +50,30 @@ export function playwrightSuite(name: string, testDir: string, testMatch: unknow
       return !inside.startsWith('..') && TEST_FILE.test(inside);
     },
   };
+}
+
+/** A Playwright config as the inventory reads it. */
+export interface PlaywrightConfig {
+  /** the config file, from the repository root */
+  readonly path: string;
+  /** its testDir, relative to the config file as Playwright reads it */
+  readonly testDir?: string | undefined;
+  readonly testMatch?: unknown;
+}
+
+/**
+ * One suite per test directory (CHK-11), named after the config that runs all of it. A config
+ * that picks some files (testMatch) out of a directory another config runs whole adds no file,
+ * so it adds no suite: tests/playwright.layout.config.ts runs a subset of tests/e2e.
+ */
+export function playwrightSuites(configs: readonly PlaywrightConfig[]): Suite[] {
+  const byDir = new Map<string, PlaywrightConfig[]>();
+  for (const config of configs) {
+    const dir = posix.join(posix.dirname(config.path), config.testDir ?? '.');
+    byDir.set(dir, [...(byDir.get(dir) ?? []), config]);
+  }
+  return [...byDir].map(([dir, sharing]) => {
+    const whole = sharing.find((config) => config.testMatch === undefined) ?? sharing[0];
+    return playwrightSuite(whole?.path ?? dir, dir, whole?.testMatch);
+  });
 }

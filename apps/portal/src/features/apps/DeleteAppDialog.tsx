@@ -4,6 +4,7 @@ import { isApiRequestError } from '../../api/client.ts';
 import { api } from '../../api/index.ts';
 import { inUsePlaylistNames } from '../../lib/apps.ts';
 import { Banner, ConfirmDialog, ErrorNotice } from '../../ui/index.ts';
+import { InUseList, useRowFocusReturn, type RowFocusSource } from '../shared/index.ts';
 
 export interface DeleteAppDialogProps {
   /** The app to delete; null keeps the dialog closed. */
@@ -11,6 +12,11 @@ export interface DeleteAppDialogProps {
   readonly onClose: () => void;
   /** After the server deleted it; the dialog has closed. */
   readonly onDeleted: (app: AppDto) => void;
+  /**
+   * Where focus goes once the deleted row has left the list (EAX-14); `'opener'` where no
+   * list shows it (the editor, which leaves the page after a delete). Read when it opens.
+   */
+  readonly rowFocus: RowFocusSource | 'opener';
 }
 
 /**
@@ -18,7 +24,8 @@ export interface DeleteAppDialogProps {
  * (`app_in_use`); the dialog then names those playlists, so the operator knows where to
  * remove it first. Any other refusal is shown with its error code.
  */
-export function DeleteAppDialog({ app, onClose, onDeleted }: DeleteAppDialogProps) {
+export function DeleteAppDialog({ app, onClose, onDeleted, rowFocus }: DeleteAppDialogProps) {
+  const returnFocus = useRowFocusReturn(app !== null, app === null ? [] : [app.id], rowFocus);
   // The app as it was when the dialog opened; it also stays while the dialog fades out.
   const [shown, setShown] = useState<AppDto | null>(app);
   const [error, setError] = useState<unknown>(null);
@@ -60,6 +67,7 @@ export function DeleteAppDialog({ app, onClose, onDeleted }: DeleteAppDialogProp
       onConfirm={confirm}
       onCancel={onClose}
       testId="apps-delete-dialog"
+      returnFocus={returnFocus}
     >
       <p>
         The app is removed for good. Screens that already show it keep it until their next push.
@@ -69,13 +77,7 @@ export function DeleteAppDialog({ app, onClose, onDeleted }: DeleteAppDialogProp
           <p>
             {refusal.message} <span className="tx-code">{refusal.code}</span>
           </p>
-          {playlists.length > 0 && (
-            <ul data-testid="apps-delete-playlists">
-              {playlists.map((name) => (
-                <li key={name}>{name}</li>
-              ))}
-            </ul>
-          )}
+          <InUseList names={playlists} testId="apps-delete-playlists" />
         </Banner>
       ) : (
         error !== null && <ErrorNotice error={error} title="The app was not deleted" />

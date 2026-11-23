@@ -1,0 +1,4 @@
+{
+  "note": "e2e tests that may not run, or may pass only on a retry, until their review date (npm run check:test-results, U-15). Each entry: test (\"<spec file> › <describe titles> › <title>\"), result (\"did-not-run\" or \"flaky\"), owner, reason, reviewBy (YYYY-MM-DD, at most 90 days ahead). A skip has no entry: fix the test or delete it.",
+  "entries": []
+}

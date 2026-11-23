@@ -2,7 +2,16 @@
  * Configuration loader. Reads the environment once, validates it with zod and
  * refuses unsafe combinations (prototype-m0.md D19, brief section 6).
  *
+ * The configuration is built from RUNTIME_ENV_NAMES (the keys of EnvSchema and the LIMIT_
+ * overrides) and from nothing else. The entry points pass runtimeEnv(process.env): the process
+ * environment, and under it those names, and only those, from the root .env (D5 of the poteto
+ * pyramid plan).
+ *
  * Rules that hold in every mode:
+ *   - no administrator credential (migrator, database superuser, Keycloak administrator,
+ *     provisioning) is in the environment the process was started with (AG-1.9, AG-1.17, D5);
+ *   - DATABASE_URL connects as tinnox_app and its query replaces none of createPool's start-up
+ *     settings;
  *   - plain http origins are accepted only for loopback hosts;
  *   - portal and player must be different origins (D7);
  *   - the redirect URI must be the callback route on the portal or API origin.
@@ -12,12 +21,22 @@
  *   - no secret may be a development value (prefix "dev-") or a placeholder (SMTP_PASSWORD too);
  *   - issuer, origins and redirect URIs must be https;
  *   - the development realm is refused;
- *   - an MFA evidence requirement (acr or amr) must be configured.
+ *   - an MFA evidence requirement (acr or amr) must be configured;
+ *   - SMTP_HOST, when set, must be in REVIEWED_SMTP_HOSTS (DEC-13, D23 of the poteto pyramid plan).
  */
+import { existsSync, readFileSync } from 'node:fs';
 import { isIP } from 'node:net';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { limitsFromEnv, ROUTES, SESSION_COOKIE, type Limits } from '@tinnox/contracts';
+import { parseEnv } from 'node:util';
+import {
+  LIMIT_ENV_VARS,
+  limitsFromEnv,
+  ROUTES,
+  SESSION_COOKIE,
+  type Limits,
+} from '@tinnox/contracts';
+import { startupSettingsProblem } from '@tinnox/db';
 import { z } from 'zod';
 
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
@@ -126,6 +145,83 @@ const EnvSchema = z.object({
     .optional(),
 });
 
+/** An environment as a process or a .env file gives it. */
+export type Env = Readonly<Record<string, string | undefined>>;
+
+/**
+ * Every name the API and the alert job read: the keys of EnvSchema and the LIMIT_ overrides
+ * (D5 of the poteto pyramid plan). loadConfig builds the configuration from these names and
+ * ignores the rest of the map it is given; runtimeEnv takes no other name from the root .env.
+ */
+export const RUNTIME_ENV_NAMES: readonly string[] = Object.freeze([
+  ...Object.keys(EnvSchema.shape),
+  ...Object.values(LIMIT_ENV_VARS),
+]);
+
+// The credentials of the offline tools and the administrators (AG-1.9, AG-1.17, D5): the
+// migrator's connection strings and password, the database superuser's password, the Keycloak
+// administrator's password, and everything the provisioning script reads.
+const ADMINISTRATOR_NAMES: ReadonlySet<string> = new Set([
+  'DATABASE_MIGRATOR_URL',
+  'TEST_DATABASE_MIGRATOR_URL',
+  'TINNOX_MIGRATOR_PASSWORD',
+  'POSTGRES_SUPERUSER_PASSWORD',
+  'KC_BOOTSTRAP_ADMIN_PASSWORD',
+]);
+const PROVISIONING_PREFIX = 'PROVISION_';
+
+/**
+ * True for a name that must never be in the environment of the API or the alert job. A deny-list
+ * can only refuse the names it knows: what keeps a new administrator variable out of the
+ * configuration is RUNTIME_ENV_NAMES, which it is not on.
+ */
+export function isAdministratorName(name: string): boolean {
+  return ADMINISTRATOR_NAMES.has(name) || name.startsWith(PROVISIONING_PREFIX);
+}
+
+/** The refusal of an environment that holds administrator names; it carries names, never a value. */
+function administratorNamesProblem(names: readonly string[]): string | null {
+  const found = names.filter(isAdministratorName).sort();
+  if (found.length === 0) return null;
+  const one = found.length === 1;
+  return (
+    `${found.join(', ')} ${one ? 'is' : 'are'} set in the environment of this process. ` +
+    `${one ? 'It belongs' : 'They belong'} to the migrator, the database superuser, the Keycloak ` +
+    'administrator or the provisioning script, and must never reach the API or the alert job ' +
+    '(AG-1.9, AG-1.17). Start the process with its own environment, not the whole root .env: do ' +
+    'not export that file into the shell or pass it with --env-file. The entry points read the ' +
+    'names they need (RUNTIME_ENV_NAMES in apps/api/src/config.ts) from it themselves, and a ' +
+    'deployment sets only those'
+  );
+}
+
+const ROOT_ENV_FILE = join(REPO_ROOT, '.env');
+
+/** The root .env as `npm run setup` writes it on a development machine; empty when there is none. */
+function readRootEnvFile(): Env {
+  return existsSync(ROOT_ENV_FILE) ? parseEnv(readFileSync(ROOT_ENV_FILE, 'utf8')) : {};
+}
+
+/**
+ * The environment an entry point gives loadConfig: the process environment, and under it the
+ * RUNTIME_ENV_NAMES that the root .env sets. A name the process environment holds wins, even
+ * when it is empty (as with Node's --env-file, which the npm scripts used before D5), so a
+ * caller can blank a value of the file. Nothing else is read from the file: on a development
+ * machine it also holds the administrator credentials, which therefore never enter the process.
+ * The process environment passes through whole, so that loadConfig can refuse one that holds
+ * such a credential.
+ */
+export function runtimeEnv(processEnv: Env, file: Env = readRootEnvFile()): Env {
+  const env: Record<string, string | undefined> = {};
+  for (const name of RUNTIME_ENV_NAMES) {
+    if (file[name] !== undefined) env[name] = file[name];
+  }
+  for (const [name, value] of Object.entries(processEnv)) {
+    if (value !== undefined) env[name] = value;
+  }
+  return env;
+}
+
 export interface AppConfig {
   readonly nodeEnv: 'development' | 'test' | 'production';
   readonly logLevel: string;
@@ -170,6 +266,24 @@ export interface AppConfig {
     readonly password: string | null;
     readonly from: string;
   } | null;
+}
+
+/**
+ * The SMTP hosts whose provider has passed the data-location review under DEC-13 (contract,
+ * sub-processors, support location: item 4 of the pre-customer-release checklist in
+ * docs/security/operations-and-release-checklist.md). Production refuses any other SMTP_HOST
+ * (D23 of the poteto pyramid plan). Empty until that review names an Australian endpoint, so
+ * production sends no e-mail until then. Exact host names, compared lower-cased: no wildcards,
+ * and no loopback exemption, because a local relay can forward mail anywhere.
+ */
+export const REVIEWED_SMTP_HOSTS: readonly string[] = Object.freeze([]);
+
+export interface LoadConfigOptions {
+  /**
+   * Unit tests only: a stand-in for REVIEWED_SMTP_HOSTS, so no real host is listed for a test.
+   * Lint (NO_LOADCONFIG_OPTIONS in eslint.config.js) refuses it in product code.
+   */
+  readonly reviewedSmtpHosts?: readonly string[];
 }
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
@@ -241,22 +355,29 @@ function absoluteFromRepo(path: string): string {
  * Builds the configuration from an environment map. Throws ConfigError with
  * every problem found; error text names variables, never their values.
  */
-export function loadConfig(env: Readonly<Record<string, string | undefined>>): AppConfig {
+export function loadConfig(
+  env: Env,
+  { reviewedSmtpHosts = REVIEWED_SMTP_HOSTS }: LoadConfigOptions = {},
+): AppConfig {
   // Treat empty strings as "not set" so defaults apply.
   const cleaned: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
     if (typeof value === 'string' && value.trim() !== '') cleaned[key] = value.trim();
   }
+  // In every mode, and first, so it is reported whatever else is wrong (D5).
+  const problems: string[] = [];
+  const administrator = administratorNamesProblem(Object.keys(cleaned));
+  if (administrator !== null) problems.push(administrator);
   const parsed = EnvSchema.safeParse(cleaned);
   if (!parsed.success) {
-    throw new ConfigError(
-      parsed.error.issues.map(
+    throw new ConfigError([
+      ...problems,
+      ...parsed.error.issues.map(
         (issue) => `${issue.path.join('.') || 'environment'} ${issue.message}`,
       ),
-    );
+    ]);
   }
   const e = parsed.data;
-  const problems: string[] = [];
   const production = e.NODE_ENV === 'production';
 
   let limits: Limits | undefined;
@@ -314,10 +435,20 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): A
     if (db.protocol !== 'postgres:' && db.protocol !== 'postgresql:') {
       problems.push('DATABASE_URL must be a postgres:// URL');
     }
-    databasePassword = decodeURIComponent(db.password);
+    // What pg sends: a non-empty ?password= in the query wins over the one in the authority
+    // (pg-connection-string), so the placeholder refusal below judges that one (SEC-2). pg
+    // copies the query one parameter at a time, so of several ?password= the last one wins.
+    // The user name is judged in the authority only: a ?user= that names another login is
+    // refused by createPool's session check when it connects, as runtime-role-refusal.test.ts
+    // shows.
+    const queryPassword = db.searchParams.getAll('password').at(-1) ?? '';
+    databasePassword = queryPassword !== '' ? queryPassword : decodeURIComponent(db.password);
     if (decodeURIComponent(db.username) !== 'tinnox_app') {
       problems.push('DATABASE_URL must connect as the runtime role tinnox_app');
     }
+    // createPool refuses it too; here it is reported with every other problem.
+    const startup = startupSettingsProblem(e.DATABASE_URL, 'DATABASE_URL');
+    if (startup !== null) problems.push(startup);
   } catch {
     problems.push('DATABASE_URL is not a valid URL');
   }
@@ -349,6 +480,17 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): A
     if (e.OIDC_MFA_ACR_VALUES.length === 0 && e.OIDC_MFA_AMR_VALUES.length === 0) {
       problems.push(
         'production requires MFA evidence: set OIDC_MFA_ACR_VALUES or OIDC_MFA_AMR_VALUES',
+      );
+    }
+    // Alert e-mails carry screen, site and organisation names, so where the provider keeps them
+    // is a DEC-13 question. Without SMTP_HOST there is no e-mail and nothing to refuse.
+    const smtpHost = e.SMTP_HOST?.toLowerCase();
+    if (
+      smtpHost !== undefined &&
+      !reviewedSmtpHosts.some((host) => host.toLowerCase() === smtpHost)
+    ) {
+      problems.push(
+        'SMTP_HOST is not a reviewed mail host: production sends e-mail only through a host listed in REVIEWED_SMTP_HOSTS (apps/api/src/config.ts), and a host joins that list only once its provider passes the data-location review under DEC-13; get the host reviewed and added there, or leave SMTP_HOST unset to run without e-mail alerts',
       );
     }
   }

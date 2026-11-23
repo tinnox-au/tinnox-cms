@@ -6,14 +6,27 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { withOrg, withoutOrg, withResolvedOrg, type Pool } from '../src/index.ts';
 import {
+  assertRuntimeRole,
+  createPool,
+  readRuntimeRole,
+  RuntimeRoleError,
+  runtimeRoleProblems,
+  withOrg,
+  withoutOrg,
+  withResolvedOrg,
+  type Pool,
+} from '../src/index.ts';
+import {
+  actingAs,
   appPool,
   createOrg,
   migratorClient,
+  migratorUrl,
   PG,
   pgCode,
   pgViolation,
+  superuserUrl,
   type TestOrg,
 } from './support.ts';
 
@@ -236,6 +249,253 @@ describe('the runtime role itself', () => {
       expect(await pgCode(pool.query(`DELETE FROM ${table}`)), table).toBe(
         PG.insufficientPrivilege,
       );
+    }
+  });
+});
+
+describe('createPool serves tinnox_app only (AG-1.2)', () => {
+  // The refusal must also say what to use instead (plan section 3.4), not only what it found.
+  const REFUSED =
+    /createPool serves role tinnox_app only, but the connection logs in as .+; use the tinnox_app connection string \(DATABASE_URL\) without a role setting, and connectMigrator \(@tinnox\/db\) for an offline tool that needs tinnox_migrator/;
+  // pg takes ?user= and ?password= over the URL's username, so this URL names tinnox_app,
+  // passes the start-up check assertConnectionRole (which reads the username only), and still
+  // logs in as the migrator. This check is what refuses it, also inside assertRuntimeRole.
+  const migratorInAppUrl = (): string => {
+    const migrator = new URL(migratorUrl());
+    const url = new URL(process.env['TEST_DATABASE_URL'] ?? '');
+    url.searchParams.set('user', decodeURIComponent(migrator.username));
+    url.searchParams.set('password', decodeURIComponent(migrator.password));
+    return url.toString();
+  };
+  const wrongLogins = (): [string, string, RegExp][] => [
+    ['the migrator', migratorUrl(), /logs in as tinnox_migrator and acts as tinnox_migrator/],
+    ['the superuser', superuserUrl(), /logs in as postgres and acts as postgres/],
+    [
+      'the migrator behind a tinnox_app URL username',
+      migratorInAppUrl(),
+      /logs in as tinnox_migrator and acts as tinnox_migrator/,
+    ],
+  ];
+
+  it('hands out connections that log in and act as tinnox_app', async () => {
+    const fresh = appPool(3);
+    const clients = await Promise.all([fresh.connect(), fresh.connect(), fresh.connect()]);
+    try {
+      for (const client of clients) {
+        const { rows } = await client.query('SELECT current_user, session_user');
+        expect(rows[0]).toEqual({ current_user: 'tinnox_app', session_user: 'tinnox_app' });
+      }
+    } finally {
+      for (const client of clients) client.release();
+      await fresh.end();
+    }
+  });
+
+  /** A pool on `url` refuses every connection it opens, with `found` in the reason. */
+  async function expectRefusedOnEveryConnection(
+    who: string,
+    url: string,
+    found: RegExp,
+  ): Promise<void> {
+    const wrong = createPool({
+      connectionString: url,
+      applicationName: 'tinnox-test-wrong',
+      max: 3,
+    });
+    try {
+      // Several connections at once, then a checkout after they were closed: each new
+      // connection is checked, not only the pool's first.
+      const first = await Promise.allSettled([
+        wrong.query('SELECT 1'),
+        wrong.query('SELECT 1'),
+        // Released at once if it was wrongly handed out, so the pool can still end.
+        wrong.connect().then((client) => client.release()),
+      ]);
+      for (const result of first) {
+        expect(result.status, who).toBe('rejected');
+        const reason = result.status === 'rejected' ? String(result.reason) : '';
+        expect(reason, who).toMatch(REFUSED);
+        expect(reason, who).toMatch(found);
+      }
+      await expect(wrong.query('SELECT 1'), who).rejects.toThrow(REFUSED);
+      expect(wrong.totalCount, who).toBe(0);
+    } finally {
+      await wrong.end();
+    }
+  }
+
+  it('refuses the migrator and the superuser on every connection', async () => {
+    for (const [who, url, found] of wrongLogins()) {
+      await expectRefusedOnEveryConnection(who, url, found);
+    }
+  });
+
+  it('refuses the superuser acting as tinnox_app through a role default, which no connection string shows', async () => {
+    // current_user would pass, session_user does not: the superuser keeps its rights. A
+    // connection string cannot set the role any more (the next test), so the role is a default
+    // of the superuser's sessions. A default is committed and outlives a killed run, so it is
+    // set in an empty database of this test's own, never in the shared one, where every later
+    // superuser session would act as tinnox_app. The check reads the session only, so any
+    // database serves. The administrator connects to another database, where the default does
+    // not apply, and first drops what a killed run left.
+    const scratch = 'tinnox_roledefault_test';
+    const admin = new pg.Client({ connectionString: superuserUrl('postgres') });
+    await admin.connect();
+    try {
+      await admin.query(`DROP DATABASE IF EXISTS ${scratch} WITH (FORCE)`);
+      await admin.query(`CREATE DATABASE ${scratch}`);
+      await admin.query(`ALTER ROLE postgres IN DATABASE ${scratch} SET role = 'tinnox_app'`);
+      await expectRefusedOnEveryConnection(
+        'the superuser acting as tinnox_app',
+        superuserUrl(scratch),
+        /logs in as postgres and acts as tinnox_app/,
+      );
+    } finally {
+      await admin.query(`DROP DATABASE IF EXISTS ${scratch} WITH (FORCE)`);
+      await admin.end();
+    }
+  });
+});
+
+describe("createPool's start-up settings cannot be replaced from the connection string", () => {
+  const SETTINGS = ['row_security', 'statement_timeout', 'lock_timeout'] as const;
+  const appUrl = (query: Record<string, string>): string => {
+    const url = new URL(process.env['TEST_DATABASE_URL'] ?? '');
+    for (const [name, value] of Object.entries(query)) url.searchParams.set(name, value);
+    return url.toString();
+  };
+
+  it('pg puts the query of a connection string over the options a client is created with (the reason)', async () => {
+    // What createPool sends, given to pg directly with a query that names the same settings.
+    // If pg ever stops letting the query win, this fails and the refusal can be reconsidered.
+    const client = new pg.Client({
+      connectionString: appUrl({
+        options: '-c row_security=off',
+        statement_timeout: '0',
+        lock_timeout: '0',
+      }),
+      options: '-c row_security=on',
+      statement_timeout: 15_000,
+      lock_timeout: 5_000,
+    });
+    await client.connect();
+    try {
+      const shown: Record<string, unknown> = {};
+      for (const setting of SETTINGS) {
+        const { rows } = await client.query<Record<string, string>>(`SHOW ${setting}`);
+        shown[setting] = rows[0]?.[setting];
+      }
+      expect(shown).toEqual({ row_security: 'off', statement_timeout: '0', lock_timeout: '0' });
+    } finally {
+      await client.end();
+    }
+  });
+
+  it('a pool has row security on and its timeouts, as createPool sends them', async () => {
+    const shown: Record<string, unknown> = {};
+    for (const setting of [...SETTINGS, 'idle_in_transaction_session_timeout']) {
+      const { rows } = await pool.query<Record<string, string>>(`SHOW ${setting}`);
+      shown[setting] = rows[0]?.[setting];
+    }
+    expect(shown).toEqual({
+      row_security: 'on',
+      statement_timeout: '15s',
+      lock_timeout: '5s',
+      idle_in_transaction_session_timeout: '30s',
+    });
+  });
+
+  it('refuses such a connection string before it connects, a role setting included', () => {
+    const cases: [string, string][] = [
+      [appUrl({ options: '-c row_security=off' }), 'options'],
+      [appUrl({ options: '-c search_path=pg_temp' }), 'options'],
+      [appUrl({ statement_timeout: '0' }), 'statement_timeout'],
+      [appUrl({ lock_timeout: '0' }), 'lock_timeout'],
+      [appUrl({ idle_in_transaction_session_timeout: '0' }), 'idle_in_transaction_session_timeout'],
+      // The superuser acting as tinnox_app: never even tried.
+      [actingAs(superuserUrl(), 'tinnox_app'), 'options'],
+    ];
+    for (const [url, parameter] of cases) {
+      let message = '';
+      try {
+        void createPool({ connectionString: url, max: 1 }).end();
+      } catch (error) {
+        message = error instanceof Error ? error.message : '';
+      }
+      expect(message, parameter).toMatch(
+        new RegExp(`^the database connection string sets ${parameter} in its query`),
+      );
+      expect(message, parameter).toContain('remove that parameter from the connection string');
+      expect(message, parameter).not.toContain(decodeURIComponent(new URL(url).password));
+    }
+  });
+});
+
+describe('assertRuntimeRole reads the role from the catalogue (AG-1.3)', () => {
+  it('accepts the runtime role of the test database', async () => {
+    await expect(assertRuntimeRole(pool)).resolves.toBeUndefined();
+  });
+
+  it('refuses another login before it reads anything', async () => {
+    const wrong = createPool({ connectionString: migratorUrl(), max: 1 });
+    try {
+      // createPool's session check refuses the checkout; the error is the same type, so an
+      // entry point prints both alike.
+      await expect(assertRuntimeRole(wrong)).rejects.toThrow(RuntimeRoleError);
+      await expect(assertRuntimeRole(wrong)).rejects.toThrow(/logs in as tinnox_migrator/);
+    } finally {
+      await wrong.end();
+    }
+  });
+
+  it('sees a tinnox_app made superuser, BYPASSRLS, REPLICATION, CREATEROLE, CREATEDB, a member or an owner (every change is rolled back)', async () => {
+    // ALTER ROLE and GRANT are cluster-wide, so they are never committed here: the superuser
+    // makes each change in a transaction, acts as tinnox_app in it, reads, and rolls back.
+    // The session is the superuser's, so the session problem is always there too.
+    const admin = new pg.Client({ connectionString: superuserUrl() });
+    await admin.connect();
+    const read = async (statement: string): Promise<string[]> => {
+      await admin.query('BEGIN');
+      try {
+        await admin.query(statement);
+        await admin.query('SET LOCAL ROLE tinnox_app');
+        return runtimeRoleProblems(await readRuntimeRole(admin));
+      } finally {
+        await admin.query('ROLLBACK');
+      }
+    };
+    try {
+      const session = /logs in as postgres and acts as tinnox_app, not tinnox_app/;
+      expect(await read('SELECT 1')).toEqual([expect.stringMatching(session)]);
+      const cases: [string, RegExp][] = [
+        ['ALTER ROLE tinnox_app SUPERUSER', /^role tinnox_app is a superuser/],
+        ['ALTER ROLE tinnox_app BYPASSRLS', /^role tinnox_app has BYPASSRLS/],
+        ['ALTER ROLE tinnox_app REPLICATION', /^role tinnox_app has REPLICATION/],
+        ['ALTER ROLE tinnox_app CREATEROLE', /^role tinnox_app has CREATEROLE/],
+        ['ALTER ROLE tinnox_app CREATEDB', /^role tinnox_app has CREATEDB/],
+        [
+          'GRANT pg_read_all_data TO tinnox_app',
+          /^role tinnox_app is a member of pg_read_all_data/,
+        ],
+        [
+          'ALTER TABLE public.media_tag OWNER TO tinnox_app',
+          /^role tinnox_app owns table media_tag/,
+        ],
+        ['ALTER SCHEMA sec OWNER TO tinnox_app', /^role tinnox_app owns schema sec/],
+        // A shared object: pg_shdepend records it with database 0.
+        [
+          'ALTER DATABASE tinnox_test OWNER TO tinnox_app',
+          /^role tinnox_app owns database tinnox_test/,
+        ],
+      ];
+      for (const [statement, found] of cases) {
+        expect(await read(statement), statement).toEqual([
+          expect.stringMatching(session),
+          expect.stringMatching(found),
+        ]);
+      }
+    } finally {
+      await admin.end();
     }
   });
 });
@@ -1174,7 +1434,10 @@ describe('member invites (0013)', () => {
 });
 
 describe('alert episodes and addresses (0014)', () => {
-  /** Arranges one row of each for `org`, as the migrator, and returns the recipient id. */
+  /**
+   * Arranges one row of each for `org`, as the migrator, and returns the recipient id. The
+   * address has the organisation's member as its adder: one with none is dead (D22).
+   */
   async function arrange(org: TestOrg): Promise<string> {
     const recipientId = randomUUID();
     await migrator.query('BEGIN');
@@ -1185,9 +1448,9 @@ describe('alert episodes and addresses (0014)', () => {
         [org.displayId, org.orgId],
       );
       await migrator.query(
-        `INSERT INTO alert_recipient (id, org_id, email, confirm_token_hash, confirm_expires_at)
-         VALUES ($1, $2, $3, $4, now() + interval '7 days')`,
-        [recipientId, org.orgId, `ops-${org.orgId}@example.com`, randomBytes(32)],
+        `INSERT INTO alert_recipient (id, org_id, email, created_by, confirm_token_hash, confirm_expires_at)
+         VALUES ($1, $2, $3, $4, $5, now() + interval '7 days')`,
+        [recipientId, org.orgId, `ops-${org.orgId}@example.com`, org.membershipId, randomBytes(32)],
       );
       await migrator.query('COMMIT');
     } catch (error) {

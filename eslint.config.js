@@ -8,7 +8,7 @@ import tseslint from 'typescript-eslint';
 // A later config block replaces an earlier block's options for the same rule, so a file group
 // that needs selectors from two lists composes one array from the named lists below.
 // The *-lint.test.ts files in scripts/lib run each list against fixture text (the step 10 bans:
-// banned-patterns-lint.test.ts).
+// banned-patterns-lint.test.ts, which also holds the step 11 text-key rule).
 
 const SRCDOC_MESSAGE =
   'Do not give a frame its document as a string: it is parsed as HTML. Point src at a page that is served, or build the nodes.';
@@ -117,9 +117,9 @@ const NO_OUTBOUND_GLOBAL_DESTRUCTURING = [
 
 // Configuration is read once, at an entry point, and passed down (apps/api/src/config.ts), so a
 // test can give any module its own values. The entry points and config modules named here are
-// the only readers: the API's two entry points (loadConfig(process.env)), the media worker's
-// entry point, and scripts/lib/env.ts (requireEnv) for the offline tools, whose top-level
-// scripts are entry points and outside this rule.
+// the only readers: the API's two entry points (loadConfig(runtimeEnv(process.env)), D5), the
+// media worker's entry point, and scripts/lib/env.ts (requireEnv) for the offline tools, whose
+// top-level scripts are entry points and outside this rule.
 const ENV_FILES = [
   'apps/*/src/**/*.{ts,tsx}',
   'packages/*/src/**/*.{ts,tsx}',
@@ -280,6 +280,22 @@ const NO_CLOCK = [
   },
 ];
 
+// D23, DEC-13: loadConfig's second argument stands in for REVIEWED_SMTP_HOSTS so the config tests
+// need no real host on the list. Passed from product code, it would let production send mail
+// through a host the provider review never saw, without the diff to the list that review gates.
+// config.test.ts is a test file, outside the product blocks this joins. A renamed import is
+// reported too, so the call cannot hide under another name.
+const NO_LOADCONFIG_OPTIONS = [
+  {
+    selector: [
+      "CallExpression[arguments.length>1]:matches([callee.name='loadConfig'], [callee.property.name='loadConfig'])",
+      "ImportSpecifier[imported.name='loadConfig'][local.name!='loadConfig']",
+    ].join(', '),
+    message:
+      'Call loadConfig(env) with the environment only, under its own name (D23): its second argument replaces REVIEWED_SMTP_HOSTS and is for apps/api/src/config.test.ts. To send mail through a new host, get its provider through the data-location review under DEC-13 and add the host to REVIEWED_SMTP_HOSTS in apps/api/src/config.ts.',
+  },
+];
+
 /** Selectors for a string, template text or name in code that matches `regex` (selector syntax). */
 const textMatching = (regex) =>
   [
@@ -289,8 +305,7 @@ const textMatching = (regex) =>
   ].join(', ');
 
 // AG-1.9, AG-1.17 (D5): product code never names the migrator, superuser or provisioning
-// credentials. Step 12 adds loadConfig's refusal of these names, and with it the one override,
-// apps/api/src/config.ts; until then nothing may name them.
+// credentials. The one override is CREDENTIAL_NAME_REFUSERS below.
 const NO_CREDENTIAL_NAMES = [
   {
     selector: textMatching(
@@ -299,6 +314,15 @@ const NO_CREDENTIAL_NAMES = [
     message:
       'Product code never names the migrator, superuser or provisioning credentials (AG-1.9, AG-1.17): they must never reach the API, the media worker or the player. Use AppConfig.databaseUrl, which connects as tinnox_app; offline tools connect as tinnox_migrator through connectMigrator in scripts/.',
   },
+];
+
+// D5: the files that may spell those names, and why. A file joins only to refuse a name, never to
+// read its value.
+const CREDENTIAL_NAME_REFUSERS = [
+  // loadConfig refuses, in every mode, an environment that holds an administrator credential, and
+  // its message must say which name it found (isAdministratorName). It reads no value of one: the
+  // configuration is built from RUNTIME_ENV_NAMES only.
+  'apps/api/src/config.ts',
 ];
 
 // D4: the migrator URL is read only by the offline tools that connect as tinnox_migrator. Test
@@ -395,6 +419,19 @@ const STATUS_WORDING = [
     selector: shownText('/\\boperators?\\b/i'),
     message:
       'Customer-facing text does not say operator (SCR-17): say what set it ("Set in TINNOX CMS") or name the person or role.',
+  },
+];
+
+// LYX-04: a list key taken from display text. Screen and playlist names are not unique; React
+// warns about siblings with equal keys and, when the list updates, can show a row twice or drop
+// one. Matched when the key is one of these names written bare (`key={name}`), as section 3.2 of
+// the adoption plan specifies; a member such as `key={row.name}` is not seen.
+const NO_TEXT_KEYS = [
+  {
+    selector:
+      "JSXAttribute[name.name='key'] > JSXExpressionContainer > Identifier[name=/^(name|line|label|title|message|text)$/]",
+    message:
+      'Key a list by the row id, or by index for plain strings from the API. Screen and playlist names are not unique and React drops rows with equal keys (LYX-04).',
   },
 ];
 
@@ -585,8 +622,9 @@ const OUTBOUND_SOURCES = [
 const OUTBOUND_CLIENTS = {
   // The identity provider (DEC-13): discovery, token exchange and logout, behind IdentityProvider.
   'openid-client': 'apps/api/src/auth/oidc.ts',
-  // Alert e-mail over SMTP (DEC-37), to the host of SMTP_HOST. Step 12 makes production refuse a
-  // host that is not in REVIEWED_SMTP_HOSTS (D23).
+  // Alert e-mail over SMTP (DEC-37), to the host of SMTP_HOST. In production that host must be in
+  // REVIEWED_SMTP_HOSTS (apps/api/src/config.ts), which only the provider review under DEC-13
+  // adds to (D23).
   nodemailer: 'apps/api/src/mail.ts',
 };
 
@@ -857,6 +895,7 @@ const PRODUCT_SYNTAX = [
   ...NO_CREDENTIAL_NAMES,
   ...NO_HTML_SINK_CALLS,
   ...NO_GLOBAL_PROCESS_ENV,
+  ...NO_LOADCONFIG_OPTIONS,
 ];
 const API_SYNTAX = [
   ...NO_NON_NULL,
@@ -866,6 +905,7 @@ const API_SYNTAX = [
   ...NO_CLOCK,
   ...NO_ORG_FROM_REQUEST,
   ...NO_GLOBAL_PROCESS_ENV,
+  ...NO_LOADCONFIG_OPTIONS,
 ];
 
 export default tseslint.config(
@@ -1074,6 +1114,17 @@ export default tseslint.config(
     },
   })),
   {
+    // D5: the rest of the API's list is unchanged for the files that refuse the credential names.
+    files: CREDENTIAL_NAME_REFUSERS,
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...API_SYNTAX.filter((entry) => !NO_CREDENTIAL_NAMES.includes(entry)),
+        ...outboundSyntax('apps/api', null),
+      ],
+    },
+  },
+  {
     // Scripts, the untyped .mjs ones included (this rule reads syntax only), but the offline tools
     // that connect as the migrator. Test files are outside, as everywhere (D4).
     files: ['scripts/**/*.{ts,mjs}'],
@@ -1102,6 +1153,7 @@ export default tseslint.config(
         ...NO_MIGRATOR_POOL_CAST,
         ...NO_CREDENTIAL_NAMES,
         ...STATUS_WORDING,
+        ...NO_TEXT_KEYS,
         ...NO_HTML_SINK_CALLS,
         ...NO_GLOBAL_PROCESS_ENV,
       ],

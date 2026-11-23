@@ -1,5 +1,6 @@
 import { useCallback, useState } from 'react';
 import { rowFocusCandidates, type RowDeleteMode } from '../../lib/rowFocus.ts';
+import type { ReturnFocus } from '../../ui/index.ts';
 
 /**
  * What a delete dialog needs from its list page to put focus back on a neighbour once rows
@@ -64,19 +65,22 @@ function focusTarget(snapshot: Snapshot): HTMLElement | null {
  * the deleted one, else the row before, else the page's primary button. After a bulk delete it names the
  * first remaining row's actions button, else the select-all checkbox. The dialog only asks
  * when the control that opened it has gone (`ui/focusReturn.ts`).
+ *
+ * `source` is `'opener'` where no list shows the item (an editor, which leaves the page
+ * after a delete); the answer is then `'opener'` too.
  */
 export function useRowFocusReturn(
   open: boolean,
   deletedIds: readonly string[],
-  source: RowFocusSource | undefined,
-): (() => HTMLElement | null) | undefined {
+  source: RowFocusSource | 'opener' | undefined,
+): ReturnFocus {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [wasOpen, setWasOpen] = useState(false);
   if (open !== wasOpen) {
     setWasOpen(open);
     if (open) {
       setSnapshot(
-        source === undefined
+        source === undefined || source === 'opener'
           ? null
           : { candidates: rowFocusCandidates(source.order, deletedIds, source.mode), source },
       );
@@ -86,5 +90,5 @@ export function useRowFocusReturn(
     () => (snapshot === null ? null : focusTarget(snapshot)),
     [snapshot],
   );
-  return snapshot === null ? undefined : returnFocus;
+  return snapshot === null ? 'opener' : returnFocus;
 }

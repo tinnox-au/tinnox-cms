@@ -17,7 +17,7 @@ import { expect, test, type APIResponse, type Page, type Request } from '@playwr
 import { inviteReference, type InviteDto, type MemberDto, type Role } from '@tinnox/contracts';
 import { encodePng } from '../support/png.ts';
 import { operatorSession, type OperatorSession } from './support/contexts.ts';
-import { reauthenticate, type OperatorApi } from './support/operator.ts';
+import { expectListedWithout, reauthenticate, type OperatorApi } from './support/operator.ts';
 import {
   addToPlaylist,
   assignFromEditor,
@@ -144,6 +144,20 @@ async function saveEditorState(): Promise<void> {
 }
 
 /**
+ * Signs the Editor in again after a cut-off (a demotion or "Sign out everywhere") whose toast
+ * this process saw at `cutOffSeen` (Date.now()). sec.session_create (migration 0013) accepts a
+ * sign-in only when Keycloak's auth_time, in whole seconds, falls in a later second than the
+ * cut-off; one completed within the cut-off's own second is refused as ended (reauth_failed),
+ * for a real person as much as here. So the wait is the product's rule, not a workaround or a
+ * retry (E2E-1, E2E-2). The cut-off commits before its toast shows, and PostgreSQL and Keycloak
+ * read the same host clock; the extra 100 ms allows for drift between it and this process.
+ */
+async function reauthenticateAfterCutOff(page: Page, cutOffSeen: number): Promise<void> {
+  await page.waitForTimeout(Math.max(0, cutOffSeen + 1_100 - Date.now()));
+  await reauthenticate(page, 'editor');
+}
+
+/**
  * Puts back what the seed made: each seeded person in their seeded role, and no invite of
  * this run waiting. The last test runs it and checks the outcome; afterAll runs it again, so
  * a run that failed half-way still leaves the seeded roles for the next one.
@@ -197,16 +211,17 @@ test.beforeAll(async ({ browser }) => {
 });
 
 test.afterAll(async () => {
+  // A restore that fails fails the run: later specs and the next run would meet changed roles
+  // in the shared E2E database (adoption plan section 4.1). The contexts close either way.
   try {
-    await restoreSeededState();
-  } catch (error) {
-    console.warn(
-      `could not restore the seeded roles: ${error instanceof Error ? error.message : 'unknown'}`,
-    );
-  }
-  // beforeAll may have failed before every person signed in.
-  for (const session of [owner, admin, editor, viewer] as (OperatorSession | undefined)[]) {
-    await session?.context.close();
+    // Without the Owner's session beforeAll changed nothing, and its own error is the one to
+    // read: a restore would only add a second, misleading one (E2E-3).
+    if ((owner as OperatorSession | undefined) !== undefined) await restoreSeededState();
+  } finally {
+    // beforeAll may have failed before every person signed in.
+    for (const session of [owner, admin, editor, viewer] as (OperatorSession | undefined)[]) {
+      await session?.context.close();
+    }
   }
 });
 
@@ -317,9 +332,7 @@ test('a Viewer sees no control that changes anything, and the API refuses their 
     }),
     'POST /api/invites',
   );
-  expect(await (await viewer.api.get('/api/playlists')).text()).not.toContain(
-    `E2E refused ${runId}`,
-  );
+  await expectListedWithout(viewer.api, '/api/playlists', [`E2E refused ${runId}`]);
   const kept = (await (await viewer.api.get(`/api/playlists/${viewPlaylistId}`)).json()) as {
     name: string;
     items: unknown[];
@@ -517,6 +530,7 @@ test('the Owner demotes the Editor while their playlist is open: the next save e
   // A demotion ends every session the person has.
   await changeRole(page, EDITOR, 'viewer');
   await expect(notifications(page).getByText(/[1-9]\d* sessions? ended/)).toBeVisible();
+  const cutOffSeen = Date.now();
 
   const saveAnswer = editorPage.waitForResponse(
     (response) =>
@@ -533,7 +547,7 @@ test('the Owner demotes the Editor while their playlist is open: the next save e
 
   // Signing in again asks for the password and a fresh one-time code, and returns to the
   // playlist, which now opens read-only.
-  await reauthenticate(editorPage, 'editor');
+  await reauthenticateAfterCutOff(editorPage, cutOffSeen);
   await saveEditorState();
   await expect(editorPage).toHaveURL(new RegExp(`/playlists/${editorPlaylistId}$`));
   const session = (await (await editor.api.get('/api/session')).json()) as {
@@ -573,6 +587,7 @@ test('the Owner signs the Editor out everywhere: their next request ends at sign
   await editorPage.route(plan, (route) => route.abort());
 
   await signOutEverywhere(page, EDITOR);
+  const cutOffSeen = Date.now();
   await editorPage
     .getByRole('navigation', { name: 'Main' })
     .getByRole('link', { name: 'Apps', exact: true })
@@ -581,7 +596,7 @@ test('the Owner signs the Editor out everywhere: their next request ends at sign
   await editorPage.unroute(plan);
 
   // Keycloak's session is alive, yet it shows the password form, then asks for a code.
-  await reauthenticate(editorPage, 'editor');
+  await reauthenticateAfterCutOff(editorPage, cutOffSeen);
   await saveEditorState();
   await expect(editorPage).toHaveURL(/\/apps$/);
   await expect(pageHeading(editorPage, 'Apps')).toBeVisible();

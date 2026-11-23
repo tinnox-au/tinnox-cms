@@ -11,6 +11,7 @@ import { expect, test } from '@playwright/test';
 import { operatorSession, type OperatorSession } from './support/contexts.ts';
 import {
   assignLayoutOnScreenPage,
+  closePushDialog,
   cspViolations,
   expectNoWebStorage,
   notifications,
@@ -247,7 +248,7 @@ test('a band too thin for a small screen is named in a warning', async () => {
   await expect(page.getByTestId('layout-save-state')).toHaveText('Saved');
 });
 
-test('the layout is assigned on the screen page, and a push brings the screen up to date', async () => {
+test('LYX-05: the layout is assigned on the screen page, and a push brings the screen up to date', async () => {
   const page = operator.page;
   // Nothing is assigned yet, so the screen page offers "Assign layout".
   await assignLayoutOnScreenPage(page, displayId, layoutName);
@@ -268,6 +269,7 @@ test('the layout is assigned on the screen page, and a push brings the screen up
   await page.goto(`${PORTAL_URL}/layouts`);
   const before = await pushRow(page, displayId);
   await expect(before).toContainText(`Layout: ${layoutName}`);
+  // This screen has a change waiting, so the dialog must offer the push and its Cancel.
   await page.getByTestId('push-cancel').click();
   await expect(page.getByTestId('push-dialog-body')).toBeHidden();
 
@@ -275,8 +277,7 @@ test('the layout is assigned on the screen page, and a push brings the screen up
   const after = await pushRow(page, displayId);
   await expect(after).toHaveAttribute('data-state', 'up_to_date');
   await expect(after.getByTestId('push-row-state')).toContainText('Up to date');
-  await page.getByTestId('push-cancel').click();
-  await expect(page.getByTestId('push-dialog-body')).toBeHidden();
+  await closePushDialog(page);
 });
 
 test('a layout on a screen, and a playlist in a layout, cannot be deleted', async () => {

@@ -903,6 +903,7 @@ export function MediaLibrary({ kind }: { readonly kind: LibraryKind }) {
       />
       <ConfirmDialog
         open={blocker.state === 'blocked'}
+        returnFocus="opener"
         title="Leave while files are uploading?"
         confirmLabel="Leave and cancel uploads"
         cancelLabel="Stay"

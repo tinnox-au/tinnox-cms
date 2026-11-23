@@ -495,6 +495,7 @@ export function DialogSection() {
 
       <ConfirmDialog
         open={open === 'confirm'}
+        returnFocus="opener"
         title="Delete this file?"
         confirmLabel="Delete file"
         tone="danger"

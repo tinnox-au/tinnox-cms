@@ -595,6 +595,7 @@ function SignOutDialog({ member, onClose, onChanged, onDone }: MemberConfirmProp
   return (
     <ConfirmDialog
       open={member !== null}
+      returnFocus="opener"
       title={`Sign ${name} out everywhere?`}
       confirmLabel="Sign out everywhere"
       busy={state.busy}

@@ -7,7 +7,8 @@
 //      of HEAD and origin/main is byte-identical in the working tree; on main the first-parent
 //      history of HEAD never deletes, modifies, renames or retypes one;
 //   3. on a branch, an added file numbers above the highest on origin/main;
-//   4. text rules over each file, outside comments and dollar-quoted bodies;
+//   4. text rules over each file, outside comments and dollar-quoted bodies (one rule reads
+//      the bodies too: a new file does not paste the guards the runner now holds);
 //   5. db/upgrade-tests.json lists every file, sorted by file name, with its upgrade test or the
 //      reason it has none.
 // Git is the authority: there is no checksum manifest, because editing a file and its manifest
@@ -220,7 +221,8 @@ export type SqlRule =
   | 'uuid-literal'
   | 'sec-ddl-outside-switch'
   | 'audit-event'
-  | 'locks-header';
+  | 'locks-header'
+  | 'pasted-guard';
 
 /**
  * Merged files that break a text rule and cannot change, by name and rule (plan section 3.3).
@@ -250,6 +252,17 @@ export const GRANDFATHERED: readonly {
  * three older wordings (plan row AG-4.11), and merged files cannot change.
  */
 export const LOCKS_HEADER_FROM = 15;
+
+/**
+ * From this number on a file does not paste the guards that end 0001 to 0014 (forced row-level
+ * security, the sec.* hardening, a tenant policy on each new table, no disabled trigger): the
+ * migration runner checks them itself after every file and before its COMMIT
+ * (packages/db/src/schema-invariants.ts; plan section 3.3, EAX-12). The merged copies stay.
+ */
+export const RUNNER_GUARDS_FROM = 15;
+/** What those guards raise: a file that raises one of these has copied a guard. */
+const PASTED_GUARD =
+  /RAISE\s+EXCEPTION\s+'(sec functions with unsafe definition|tables without forced row-level security|tables without a tenant policy|triggers left disabled)\b/i;
 
 /**
  * The SQL with comments, dollar-quoted and BEGIN ATOMIC bodies and quoted text blanked to
@@ -434,6 +447,19 @@ export function checkSql(name: string, sql: string): string[] {
       );
     }
   });
+
+  if ((migrationNumber(name) ?? 0) >= RUNNER_GUARDS_FROM) {
+    // The guards are DO blocks, whose bodies the scan blanks: read the lines as written.
+    lines.forEach((text, index) => {
+      const guard = PASTED_GUARD.exec(text.replace(/--.*$/, ''));
+      if (guard === null) return;
+      add(
+        'pasted-guard',
+        index + 1,
+        `pastes the "${guard[1] ?? ''}" guard that ends the migrations up to 0014. Delete the DO block: the migration runner checks this itself after every file and before its COMMIT, and rolls the file back when it does not hold (assertSchemaInvariants in packages/db/src/schema-invariants.ts). A copy only checks less: the sec.* copies before 0014 pass a function with no SET clause (EAX-12).`,
+      );
+    });
+  }
 
   const created = new Set<string>();
   let switchOpenedAt: number | undefined;

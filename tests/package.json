@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "e2e": "playwright test",
+    "e2e": "node -e \"require('node:fs').rmSync('.run/e2e-results.json', { force: true })\" && playwright test",
     "typecheck": "tsc -p tsconfig.json"
   },
   "devDependencies": {

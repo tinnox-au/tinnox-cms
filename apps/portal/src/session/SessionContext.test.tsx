@@ -1,5 +1,4 @@
 import type { SessionResponse } from '@tinnox/contracts';
-import { StrictMode, useEffect } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-react';
 import { ApiRequestError } from '../api/client.ts';
@@ -53,11 +52,9 @@ function Probe() {
 
 function renderProvider() {
   return render(
-    <StrictMode>
-      <SessionProvider>
-        <Probe />
-      </SessionProvider>
-    </StrictMode>,
+    <SessionProvider>
+      <Probe />
+    </SessionProvider>,
   );
 }
 
@@ -144,14 +141,8 @@ function AuthErrorProbe() {
   );
 }
 
-/** How often the signed-in part of the tree was mounted; a silent refresh keeps it at 1. */
-let mounts = 0;
-
 function Member() {
   const { state } = useSessionState();
-  useEffect(() => {
-    mounts += 1;
-  }, []);
   return (
     <p data-testid="member">
       {state.status === 'authenticated'
@@ -202,32 +193,48 @@ describe('SessionProvider: the silent refresh', () => {
     vi.setSystemTime(START);
     loadSession.mockReset();
     clearSession.mockReset();
-    mounts = 0;
   });
 
   afterEach(() => {
     vi.useRealTimers();
   });
 
-  /** Signed in as an Editor; later loads answer `next` in turn. */
+  /**
+   * Signed in as an Editor; the loads after that answer `next` in turn, and the call counts
+   * the tests assert are of those loads only. Under StrictMode (componentTests.setup.ts) the
+   * mount loads twice, as in development; the first load must have been cancelled, so one
+   * session check stood.
+   */
   async function signedIn(...next: (() => Promise<SessionResponse>)[]) {
-    loadSession.mockResolvedValueOnce(EDITOR);
-    for (const answer of next) loadSession.mockImplementationOnce(answer);
+    loadSession.mockResolvedValue(EDITOR);
     const screen = await render(
       <SessionProvider>
         <Gate />
       </SessionProvider>,
     );
     await expect.element(screen.getByTestId('member')).toMatchTextContent(/^editor:/);
+    // Was each mount load cancelled? Only the last one may stand.
+    expect(loadSession.mock.calls.map(([signal]) => signal.aborted)).toEqual([true, false]);
+    loadSession.mockClear();
+    for (const answer of next) loadSession.mockImplementationOnce(answer);
     return screen;
+  }
+
+  /**
+   * The signed-in part's element now. The same element later means that part stayed mounted
+   * (a remount builds new elements); StrictMode's extra effect pass on mount leaves it alone.
+   */
+  function memberElement(screen: Awaited<ReturnType<typeof signedIn>>): Element {
+    return screen.getByTestId('member').element();
   }
 
   it('reloads the session on a refusal by role without unmounting the signed-in tree', async () => {
     const screen = await signedIn(() => Promise.resolve(VIEWER));
+    const member = memberElement(screen);
     notifyForbidden();
     await expect.element(screen.getByTestId('member')).toMatchTextContent(/^viewer:/);
-    expect(loadSession).toHaveBeenCalledTimes(2);
-    expect(mounts).toBe(1);
+    expect(loadSession).toHaveBeenCalledTimes(1);
+    expect(memberElement(screen)).toBe(member);
   });
 
   it('refreshes on focus at most every 10 seconds, but always after a refusal', async () => {
@@ -235,23 +242,24 @@ describe('SessionProvider: the silent refresh', () => {
       () => Promise.resolve(EDITOR),
       () => Promise.resolve(VIEWER),
     );
+    const member = memberElement(screen);
     // Within 10 s of the first load: nothing.
     window.dispatchEvent(new Event('focus'));
-    expect(loadSession).toHaveBeenCalledTimes(1);
+    expect(loadSession).toHaveBeenCalledTimes(0);
 
     vi.setSystemTime(START.getTime() + SESSION_REFRESH_MIN_MS + 1_000);
     window.dispatchEvent(new Event('focus'));
-    expect(loadSession).toHaveBeenCalledTimes(2);
+    expect(loadSession).toHaveBeenCalledTimes(1);
     await settle();
 
     // A focus 4 s after that refresh does nothing; a refusal does.
     vi.setSystemTime(START.getTime() + SESSION_REFRESH_MIN_MS + 5_000);
     window.dispatchEvent(new Event('focus'));
-    expect(loadSession).toHaveBeenCalledTimes(2);
+    expect(loadSession).toHaveBeenCalledTimes(1);
     notifyForbidden();
     await expect.element(screen.getByTestId('member')).toMatchTextContent(/^viewer:/);
-    expect(loadSession).toHaveBeenCalledTimes(3);
-    expect(mounts).toBe(1);
+    expect(loadSession).toHaveBeenCalledTimes(2);
+    expect(memberElement(screen)).toBe(member);
   });
 
   it('loads the session once for several refusals during one refresh', async () => {
@@ -260,10 +268,10 @@ describe('SessionProvider: the silent refresh', () => {
     notifyForbidden();
     notifyForbidden();
     notifyForbidden();
-    expect(loadSession).toHaveBeenCalledTimes(2);
+    expect(loadSession).toHaveBeenCalledTimes(1);
     pending.resolve(VIEWER);
     await expect.element(screen.getByTestId('member')).toMatchTextContent(/^viewer:/);
-    expect(loadSession).toHaveBeenCalledTimes(2);
+    expect(loadSession).toHaveBeenCalledTimes(1);
   });
 
   it('keeps the session after a network failure or an unreadable answer', async () => {
@@ -283,14 +291,15 @@ describe('SessionProvider: the silent refresh', () => {
       () => Promise.reject(network),
       () => Promise.reject(unreadable),
     );
+    const member = memberElement(screen);
+    notifyForbidden();
+    expect(loadSession).toHaveBeenCalledTimes(1);
+    await settle();
     notifyForbidden();
     expect(loadSession).toHaveBeenCalledTimes(2);
     await settle();
-    notifyForbidden();
-    expect(loadSession).toHaveBeenCalledTimes(3);
-    await settle();
     await expect.element(screen.getByTestId('member')).toMatchTextContent(/^editor:/);
-    expect(mounts).toBe(1);
+    expect(memberElement(screen)).toBe(member);
   });
 
   it('starts again when another member signed in meanwhile (another tab)', async () => {
@@ -298,13 +307,14 @@ describe('SessionProvider: the silent refresh', () => {
       () => Promise.resolve(OTHER_MEMBER),
       () => Promise.resolve(OTHER_MEMBER),
     );
+    const member = memberElement(screen);
     notifyForbidden();
     await expect
       .element(screen.getByTestId('member'))
       .toHaveTextContent(`editor:${OTHER_MEMBER.user.membershipId}`);
     // retry(): the session check ran again and the signed-in tree was mounted afresh.
-    expect(loadSession).toHaveBeenCalledTimes(3);
-    expect(mounts).toBe(2);
+    expect(loadSession).toHaveBeenCalledTimes(2);
+    expect(memberElement(screen)).not.toBe(member);
     // The new member's token was dropped before the old member's tree went away.
     expect(clearSession).toHaveBeenCalledTimes(1);
   });
@@ -314,12 +324,13 @@ describe('SessionProvider: the silent refresh', () => {
       () => Promise.resolve(OTHER_MEMBER),
       () => Promise.resolve(OTHER_MEMBER),
     );
+    const member = memberElement(screen);
     notifySessionChanged();
     await expect
       .element(screen.getByTestId('member'))
       .toHaveTextContent(`editor:${OTHER_MEMBER.user.membershipId}`);
-    expect(loadSession).toHaveBeenCalledTimes(3);
-    expect(mounts).toBe(2);
+    expect(loadSession).toHaveBeenCalledTimes(2);
+    expect(memberElement(screen)).not.toBe(member);
     expect(clearSession).toHaveBeenCalledTimes(1);
   });
 

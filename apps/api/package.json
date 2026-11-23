@@ -4,12 +4,13 @@
   "private": true,
   "type": "module",
   "exports": {
-    "./test-support": "./test/support.ts"
+    "./test-support": "./test/support.ts",
+    "./test-support/runtime-env": "./test/runtime-env.ts"
   },
   "scripts": {
-    "dev": "tsx watch --env-file=../../.env src/main.ts",
-    "start": "tsx --env-file-if-exists=../../.env src/main.ts",
-    "alerts:once": "tsx --env-file-if-exists=../../.env src/alerts-once.ts",
+    "dev": "tsx watch src/main.ts",
+    "start": "tsx src/main.ts",
+    "alerts:once": "tsx src/alerts-once.ts",
     "typecheck": "tsc -p tsconfig.json",
     "test:integration": "vitest run --config vitest.config.ts",
     "live-check": "node scripts/live-check.mjs"

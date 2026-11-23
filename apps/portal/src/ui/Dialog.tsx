@@ -42,14 +42,21 @@ export interface DialogProps {
   readonly className?: string;
   /** `data-testid` of the `<dialog>` element, so a test can scope body and footer together. */
   readonly testId?: string;
-  /**
-   * Where focus goes on close when the control that opened the dialog has gone, at once or
-   * a moment later (the deleted row's "Actions" button, an emptied selection bar). Called
-   * when it is needed, so it can look for the element that is there by then, such as the
-   * next row. Returning null, or leaving it out, falls back to the page's `main` landmark.
-   */
-  readonly returnFocus?: () => HTMLElement | null;
+  /** Where focus goes on close when the opener has gone (see `ReturnFocus`). Default `'opener'`. */
+  readonly returnFocus?: ReturnFocus;
 }
+
+/**
+ * Where focus goes on close when the control that opened the dialog has gone, at once or a
+ * moment later (the deleted row's "Actions" button, an emptied selection bar).
+ *
+ * - A function: called when it is needed, so it can look for the element that is there by
+ *   then, such as the next row (`useRowFocusReturn`). Returning null falls back to the page's
+ *   `main` landmark.
+ * - `'opener'`: the dialog removes nothing the opener sits in, so focus goes back to it; if it
+ *   has gone all the same (the page navigated away), to the `main` landmark.
+ */
+export type ReturnFocus = 'opener' | (() => HTMLElement | null);
 
 /** Matches `--t` in tokens.css: how long the content stays mounted while the dialog fades out. */
 const EXIT_MS = 200;
@@ -149,7 +156,10 @@ export function Dialog({
       previous.focus();
     }
     // The opener may be gone now or once the page has read its list again.
-    guardReturnedFocus(() => returnFocusRef.current?.() ?? null);
+    guardReturnedFocus(() => {
+      const target = returnFocusRef.current;
+      return target === undefined || target === 'opener' ? null : target();
+    });
     const timer = window.setTimeout(() => {
       setMounted(false);
     }, EXIT_MS);

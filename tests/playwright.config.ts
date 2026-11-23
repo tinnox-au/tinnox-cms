@@ -1,4 +1,5 @@
 import { defineConfig, devices } from '@playwright/test';
+import { API_URL, PLAYER_URL, PORTAL_URL } from './e2e/support/urls.ts';
 
 /**
  * End-to-end tests: real Keycloak sign-in, real API process, real media worker
@@ -14,6 +15,13 @@ import { defineConfig, devices } from '@playwright/test';
 // import.meta.env.PROD to false: the player then never registers its service worker (no
 // offline reload) and the portal bundle keeps its development-only /styleguide page.
 const BUILD_ENV = { NODE_ENV: 'production' };
+
+// The player build writes its API origin into the bundle and its Content-Security-Policy, and
+// reads it from VITE_API_BASE_URL in the shell or in apps/player-web/.env* (shell-plugin.mjs).
+// Set here, it wins over both, so the browser player sends its device token to the E2E API only;
+// global set-up checks API_URL is loopback (EAX-09), which it could not do for a value the
+// build reads before global set-up runs.
+const PLAYER_BUILD_ENV = { ...BUILD_ENV, VITE_API_BASE_URL: API_URL };
 
 export default defineConfig({
   testDir: './e2e',
@@ -40,15 +48,15 @@ export default defineConfig({
       command: 'npm run build -w @tinnox/portal && npm run preview -w @tinnox/portal',
       cwd: '..',
       env: BUILD_ENV,
-      url: 'http://localhost:5173/',
+      url: `${PORTAL_URL}/`,
       reuseExistingServer: false,
       timeout: 120_000,
     },
     {
       command: 'npm run build -w @tinnox/player-web && npm run preview -w @tinnox/player-web',
       cwd: '..',
-      env: BUILD_ENV,
-      url: 'http://localhost:5174/',
+      env: PLAYER_BUILD_ENV,
+      url: `${PLAYER_URL}/`,
       reuseExistingServer: false,
       timeout: 120_000,
     },

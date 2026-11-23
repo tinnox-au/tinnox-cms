@@ -25,9 +25,12 @@ import {
   setName,
 } from '../../scripts/lib/provision.ts';
 import {
+  addAlertAddress,
   addMember,
+  confirmAlertAddress,
   createDisplay,
   createOrg,
+  lastConfirmationToken,
   newPairing,
   pollPairing,
   repoRoot,
@@ -557,6 +560,52 @@ describe('provision-member fulfil', () => {
       return rows;
     });
     expect(registrations).toEqual([]);
+  });
+
+  it('D22: an alert address added before the removal cannot be confirmed after the return', async () => {
+    const org = await createOrg('Provision return alert address');
+    const owner = await signIn(t, org);
+    const robin = await addMember(org, 'admin', 'Robin Example');
+    const added = await addAlertAddress(await signIn(t, robin), 'before-removal@example.com');
+    expect(added.status).toBe(201);
+    const { id: addressId } = (await added.json()) as { id: string };
+    const token = lastConfirmationToken(t);
+
+    const removed = await owner.fetch(`/api/members/${robin.membershipId}/remove`, {
+      method: 'POST',
+    });
+    expect(removed.status).toBe(200);
+    const invited = await owner.fetch('/api/invites', {
+      method: 'POST',
+      json: { name: 'Robin Example', email: 'robin@example.com', role: 'admin' },
+    });
+    expect(invited.status).toBe(201);
+    const { id } = (await invited.json()) as { id: string };
+    expect(
+      await fulfil(pool, directory({ robin: account('robin@example.com', robin.oidcSub) }), {
+        inviteId: id,
+        username: 'robin',
+        confirmedWith: 'TICKET-6',
+        executedBy: STAFF,
+      }),
+    ).toMatchObject({ membershipId: robin.membershipId, role: 'admin', reactivated: true });
+
+    // Robin is an active Admin again, and the cut-off of the removal still stands.
+    const statuses = async (): Promise<Record<string, string>> => {
+      const list = (await (await owner.fetch('/api/alert-recipients')).json()) as {
+        items: { id: string; status: string }[];
+      };
+      return Object.fromEntries(list.items.map((r) => [r.id, r.status]));
+    };
+    expect((await confirmAlertAddress(t, token)).status).toBe(404);
+    expect(await statuses()).toEqual({ [addressId]: 'expired' });
+
+    // An address Robin adds after the return confirms.
+    const again = await addAlertAddress(await signIn(t, robin), 'after-return@example.com');
+    expect(again.status).toBe(201);
+    const { id: laterId } = (await again.json()) as { id: string };
+    expect((await confirmAlertAddress(t, lastConfirmationToken(t))).status).toBe(204);
+    expect(await statuses()).toEqual({ [addressId]: 'expired', [laterId]: 'confirmed' });
   });
 });
 
