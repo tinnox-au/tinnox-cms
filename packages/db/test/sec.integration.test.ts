@@ -1019,19 +1019,19 @@ describe('audit helpers', () => {
         action: 'pairing.claim',
         objectType: 'display',
         objectId: marker,
-        result: 'success',
-        detail: { via: 'test' },
+        result: 'denied',
+        detail: { reason: 'invalid_code' },
       }),
     );
     await inTx(pool, (tx) =>
       auditUnscoped(tx, {
         actorType: 'anonymous',
         actorId: null,
-        action: 'auth.login',
-        objectType: null,
+        action: 'pairing.create',
+        objectType: 'pairing_session',
         objectId: marker,
-        result: 'denied',
-        detail: { reason: 'no_membership' },
+        result: 'success',
+        detail: null,
       }),
     );
 
@@ -1052,6 +1052,7 @@ describe('audit helpers', () => {
           auditUnscoped(tx, {
             actorType: 'operator',
             actorId: null,
+            // @ts-expect-error not an AuditAction: the union refuses it at compile time, and this case is the database's own CHECK on the shape of an action
             action: 'Not An Action',
             objectType: null,
             objectId: null,
@@ -1074,7 +1075,7 @@ describe('the two writes outside a transaction (D2, CX-01)', () => {
       objectType: null,
       objectId: null,
       result: 'denied',
-      detail: { route: marker },
+      detail: { route: marker, client: 'a-fingerprint', failuresInWindow: 1, throttled: false },
     });
     const stored = await asSuperuser((client) =>
       client.query(
@@ -1112,14 +1113,14 @@ describe('the two writes outside a transaction (D2, CX-01)', () => {
         action: 'auth.login',
         objectType: null,
         objectId: null,
-        result: 'failure',
-        detail: { reason: marker },
+        result: 'denied',
+        detail: { reason: 'mfa_evidence_missing', acr: marker, amr: [] },
       });
     await expect(withOrg(pool, a.orgId, () => writeRefusal())).rejects.toThrow(
       /^auditStandalone was called while a transaction is open on the same asynchronous path .* Write the event on the outer tx with auditUnscoped\(tx, event\)/,
     );
     const stored = await asSuperuser((client) =>
-      client.query("SELECT 1 FROM public.audit_event WHERE detail->>'reason' = $1", [marker]),
+      client.query("SELECT 1 FROM public.audit_event WHERE detail->>'acr' = $1", [marker]),
     );
     expect(stored.rowCount).toBe(0);
   });

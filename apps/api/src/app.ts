@@ -9,10 +9,11 @@ import multipart from '@fastify/multipart';
 import rateLimit from '@fastify/rate-limit';
 import { ABSOLUTE, PLAYER_PREFIX } from '@tinnox/contracts';
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
-import { createRouteCheck, permissionGuard } from './auth/permissions.ts';
+import { createRouteCheck, permissionGuard, ROUTE_PERMISSIONS } from './auth/permissions.ts';
 import { requireOperator } from './auth/session.ts';
 import { perMinute, type AppContext } from './context.ts';
 import { HttpError, registerErrorHandling, sendFrameworkError } from './errors.ts';
+import { createRouteAuditCheck } from './route-audit.ts';
 import {
   registerAlertConfirmRoute,
   registerAlertRecipientRoutes,
@@ -102,6 +103,12 @@ export async function buildApp(
     throwFileSizeLimit: false,
   });
 
+  // Every route below, in every group, says what it audits or why it audits nothing (D3); one
+  // that says nothing stops the start-up (route-audit.ts). Added before any route is registered,
+  // so it sees them all.
+  const auditCheck = createRouteAuditCheck(ROUTE_PERMISSIONS);
+  app.addHook('onRoute', auditCheck.onRoute);
+
   registerOpsRoutes(app, ctx);
   registerAuthRoutes(app, ctx);
   // Public: opened from an e-mail by someone with no session.
@@ -138,6 +145,7 @@ export async function buildApp(
   routeCheck.assertComplete();
 
   await app.register((player) => registerPlayerRoutes(player, ctx), { prefix: PLAYER_PREFIX });
+  auditCheck.assertComplete();
 
   return app;
 }

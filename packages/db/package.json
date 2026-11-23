@@ -12,6 +12,7 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@tinnox/contracts": "*",
     "pg": "8.23.1"
   },
   "devDependencies": {

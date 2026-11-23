@@ -101,6 +101,9 @@ const PG_WORKER =
   /^(?!.*@tinnox\/db).*Only packages\/db talks to PostgreSQL\. The media worker has no database: .*job directory/;
 const PG_PACKAGE =
   /Only packages\/db talks to PostgreSQL\. packages\/[a-z-]+ may not import @tinnox\/db: take the data you need as a parameter/;
+// D19: the message says how to write the import that is allowed.
+const TYPES_ONLY =
+  /packages\/db takes only types from @tinnox\/contracts \(D19\): write `import type \{ \.\.\. \} from '@tinnox\/contracts'`, with `type` after `import`\. A value import would load @tinnox\/contracts, and zod with it/;
 const SCRIPTS_LIB = /scripts\/lib holds the offline tools .*Move what both need into a package/;
 const FASTIFY = /Only apps\/api serves HTTP\. Add the route under apps\/api\/src\/routes/;
 const BROWSER =
@@ -139,7 +142,12 @@ const ROWS: readonly {
   {
     path: 'packages/db/src/fixture.ts',
     forbidden: [
-      ['@tinnox/contracts', /packages\/db is a bottom layer/],
+      // D19: a value import of the one package it takes types from.
+      ['@tinnox/contracts', TYPES_ONLY],
+      [
+        '@tinnox/domain',
+        /packages\/db is a bottom layer: it imports no @tinnox package at run time, and types only from @tinnox\/contracts \(import type\)/,
+      ],
       ['../../../scripts/lib/env.ts', SCRIPTS_LIB],
     ],
     allowed: ['pg', 'node:crypto', './tx.ts'],
@@ -337,6 +345,93 @@ describe('import boundaries, one row per workspace (section 3.1)', { timeout: 30
     expect(await flagged('apps/portal/src/styles/fixture.test.ts', importOf('node:fs'))).toEqual(
       [],
     );
+  });
+});
+
+const SIDE_EFFECTS = '@typescript-eslint/no-import-type-side-effects';
+
+/** The messages of no-import-type-side-effects for `code` at `path`, as eslint.config.js resolves the rule there. */
+async function inlineTypeImportsFlagged(path: string, code: string): Promise<string[]> {
+  const resolved = ((await repository.calculateConfigForFile(path)) as Linter.Config).rules ?? {};
+  const entry = resolved[SIDE_EFFECTS];
+  const fixture = new ESLint({
+    cwd: repoRoot,
+    overrideConfigFile: true,
+    overrideConfig: [
+      {
+        files: ['**/*.ts'],
+        plugins: { '@typescript-eslint': tseslint.plugin },
+        languageOptions: { sourceType: 'module', parser: tseslint.parser },
+        rules: entry === undefined ? {} : { [SIDE_EFFECTS]: entry },
+      },
+    ],
+  });
+  const [result] = await fixture.lintText(code, { filePath: path });
+  return (result?.messages ?? []).map((message) => message.message);
+}
+
+describe('the type-only import of packages/db (D19)', { timeout: 30_000 }, () => {
+  const DB_FILES = ['packages/db/src/sec.ts', 'packages/db/test/fixture.integration.test.ts'];
+
+  it.each(DB_FILES)('lets %s import and re-export types of @tinnox/contracts', async (path) => {
+    const code = [
+      "import type { AuditAction } from '@tinnox/contracts';",
+      "export type { AuditEventOf } from '@tinnox/contracts';",
+      'export type A = AuditAction;',
+    ].join('\n');
+    expect(await flagged(path, code)).toEqual([]);
+    expect(await inlineTypeImportsFlagged(path, code)).toEqual([]);
+  });
+
+  it.each([
+    "import { AUDIT_ACTIONS } from '@tinnox/contracts';",
+    // One value among the names makes the whole statement a value import.
+    "import { AUDIT_ACTIONS, type AuditAction } from '@tinnox/contracts';",
+    "import * as contracts from '@tinnox/contracts';",
+    "import '@tinnox/contracts';",
+    "export { AUDIT_ACTIONS } from '@tinnox/contracts';",
+    "export * from '@tinnox/contracts';",
+  ])('flags the value import %s', async (code) => {
+    for (const path of DB_FILES) {
+      expect(await flagged(path, code)).toEqual([expect.stringMatching(TYPES_ONLY)]);
+    }
+  });
+
+  it('flags the inline form, which type stripping leaves behind as an import of the package', async () => {
+    const code = "import { type AuditAction } from '@tinnox/contracts';";
+    for (const path of DB_FILES) {
+      // allowTypeImports reads the names, so the layer rule lets this form pass...
+      expect(await flagged(path, code)).toEqual([]);
+      // ...and this rule is what refuses it.
+      expect(await inlineTypeImportsFlagged(path, code)).toEqual([
+        expect.stringMatching(
+          /leave behind a side effect import at runtime\. Convert this to a top-level type qualifier/,
+        ),
+      ]);
+    }
+  });
+
+  it('opens no other package and no file inside the package', async () => {
+    const path = 'packages/db/src/sec.ts';
+    expect(await flagged(path, "import type { Role } from '@tinnox/domain';")).toEqual([
+      expect.stringMatching(/packages\/db is a bottom layer/),
+    ]);
+    expect(
+      await flagged(path, "import type { AuditAction } from '@tinnox/contracts/src/audit.ts';"),
+    ).toEqual([expect.stringMatching(DEEP)]);
+  });
+
+  it('leaves every other workspace without the inline-form rule and with its own layer row', async () => {
+    const code = "import { type Role } from '@tinnox/contracts';";
+    expect(await inlineTypeImportsFlagged('apps/api/src/fixture.ts', code)).toEqual([]);
+    expect(
+      await flagged(
+        'packages/storage/src/fixture.ts',
+        "import type { Role } from '@tinnox/contracts';",
+      ),
+    ).toEqual([
+      expect.stringMatching(/packages\/storage is a bottom layer and imports no @tinnox package\./),
+    ]);
   });
 });
 

@@ -1335,7 +1335,7 @@ describe('audit', () => {
       [...new Set(AUDIT_ACTIONS.map(auditCategoryOf))].sort(),
     );
     expect(auditCategoryOf('publication.create')).toBe('publication');
-    expect(auditCategoryOf('security.cross_org_denied')).toBe('security');
+    expect(auditCategoryOf('security.permission_denied')).toBe('security');
     expect(auditCategoryOf('a.b.c')).toBe('a');
     expect(auditCategoryOf('nodot')).toBe('nodot');
   });

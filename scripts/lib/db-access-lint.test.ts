@@ -1,6 +1,7 @@
-// The database-access lints of eslint.config.js (adoption plan step 15), run against fixture
-// text: no query off a transaction (AG-2.1), SQL fragments (OTH-12), raw sec.* SQL and the
-// unscoped helpers (AG-2.2), the role switch (D25), and the entries of @tinnox/db (AG-1.10).
+// The database-access lints of eslint.config.js (adoption plan steps 15 and 17), run against
+// fixture text: no query off a transaction (AG-2.1), SQL fragments (OTH-12), raw sec.* SQL and
+// the unscoped helpers (AG-2.2), the role switch (D25), raw audit inserts (AG-3.1, D25), and the
+// entries of @tinnox/db (AG-1.10).
 // Each case takes the entry that eslint.config.js resolves for a real path, so the file globs
 // and the lists the config exports are tested with the rules: a block that took a rule away from
 // a file group would fail here. The fixtures are linted without type information, so the two
@@ -10,12 +11,14 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { ESLint, type Linter } from 'eslint';
+import ts from 'typescript';
 import tseslint from 'typescript-eslint';
 import { describe, expect, it } from 'vitest';
 import tinnox from '../eslint-rules/index.ts';
 import { repoRoot } from './env.ts';
 
 const QUERY = 'tinnox/no-query-off-transaction';
+const AUDIT_INSERT = 'tinnox/no-raw-audit-insert';
 const FRAGMENTS = 'tinnox/sql-fragments';
 const SYNTAX = 'no-restricted-syntax';
 const IMPORTS = 'no-restricted-imports';
@@ -184,7 +187,7 @@ describe('query() off a transaction (AG-2.1)', { timeout: 30_000 }, () => {
   });
 });
 
-/** The entries of one file of QUERY_OFF_TRANSACTION. */
+/** The entries of one file of QUERY_OFF_TRANSACTION or RAW_AUDIT_INSERTS. */
 function allowedStatements(value: unknown): { sql: string; reason: string }[] {
   if (!Array.isArray(value)) throw new Error('an entry of QUERY_OFF_TRANSACTION is no list');
   return value.map((entry: unknown) => {
@@ -405,6 +408,124 @@ describe('the role switch (D25)', { timeout: 30_000 }, () => {
       expect.stringMatching(/^Call sec\.\* through a typed wrapper/),
       expect.stringMatching(/^Do not cast to MigratorPool/),
     ]);
+  });
+});
+
+describe('raw audit inserts (AG-3.1, D25)', { timeout: 30_000 }, () => {
+  const RAW_INSERT =
+    /^Do not write an audit row with a statement of your own: use auditScoped\(tx, event\), or auditUnscoped\(tx, event\) when no organisation is known yet \(both from @tinnox\/db\), on the tx of the change it records\./;
+  const CODE = `
+    await tx.query("INSERT INTO audit_event (org_id, action) VALUES (app_org_id(), 'x.y')");
+    await auditScoped(tx, event);
+  `;
+  const PROVISION = 'scripts/lib/provision.ts';
+
+  it.each([
+    ...DB_CALLERS,
+    // packages/db outside the one file that holds the writers.
+    'packages/db/src/pool.ts',
+    'packages/db/src/migrate.ts',
+    'packages/db/src/definer.ts',
+    'packages/db/src/audit-debt-guard.ts',
+  ])('are reported in %s', async (path) => {
+    expect(await flagged(path, CODE, AUDIT_INSERT)).toEqual([expect.stringMatching(RAW_INSERT)]);
+  });
+
+  it.each(['apps/api/src/routes/media.ts', 'scripts/lib/provision.ts'])(
+    'are reported in %s with the table or schema quoted, and with the schema interpolated',
+    async (path) => {
+      const spellings = `
+        await tx.query('INSERT INTO "audit_event" (action) VALUES ($1)', [action]);
+        await tx.query('INSERT INTO public."audit_event" (action) VALUES ($1)', [action]);
+        await tx.query(\`INSERT INTO \${SCHEMA}.audit_event (action) VALUES ($1)\`, [action]);
+      `;
+      expect(await flagged(path, spellings, AUDIT_INSERT)).toEqual([
+        expect.stringMatching(RAW_INSERT),
+        expect.stringMatching(RAW_INSERT),
+        expect.stringMatching(RAW_INSERT),
+      ]);
+    },
+  );
+
+  it.each([
+    ...TESTS,
+    // The audit writers themselves.
+    'packages/db/src/sec.ts',
+    // No database handle exists in these.
+    'apps/portal/src/fixture.tsx',
+    'apps/player-web/src/app.ts',
+    'apps/media-worker/src/main.ts',
+  ])('are off in %s', async (path) => {
+    expect(isOff(await entryFor(path, AUDIT_INSERT))).toBe(true);
+  });
+
+  /** The one entry of RAW_AUDIT_INSERTS. */
+  async function onlyEntry(): Promise<{ sql: string; reason: string }> {
+    const table = await exported('RAW_AUDIT_INSERTS');
+    expect(Object.keys(table)).toEqual([PROVISION]);
+    const entries = allowedStatements(table[PROVISION]);
+    expect(entries).toHaveLength(1);
+    const [entry] = entries;
+    if (entry === undefined) throw new Error('RAW_AUDIT_INSERTS has no entry');
+    return entry;
+  }
+
+  /** Every template of the file `text` with nothing interpolated. */
+  function plainTemplates(text: string): string[] {
+    const found: string[] = [];
+    const visit = (node: ts.Node): void => {
+      if (ts.isNoSubstitutionTemplateLiteral(node)) found.push(node.text);
+      ts.forEachChild(node, visit);
+    };
+    visit(ts.createSourceFile('fixture.ts', text, ts.ScriptTarget.Latest, true));
+    return found;
+  }
+
+  it('has one entry: the set-based expiry of provisioning, with its reason (D25)', async () => {
+    const entry = await onlyEntry();
+    expect(entry.reason).toMatch(
+      /^provisioning's `pending`: one statement as tinnox_definer expires/,
+    );
+    expect(entry.reason).toContain('D25');
+    // Anchored at both ends: the entry names one whole statement, not a file.
+    expect(entry.sql.startsWith('^')).toBe(true);
+    expect(entry.sql.endsWith('$')).toBe(true);
+  });
+
+  it('keeps no entry whose statement the file no longer holds', async () => {
+    const entry = await onlyEntry();
+    expect(
+      plainTemplates(source(PROVISION)).filter((text) => new RegExp(entry.sql).test(text)),
+      `${PROVISION} no longer holds the statement RAW_AUDIT_INSERTS names: remove the entry from eslint.config.js`,
+    ).toHaveLength(1);
+  });
+
+  it('lets provisioning keep that one statement, and nothing else', async () => {
+    const entry = await onlyEntry();
+    const [statement] = plainTemplates(source(PROVISION)).filter((text) =>
+      new RegExp(entry.sql).test(text),
+    );
+    if (statement === undefined) throw new Error('the expiry statement was not found');
+    const expiry = `await tx.query(\`${statement}\`, [args.executedBy]);`;
+    expect(await flagged(PROVISION, expiry, AUDIT_INSERT)).toEqual([]);
+    const others = [
+      // Another audit row written by hand in the same file.
+      `await tx.query("INSERT INTO public.audit_event (action) VALUES ('membership.create')");`,
+      // The same statement with another action, and with something after it.
+      `await tx.query(\`${statement.replace("'invite.cancel'", "'invite.create'")}\`);`,
+      `await tx.query(\`${statement}; DELETE FROM public.member_invite\`);`,
+    ].join('\n');
+    expect(await flagged(PROVISION, others, AUDIT_INSERT)).toEqual([
+      expect.stringMatching(RAW_INSERT),
+      expect.stringMatching(RAW_INSERT),
+      expect.stringMatching(RAW_INSERT),
+    ]);
+    // The entry belongs to that file only.
+    for (const path of ['scripts/seed.ts', 'apps/api/src/alerts.ts', 'packages/db/src/pool.ts']) {
+      expect(await flagged(path, expiry, AUDIT_INSERT)).toEqual([
+        expect.stringMatching(RAW_INSERT),
+      ]);
+    }
   });
 });
 

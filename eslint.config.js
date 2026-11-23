@@ -560,12 +560,17 @@ const both = (outer, inner) => outer.flatMap((o) => inner.map((i) => [o, i]));
 // graph; scripts/lib/import-boundaries-lint.test.ts fails when a workspace has no row, and
 // scripts/lib/workspace-deps.test.ts when an import is not declared in the workspace's
 // package.json (the root package.json for scripts). No package imports an app, and no app
-// imports another app.
+// imports another app. An entry made with typesOnly() opens the package for `import type` alone.
+/** A row entry for a package the workspace takes types from and never a value. */
+const typesOnly = (name) => ({ typesOnly: name });
 export const IMPORT_LAYERS = {
   'packages/contracts': [],
   'packages/storage': [],
-  // Step 17 adds a type-only @tinnox/contracts import here (D19).
-  'packages/db': [],
+  // D19: AuditInput is typed by the AuditAction union and the event shapes of
+  // packages/contracts/src/audit.ts, their one source. Types only, so nothing of contracts, zod
+  // included, loads with the database package; its package.json still lists @tinnox/contracts
+  // under dependencies, because the manifest test counts a type-only import in a runtime file.
+  'packages/db': [typesOnly('contracts')],
   'packages/domain': ['contracts'],
   'packages/app-render': ['contracts'],
   'packages/delivery': ['contracts', 'domain'],
@@ -599,6 +604,11 @@ export const DB_ENTRIES = {
       '@tinnox/db/testing is for test files only. Outside a test, open the transaction with withOrg from @tinnox/db, or with withResolvedOrg while a credential is still being resolved to its organisation.',
   },
 };
+
+/** The packages a workspace may import values from, and the ones it takes types from only. */
+const valueLayers = (dir) => IMPORT_LAYERS[dir].filter((entry) => typeof entry === 'string');
+const typeOnlyLayers = (dir) =>
+  IMPORT_LAYERS[dir].flatMap((entry) => (typeof entry === 'string' ? [] : [entry.typesOnly]));
 
 /** The entry bans of DB_ENTRIES for the non-test files of the workspace `dir`. */
 function dbEntryPatterns(dir) {
@@ -661,6 +671,24 @@ export const QUERY_OFF_TRANSACTION = {
   ],
 };
 
+// AG-3.1, D25: the statements tinnox/no-raw-audit-insert lets a file write for itself, each with
+// its reason. Everything else writes its audit rows with auditScoped or auditUnscoped, which
+// packages/db/src/sec.ts (AUDIT_WRITERS below) holds. An entry is one whole statement, written
+// as a string or a template with nothing interpolated, that the pattern matches from its first
+// character to its last, so it opens nothing else in its file.
+export const RAW_AUDIT_INSERTS = {
+  'scripts/lib/provision.ts': [
+    {
+      sql: "^\\s*WITH closed AS \\(\\s*UPDATE public\\.member_invite i SET status = 'expired'\\s+WHERE i\\.status = 'pending' AND i\\.expires_at <= now\\(\\)\\s+RETURNING i\\.id, i\\.org_id, i\\.role\\s*\\)\\s*INSERT INTO public\\.audit_event \\(org_id, actor_type, actor_id, action, object_type, object_id, result, detail\\)\\s+SELECT closed\\.org_id, 'system', NULL, 'invite\\.cancel', 'invite', closed\\.id::text, 'success',\\s+jsonb_build_object\\('role', closed\\.role, 'reason', 'expired', 'executedBy', \\$1::text\\)\\s+FROM closed\\s*$",
+      reason:
+        "provisioning's `pending`: one statement as tinnox_definer expires the pending invites of every organisation and writes an invite.cancel row for each, so the expiry and its audit rows cannot come apart (D25; the provisioning exception of AGENTS.md section 1). auditScoped writes for one organisation, the one of its transaction",
+    },
+  ],
+};
+// The one file that holds INSERT INTO audit_event for everybody else: auditScoped (the unscoped
+// writer calls sec.audit_unscoped, a function of the migrations).
+const AUDIT_WRITERS = ['packages/db/src/sec.ts'];
+
 // OTH-12: the two places in packages/db that hand query() a statement another file wrote, and
 // the local name it has there. tinnox/sql-fragments checks the statement where it is written.
 export const SQL_PASS_THROUGH = {
@@ -710,23 +738,34 @@ function browserAppAlternative(dir) {
 
 /** The patterns every file of the workspace `dir` gets. */
 function layerPatterns(dir) {
-  const allowed = IMPORT_LAYERS[dir];
+  const allowed = valueLayers(dir);
+  const typeOnly = typeOnlyLayers(dir);
+  const typeOnlyNames = typeOnly.map((name) => `@tinnox/${name}`).join(', ');
   const allowedApps = allowed.filter((name) => APP_PACKAGES.includes(name.split('/')[0]));
   const packages = allowed.filter((name) => !allowedApps.includes(name));
   const browser = dir === 'apps/portal' || dir === 'apps/player-web';
   return [
     {
-      // An allowed package, or an app (the next entry's message), is not this entry's to report.
-      regex: `^@tinnox/(?!${anyOf([...packages, ...APP_PACKAGES])})`,
+      // An allowed package, a types-only one (the entries below) or an app (the next entry's
+      // message) is not this entry's to report.
+      regex: `^@tinnox/(?!${anyOf([...packages, ...typeOnly, ...APP_PACKAGES])})`,
       message:
         packages.length === 0
-          ? `${dir} is a bottom layer and imports no @tinnox package. Take what you need as a parameter, or move the code into this package.`
+          ? typeOnly.length === 0
+            ? `${dir} is a bottom layer and imports no @tinnox package. Take what you need as a parameter, or move the code into this package.`
+            : `${dir} is a bottom layer: it imports no @tinnox package at run time, and types only from ${typeOnlyNames} (import type). Take what you need as a parameter, or move the code into this package.`
           : `${dir} may import only ${packages.map((name) => `@tinnox/${name}`).join(', ')} from @tinnox/* (adoption plan section 3.1). ${
               browser
                 ? browserAppAlternative(dir)
                 : 'Take what you need as a parameter, or move the shared code into a package both may import.'
             }`,
     },
+    ...typeOnly.map((name) => ({
+      // D19: `import type` passes; a value import, a re-export and a side-effect import do not.
+      regex: `^@tinnox/${anyOf([name])}`,
+      allowTypeImports: true,
+      message: `${dir} takes only types from @tinnox/${name} (D19): write \`import type { ... } from '@tinnox/${name}'\`, with \`type\` after \`import\`. A value import would load @tinnox/${name}, and zod with it, whenever ${dir} loads. Take a value you need as a parameter from the caller.`,
+    })),
     {
       regex: `^@tinnox/${allowedApps.length === 0 ? '' : `(?!${anyOf(allowedApps)})`}${anyOf(APP_PACKAGES)}`,
       message:
@@ -1201,6 +1240,17 @@ export default tseslint.config(
   },
   ...importBoundaryBlocks(),
   {
+    // D19: where a workspace takes types only, the import is written `import type { ... }`. The
+    // inline form, `import { type X } from '...'`, passes allowTypeImports and still loads the
+    // package at run time: type stripping removes the names and leaves the import.
+    files: Object.keys(IMPORT_LAYERS)
+      .filter((dir) => typeOnlyLayers(dir).length > 0)
+      .map((dir) => `${dir}/**/*.ts`),
+    rules: {
+      '@typescript-eslint/no-import-type-side-effects': 'error',
+    },
+  },
+  {
     // The domain must stay free of platform code (prototype-m0.md section 3); its imports are
     // held by the import-boundary blocks above.
     files: ['packages/domain/src/**/*.ts'],
@@ -1474,6 +1524,24 @@ export default tseslint.config(
     plugins: { tinnox },
     rules: {
       'tinnox/no-query-off-transaction': ['error', { allowed }],
+    },
+  })),
+  {
+    // AG-3.1, D25: an audit row is written by auditScoped or auditUnscoped, never by a statement
+    // of the file's own (scripts/eslint-rules/no-raw-audit-insert.ts). The API's source, the
+    // offline tools and packages/db; tests write rows raw to test the table's own rules.
+    files: [...DB_CALLER_FILES, 'packages/db/src/**/*.ts'],
+    ignores: [...TEST_FILES, ...AUDIT_WRITERS],
+    plugins: { tinnox },
+    rules: {
+      'tinnox/no-raw-audit-insert': 'error',
+    },
+  },
+  ...Object.entries(RAW_AUDIT_INSERTS).map(([file, allowed]) => ({
+    files: [file],
+    plugins: { tinnox },
+    rules: {
+      'tinnox/no-raw-audit-insert': ['error', { allowed }],
     },
   })),
   {

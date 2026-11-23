@@ -4,8 +4,10 @@
  * cases are checked by `npm run typecheck`, which reads this file: an unused @ts-expect-error is
  * an error there.
  */
+import type { AuditAction } from '@tinnox/contracts';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
+  auditScoped,
   auditStandalone,
   sessionRevokeUnaudited,
   withoutOrg,
@@ -147,6 +149,104 @@ describe('auditStandalone (D2)', () => {
       new Error(NESTED_AUDIT),
     );
     expect(onPool).toEqual([]);
+  });
+});
+
+describe('AuditInput (AG-3.3, AG-3.4, D19)', () => {
+  it('has one member per AuditAction of @tinnox/contracts, and no other action', () => {
+    expectTypeOf<AuditInput['action']>().toEqualTypeOf<AuditAction>();
+    // A standalone refusal carries the detail its action declares, nothing wider.
+    expectTypeOf<StandaloneAuditEvent>().toExtend<AuditInput>();
+  });
+
+  it('refuses an unknown action, an undeclared detail field, another object kind, a wrong actor and a missing field, at compile time', () => {
+    // Never called: these lines are for the type checker.
+    const cases = async (tx: Tx): Promise<void> => {
+      const event = {
+        actorType: 'operator',
+        actorId: 'a-member-id',
+        action: 'folder.delete',
+        objectType: 'folder',
+        objectId: 'a-folder-id',
+        result: 'success',
+        detail: { movedToRoot: 2 },
+      } as const;
+      await auditScoped(tx, event);
+      // @ts-expect-error an action is a member of AUDIT_ACTIONS (packages/contracts/src/audit.ts)
+      await auditScoped(tx, { ...event, action: 'folder.archive' });
+      // @ts-expect-error a detail field is declared in AuditEventShapes first: a name is content
+      await auditScoped(tx, { ...event, detail: { movedToRoot: 2, name: 'Lobby' } });
+      // @ts-expect-error the detail of one action is not the detail of another
+      await auditScoped(tx, { ...event, detail: { itemCount: 2 } });
+      // @ts-expect-error the action fixes the kind of object it names
+      await auditScoped(tx, { ...event, objectType: 'media' });
+      // @ts-expect-error the action fixes who its actor may be
+      await auditScoped(tx, { ...event, actorType: 'anonymous' });
+      // @ts-expect-error an event names its actor, object and result
+      await auditScoped(tx, { action: event.action, actorType: 'operator', detail: event.detail });
+    };
+    expect(cases).toBeTypeOf('function');
+  });
+
+  it('needs the id of an operator or player actor and of a named object, and refuses an id the system or nobody would have (AG-3.3)', () => {
+    // Never called: these lines are for the type checker.
+    const cases = async (tx: Tx): Promise<void> => {
+      const event = {
+        actorType: 'operator',
+        actorId: 'a-member-id',
+        action: 'folder.delete',
+        objectType: 'folder',
+        objectId: 'a-folder-id',
+        result: 'success',
+        detail: { movedToRoot: 2 },
+      } as const;
+      // @ts-expect-error an operator is named by the membership id
+      await auditScoped(tx, { ...event, actorId: null });
+      // @ts-expect-error an action that names a kind of object names the object
+      await auditScoped(tx, { ...event, objectId: null });
+      const alert = {
+        actorType: 'system',
+        actorId: null,
+        action: 'display.offline_alert',
+        objectType: 'display',
+        objectId: 'a-display-id',
+        result: 'success',
+        detail: { recipients: 1 },
+      } as const;
+      await auditScoped(tx, alert);
+      // @ts-expect-error the system has no id
+      await auditScoped(tx, { ...alert, actorId: 'a-member-id' });
+      const paired = {
+        actorType: 'player',
+        actorId: 'a-registration-id',
+        action: 'pairing.complete',
+        objectType: 'player_registration',
+        objectId: 'a-registration-id',
+        result: 'success',
+        detail: { displayId: 'a-display-id', pairingId: 'a-pairing-id' },
+      } as const;
+      await auditScoped(tx, paired);
+      // @ts-expect-error a player that pairs is named by its registration id
+      await auditScoped(tx, { ...paired, actorId: null });
+      // An action whose shape says so may leave an id out: a refused upload made no media row.
+      await auditScoped(tx, {
+        actorType: 'operator',
+        actorId: 'a-member-id',
+        action: 'media.upload',
+        objectType: 'media',
+        objectId: null,
+        result: 'denied',
+        detail: { reason: 'too_large' },
+      });
+    };
+    expect(cases).toBeTypeOf('function');
+    // A rejected device credential names no registration: it was not accepted.
+    expectTypeOf<
+      Extract<AuditInput, { action: 'player.auth_rejected' }>['actorId']
+    >().toEqualTypeOf<null>();
+    expectTypeOf<
+      Extract<AuditInput, { action: 'folder.delete' }>['actorId']
+    >().toEqualTypeOf<string>();
   });
 });
 

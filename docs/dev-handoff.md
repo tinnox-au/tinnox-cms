@@ -99,6 +99,7 @@ Lint also holds how the API and the scripts reach the database (`eslint.config.j
 - `withoutOrg` and `poolAsTx` may be imported only by the files of `UNSCOPED_HELPER_FILES`, each with its reason.
 - `tinnox/sql-fragments`: the statement given to `query()` is a literal or a template that interpolates only an UPPER_CASE module constant or a `SqlFragment`. Everything else is a parameter (`$1`).
 - Outside tests, `SET ROLE` text in TypeScript exists only in `asDefiner` (`packages/db/src/definer.ts`); the incident SQL scripts (`scripts/revoke-*-sessions.sql`) carry their own.
+- `tinnox/no-raw-audit-insert`: an audit row is written with `auditScoped` or `auditUnscoped`, never with a statement that inserts into `audit_event` itself. The set-based invite expiry of provisioning is the one listed exception (`RAW_AUDIT_INSERTS`).
 
 `withOrg` does `BEGIN`, `SELECT set_config('app.org_id', $1, true)`, runs `fn` on that one connection, then `COMMIT` (or `ROLLBACK` when `fn` throws). `orgId` must be a lower-case UUID that came from a verified session or device lookup. Outside `withOrg` every tenant table is empty to the application. The `tx` handle works only until `fn` returns or throws: a `query` on it afterwards rejects and sends nothing, so await every query inside `fn`. `withOrg`, `withoutOrg`, `withResolvedOrg` and a `poolAsTx` statement reject when called while a transaction is open on the same asynchronous path, in `fn` or in a helper it calls: a second transaction takes another connection and commits on its own, so pass the outer `tx` to the helper instead (lint reports the cases it can read as `tinnox/no-nested-transaction`). A test that plays a second writer starts that writer's transaction from the test body, not from inside the first transaction. pg returns `bigint` columns (`audit_event.id`, `media.bytes`, `last_seq`) as strings.
 
@@ -133,6 +134,8 @@ sessionRevokeUnaudited(pool, idHash): Promise<boolean>                          
 ```
 
 Hashes are `sha256(rawValue)` Buffers. Raw session ids, polling tokens and device tokens are never stored.
+
+An audit `event` is an `AuditInput`: its `action` is a member of `AUDIT_ACTIONS`, and the action fixes who the actor may be, the kind of object and the closed shape of `detail` (`AuditEventShapes` in `packages/contracts/src/audit.ts`, which `packages/db` imports as types only). To add an action: add it to `AUDIT_ACTIONS` and `AuditEventShapes`, give it its wording in `apps/portal/src/lib/activity.ts`, name it in the audit statement of the route that writes it (`write(rule, ...actions)` in `ROUTE_PERMISSIONS`, or `OTHER_ROUTE_AUDIT` in `apps/api/src/route-audit.ts`; the API refuses to start with a route that states nothing), and give it a case in `tests/integration/audit-failure.test.ts`. The type checker and the tests ask for each of these.
 
 Pairing sequence the API should implement:
 

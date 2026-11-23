@@ -5,6 +5,9 @@
  * with `sha256` before calling.
  */
 import { createHash } from 'node:crypto';
+// Types only (D19): the audit vocabulary has one source, packages/contracts/src/audit.ts. Lint
+// refuses a value import here, so nothing of that package, zod included, loads with this one.
+import type { AuditAction, AuditEventOf } from '@tinnox/contracts';
 import type { Pool } from './pool.ts';
 import { poolAsTx, type Autocommit, type Tx } from './tx.ts';
 
@@ -87,8 +90,9 @@ export async function loginStateTake(
 }
 
 /**
- * Outcome of `sec.session_create`. `role` stays a plain string here (this package depends
- * only on `pg`); the API narrows it.
+ * Outcome of `sec.session_create`. `role` stays a plain string here: at run time this package
+ * depends only on `pg`, and from `@tinnox/contracts` it takes types alone, for the audit
+ * events (D19). The API narrows the role.
  */
 export type SessionCreateResult =
   | {
@@ -523,16 +527,15 @@ export async function alertRecipientByTokenHash(
   return r === null ? null : { orgId: r.org_id, recipientId: r.recipient_id };
 }
 
-export interface AuditInput {
-  readonly actorType: 'operator' | 'player' | 'system' | 'anonymous';
-  readonly actorId: string | null;
-  readonly action: string;
-  readonly objectType: string | null;
-  readonly objectId: string | null;
-  readonly result: 'success' | 'failure' | 'denied';
-  /** Small structured context. Never file content, secrets or signed URLs. */
-  readonly detail: Record<string, unknown> | null;
-}
+/**
+ * An audit event: one member per `AuditAction`, each with the actor kinds, the object kind and
+ * the closed `detail` shape that `AuditEventShapes` of `@tinnox/contracts` gives the action
+ * (AG-3.3, AG-3.4). So an action outside the list, a detail field nobody declared and an event
+ * without actor, object or result do not compile, nor does an operator or player actor, or a
+ * named kind of object, without its id. The organisation is not a field: the database
+ * takes it from the transaction (`app_org_id()`), and it stamps the time itself.
+ */
+export type AuditInput = AuditEventOf<AuditAction>;
 
 /** Appends an audit event for the organisation of the current `withOrg` transaction. */
 export async function auditScoped(tx: Tx, event: AuditInput): Promise<void> {
@@ -571,13 +574,12 @@ export async function auditUnscoped(tx: Tx, event: AuditInput): Promise<void> {
   await writeUnscoped(tx, event);
 }
 
-interface NoActorOrObject {
+/** The event of `action`, narrowed to no actor id and no object: nothing it could name changed. */
+type Refusal<A extends AuditAction> = AuditEventOf<A> & {
   readonly actorId: null;
   readonly objectType: null;
   readonly objectId: null;
-  /** Small structured context. Never file content, secrets or signed URLs. */
-  readonly detail: Record<string, unknown> | null;
-}
+};
 
 /**
  * What `auditStandalone` may record: a refusal with no change to commit with, so there is no
@@ -595,14 +597,12 @@ interface NoActorOrObject {
  */
 export type StandaloneAuditEvent =
   /** A sign-in that was refused, or that failed, before any session existed. */
-  | (NoActorOrObject & {
-      readonly action: 'auth.login';
+  | (Refusal<'auth.login'> & {
       readonly actorType: 'anonymous';
       readonly result: 'denied' | 'failure';
     })
   /** A device credential the API did not accept. */
-  | (NoActorOrObject & {
-      readonly action: 'player.auth_rejected';
+  | (Refusal<'player.auth_rejected'> & {
       readonly actorType: 'player';
       readonly result: 'denied';
     });

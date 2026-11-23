@@ -16,6 +16,13 @@ export {
   type AuditDebtWatch,
 } from './audit-debt-guard.ts';
 
+// The audit fault: makes the audit rows of one action fail, to show that the change they
+// record rolls back with them (adoption plan step 17, D3).
+export { removeAuditFault, whileAuditFails, type AuditFaultOutcome } from './audit-fault.ts';
+
+// The audit rows of every organisation, for the scan after each integration test file (AG-3.4).
+export { auditRowsSince, auditScanMark, type StoredAuditRow } from './audit-rows.ts';
+
 /**
  * Runs `fn` in a transaction of its own with no organisation, as a route does before the
  * organisation is known. For the sec.* wrappers that change data and the audit writers: they

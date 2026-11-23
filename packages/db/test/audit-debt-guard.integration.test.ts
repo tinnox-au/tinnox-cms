@@ -75,14 +75,36 @@ afterAll(async () => {
   await migrator.end();
 });
 
+// The guard reads the insert alone, so the ids these events name need not be rows; an operator
+// and an object are still named, as AuditInput requires (AG-3.3).
+const ACTOR_ID = randomUUID();
+const OBJECT_ID = randomUUID();
 const AUDIT = {
-  actorType: 'system',
-  actorId: null,
+  actorType: 'operator',
+  actorId: ACTOR_ID,
   action: 'folder.create',
   objectType: 'folder',
-  objectId: null,
+  objectId: OBJECT_ID,
   result: 'success',
   detail: null,
+} as const;
+/** An event of the kind written with no organisation: here only its insert matters. */
+const UNSCOPED_AUDIT = {
+  actorType: 'anonymous',
+  actorId: null,
+  action: 'pairing.create',
+  objectType: 'pairing_session',
+  objectId: OBJECT_ID,
+  result: 'success',
+  detail: null,
+} as const;
+const ALERT_AUDIT = {
+  actorType: 'system',
+  actorId: null,
+  objectType: 'display',
+  objectId: OBJECT_ID,
+  result: 'success',
+  detail: { recipients: 1 },
 } as const;
 
 const newFolder = (tx: Tx, name: string) =>
@@ -187,7 +209,7 @@ describe('the audit-debt guard refuses a change with no audit row (D3)', () => {
     // sec.audit_unscoped inserts as tinnox_definer; the session is still the runtime role's.
     await withOrg(judged, org.orgId, async (tx) => {
       await newFolder(tx, 'Paid unscoped');
-      await auditUnscoped(tx, { ...AUDIT, actorType: 'anonymous' });
+      await auditUnscoped(tx, UNSCOPED_AUDIT);
     });
     expect(await folders('Paid after')).toBe(1);
     expect(await folders('Paid before')).toBe(1);
@@ -329,7 +351,7 @@ describe('writes D3 does not name are judged until they are decided', () => {
         'INSERT INTO display_alert (display_id, org_id, offline_since) VALUES ($1, app_org_id(), $2)',
         [org.displayId, offlineSince],
       );
-      await auditScoped(tx, { ...AUDIT, action: 'display.offline_alert', objectType: 'display' });
+      await auditScoped(tx, { ...ALERT_AUDIT, action: 'display.offline_alert' });
     });
     const closing = await refusalOf(
       withOrg(judged, org.orgId, (tx) =>
@@ -340,7 +362,7 @@ describe('writes D3 does not name are judged until they are decided', () => {
     // A close with its e-mail writes display.online_alert in the same transaction.
     await withOrg(judged, org.orgId, async (tx) => {
       await tx.query('DELETE FROM display_alert WHERE display_id = $1', [org.displayId]);
-      await auditScoped(tx, { ...AUDIT, action: 'display.online_alert', objectType: 'display' });
+      await auditScoped(tx, { ...ALERT_AUDIT, action: 'display.online_alert' });
     });
   });
 

@@ -6,12 +6,14 @@
 import type { ESLint, Rule } from 'eslint';
 import noNestedTransaction from './no-nested-transaction.ts';
 import noQueryOffTransaction from './no-query-off-transaction.ts';
+import noRawAuditInsert from './no-raw-audit-insert.ts';
 import sqlFragments from './sql-fragments.ts';
 
 // Each rule under its file's name; eslint.config.js enables it as tinnox/<name>.
 const rules: Record<string, Rule.RuleModule> = {
   'no-nested-transaction': noNestedTransaction,
   'no-query-off-transaction': noQueryOffTransaction,
+  'no-raw-audit-insert': noRawAuditInsert,
   'sql-fragments': sqlFragments,
 };
 

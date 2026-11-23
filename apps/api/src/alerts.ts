@@ -205,7 +205,7 @@ async function claimTransitions(tx: Tx, deps: DisplayAlertDeps): Promise<OrgOutc
   let online = 0;
   let closed = 0;
   const outbox: { displayId: string; message: MailMessage }[] = [];
-  const audit = (action: string, displayId: string) =>
+  const audit = (action: 'display.offline_alert' | 'display.online_alert', displayId: string) =>
     auditScoped(tx, {
       actorType: 'system',
       actorId: null,

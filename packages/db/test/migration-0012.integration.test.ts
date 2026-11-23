@@ -9,7 +9,9 @@
  * This file rebuilds the test database at migration 0011, leaves pairing sessions in
  * every state, with claims as the code before 0010 could leave them, then applies 0012
  * with the real migration runner and checks what was cancelled, what was left alone and
- * what was audited.
+ * what was audited. Before that it applies 0012 once while its audit rows cannot be written,
+ * and checks that nothing of the migration was kept (D3): `pairing.cancel` is the one audit
+ * action no code writes, so this file is its case of tests/integration/audit-failure.test.ts.
  *
  * It resets the shared integration-test database. Integration files run one at a time
  * and each arranges its own data, so the others are unaffected; `afterAll` always leaves
@@ -32,6 +34,7 @@ import {
   type Pool,
 } from '../src/index.ts';
 import { resetTestDatabase, runMigrations, type MigrationResult } from '../src/migrate.ts';
+import { whileAuditFails, type AuditFaultOutcome } from '../src/testing.ts';
 import {
   appPool,
   createOrg,
@@ -64,6 +67,13 @@ let migrator: pg.Client | undefined;
 let pool: Pool | undefined;
 let db: Autocommit;
 let upgrade: MigrationResult;
+/** The first attempt at 0012, made while its audit rows could not be written. */
+let unaudited: AuditFaultOutcome<{
+  readonly error: unknown;
+  readonly statuses: readonly (string | undefined)[];
+  readonly recorded: number;
+  readonly cancellations: number;
+}>;
 
 /** A screen that never had a player, with two claims at once: possible only before 0010. */
 let a: TestOrg;
@@ -205,6 +215,27 @@ beforeAll(async () => {
   expect(claimed.outcome).toBe('claimed');
   expect((await complete(completed, completedToken)).outcome).toBe('completed');
 
+  // First with the audit rows failing: what the upgrade leaves then is read before the real one.
+  unaudited = await whileAuditFails(migratorUrl(), 'pairing.cancel', async () => {
+    const error: unknown = await runMigrations({
+      connectionString: migratorUrl(),
+      directory: MIGRATIONS,
+    }).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    const recorded = await clients().migrator.query(
+      'SELECT 1 FROM public.schema_migrations WHERE name = $1',
+      [TARGET],
+    );
+    return {
+      error,
+      statuses: [await statusOf(firstOfTwo), await statusOf(secondOfTwo), await statusOf(otherOrg)],
+      recorded: recorded.rowCount ?? 0,
+      cancellations: (await cancellationsSeenBy(a)).length + (await cancellationsSeenBy(b)).length,
+    };
+  });
+
   upgrade = await runMigrations({ connectionString: migratorUrl(), directory: MIGRATIONS });
 });
 
@@ -217,6 +248,20 @@ afterAll(async () => {
 });
 
 describe('migration 0012 on a database that already holds pairing sessions', () => {
+  it('cancels nothing, and is not recorded as applied, when its audit rows cannot be written (D3)', () => {
+    // The migration really reached its audit rows, and they are why it failed.
+    expect(unaudited.refused).toBeGreaterThan(0);
+    expect(unaudited.result.error).toBeInstanceOf(Error);
+    expect(String(unaudited.result.error)).toContain(
+      'injected audit failure: the pairing.cancel row cannot be written',
+    );
+    // The cancellation and its audit rows are one statement in the migration's one
+    // transaction: every claim is still there, and the runner has no row for the file.
+    expect(unaudited.result.statuses).toEqual(['claimed', 'claimed', 'claimed']);
+    expect(unaudited.result.recorded).toBe(0);
+    expect(unaudited.result.cancellations).toBe(0);
+  });
+
   it('is applied on top of 0011, and is not applied twice', async () => {
     const later = (await readdir(MIGRATIONS)).filter((n) => n.endsWith('.sql') && n > TARGET);
     expect(upgrade.alreadyApplied).toHaveLength(11);

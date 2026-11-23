@@ -13,10 +13,12 @@ import { promisify } from 'node:util';
 import { inviteReference } from '@tinnox/contracts';
 import { withOrg, withoutOrg } from '@tinnox/db';
 import { connectMigrator, type MigratorPool } from '@tinnox/db/migrate';
+import { removeAuditFault, whileAuditFails } from '@tinnox/db/testing';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { IdpAccount, IdpDirectory } from '../../scripts/lib/idp.ts';
 import {
+  PROVISION_COMMANDS,
   RefusedError,
   fulfil,
   mfaReset,
@@ -24,6 +26,8 @@ import {
   pending,
   restoreOwner,
   setName,
+  type ProvisionAuditAction,
+  type ProvisionCommand,
 } from '../../scripts/lib/provision.ts';
 import {
   addAlertAddress,
@@ -32,6 +36,7 @@ import {
   createDisplay,
   createOrg,
   lastConfirmationToken,
+  migratorUrl,
   newPairing,
   pollPairing,
   repoRoot,
@@ -254,20 +259,6 @@ function intercepted<P extends pg.Pool>(
       };
     },
   });
-}
-
-/**
- * The provisioning connection, except that every audit insert fails, or only the insert of
- * `action` (auditScoped's third parameter), so the audit rows before it are written first. The
- * statements before the failing insert run.
- */
-function failingAudit<P extends pg.Pool>(real: P, action?: string): P {
-  return intercepted(real, (text, values) =>
-    /INSERT INTO (public\.)?audit_event/.test(text) &&
-    (action === undefined || values?.[2] === action)
-      ? Promise.reject(new Error('audit insert failed (test)'))
-      : Promise.resolve(),
-  );
 }
 
 describe('provision-member fulfil', () => {
@@ -1052,109 +1043,250 @@ describe('provision-member restore-owner', () => {
   });
 });
 
-describe('provision-member, every command', () => {
-  it('commits nothing when its audit insert fails', async () => {
-    const broken = failingAudit(pool);
-    const org = await createOrg('Provision audit failure');
-    const id = await invite(org, {
-      name: 'Ellis Example',
-      email: 'ellis@example.com',
-      invitedBy: org.membershipId,
-    });
-    const ellis = account('ellis@example.com');
-    const before = await members(org.orgId);
-    await expect(
-      fulfil(broken, directory({ ellis }), {
-        inviteId: id,
-        username: 'ellis',
-        confirmedWith: 'T-4',
-        executedBy: STAFF,
-      }),
-    ).rejects.toThrow(/audit insert failed/);
-    expect(await inviteRow(org, id)).toMatchObject({ status: 'pending', name: 'Ellis Example' });
-    expect(await members(org.orgId)).toEqual(before);
+/**
+ * One run of a command for the audit-failure table (SCR-09): the audit actions this run writes,
+ * the command itself, and what it would change. The same run is repeated once for every action,
+ * with that action's audit insert failing, so it must be repeatable: a failed run leaves nothing.
+ */
+interface AuditFailureCase {
+  readonly writes: readonly ProvisionAuditAction[];
+  /** The organisation whose audit trail the run writes to, once it exists. */
+  orgId(): Promise<string | null>;
+  run(): Promise<unknown>;
+  /** Everything the run would change, sessions and invites included. */
+  state(): Promise<unknown>;
+}
 
-    // The session end runs in the definer's function, inside the same transaction.
-    const session = await signIn(t, org);
-    await expect(
-      mfaReset(broken, directory({ owner: account('owner@example.com', org.oidcSub) }), {
-        username: 'owner',
-        requestRef: 'REQ-13',
-        executedBy: STAFF,
-        confirmedWith: null,
-      }),
-    ).rejects.toThrow(/audit insert failed/);
-    expect((await session.fetch('/api/displays')).status).toBe(200);
-    expect((await member(org.orgId, org.membershipId)).cut_off).toBeNull();
-
-    const unnamed = await members(org.orgId);
-    await expect(
-      setName(broken, directory(), {
-        target: { membershipId: org.membershipId },
-        name: 'Never Named',
-        requestRef: 'REQ-16',
-        executedBy: STAFF,
-      }),
-    ).rejects.toThrow(/audit insert failed/);
-    expect(await members(org.orgId)).toEqual(unnamed);
-
-    const admin = await addMember(org, 'admin', 'Harper Admin');
-    await signIn(t, admin);
-    const unpromoted = await members(org.orgId);
-    await expect(
-      restoreOwner(broken, directory(), {
-        ...APPROVAL,
-        mode: 'promote',
-        membershipId: admin.membershipId,
-      }),
-    ).rejects.toThrow(/audit insert failed/);
-    expect(await members(org.orgId)).toEqual(unpromoted);
-
+/**
+ * For every command of PROVISION_COMMANDS, the runs that between them write each audit action
+ * the command declares. The type makes a command without an entry a compile error; the test
+ * below says so at run time too, and fails a declared action no run writes.
+ */
+const AUDIT_FAILURE_CASES: {
+  readonly [C in ProvisionCommand]: readonly (() => Promise<AuditFailureCase>)[];
+} = {
+  'org-create': [
+    async () => {
+      const orgName = `Never audited ${randomUUID().slice(0, 8)}`;
+      const ellis = account('ellis@example.com');
+      return {
+        writes: ['membership.create'],
+        orgId: async () =>
+          withoutOrg(pool, async (tx) => {
+            await tx.query('SET LOCAL ROLE tinnox_definer');
+            const { rows } = await tx.query<{ id: string }>(
+              'SELECT id FROM organization WHERE name = $1',
+              [orgName],
+            );
+            return rows[0]?.id ?? null;
+          }),
+        run: () =>
+          PROVISION_COMMANDS['org-create'].run(pool, directory({ ellis }), {
+            orgName,
+            timezone: 'UTC',
+            siteName: 'Main site',
+            owners: [{ username: 'ellis', name: 'Ellis Example' }],
+            requestRef: 'REQ-14',
+            executedBy: STAFF,
+          }),
+        state: () => organisationsNamed(orgName),
+      };
+    },
+  ],
+  // The expiry and its audit rows are one statement: when the rows fail, nothing expires.
+  pending: [
+    async () => {
+      const org = await createOrg('Provision audit failure, pending');
+      const id = await invite(org, {
+        name: 'Lapsed Example',
+        email: 'lapsed@example.com',
+        invitedBy: org.membershipId,
+        seconds: 1,
+      });
+      await waitUntilExpired(org, id);
+      return {
+        writes: ['invite.cancel'],
+        orgId: () => Promise.resolve(org.orgId),
+        run: () => PROVISION_COMMANDS.pending.run(pool, directory(), { executedBy: STAFF }),
+        state: () => inviteRow(org, id),
+      };
+    },
+  ],
+  fulfil: [
+    async () => {
+      const org = await createOrg('Provision audit failure, fulfil');
+      const id = await invite(org, {
+        name: 'Ellis Example',
+        email: 'ellis@example.com',
+        invitedBy: org.membershipId,
+      });
+      const ellis = account('ellis@example.com');
+      return {
+        writes: ['membership.create'],
+        orgId: () => Promise.resolve(org.orgId),
+        run: () =>
+          PROVISION_COMMANDS.fulfil.run(pool, directory({ ellis }), {
+            inviteId: id,
+            username: 'ellis',
+            confirmedWith: 'T-4',
+            executedBy: STAFF,
+          }),
+        state: async () => [await inviteRow(org, id), await members(org.orgId)],
+      };
+    },
+  ],
+  'set-name': [
+    async () => {
+      const org = await createOrg('Provision audit failure, set-name');
+      return {
+        writes: ['membership.update'],
+        orgId: () => Promise.resolve(org.orgId),
+        run: () =>
+          PROVISION_COMMANDS['set-name'].run(pool, directory(), {
+            target: { membershipId: org.membershipId },
+            name: 'Never Named',
+            requestRef: 'REQ-16',
+            executedBy: STAFF,
+          }),
+        state: () => members(org.orgId),
+      };
+    },
+  ],
+  // The session end runs in the definer's function, inside the same transaction.
+  'mfa-reset': [
+    async () => {
+      const org = await createOrg('Provision audit failure, mfa-reset');
+      const session = await signIn(t, org);
+      return {
+        writes: ['membership.mfa_reset'],
+        orgId: () => Promise.resolve(org.orgId),
+        run: () =>
+          PROVISION_COMMANDS['mfa-reset'].run(
+            pool,
+            directory({ owner: account('owner@example.com', org.oidcSub) }),
+            { username: 'owner', requestRef: 'REQ-13', executedBy: STAFF, confirmedWith: null },
+          ),
+        state: async () => [
+          (await session.fetch('/api/displays')).status,
+          (await member(org.orgId, org.membershipId)).cut_off,
+        ],
+      };
+    },
+  ],
+  'restore-owner': [
+    async () => {
+      const org = await createOrg('Provision audit failure, promote');
+      const admin = await addMember(org, 'admin', 'Harper Admin');
+      await signIn(t, admin);
+      return {
+        writes: ['membership.role_change'],
+        orgId: () => Promise.resolve(org.orgId),
+        run: () =>
+          PROVISION_COMMANDS['restore-owner'].run(pool, directory(), {
+            ...APPROVAL,
+            mode: 'promote',
+            membershipId: admin.membershipId,
+          }),
+        state: () => members(org.orgId),
+      };
+    },
     // --successor writes the most. Whichever of its audit rows fails, even the last one, the old
     // Owner stays, nobody is added, their invite stays pending and their session stays valid.
-    const lost = await createOrg('Provision audit failure, successor');
-    const oldSession = await signIn(t, lost);
-    const request = await invite(lost, {
-      role: 'admin',
-      name: 'Old Request',
-      email: 'old.request@example.com',
-      invitedBy: lost.membershipId,
-    });
-    const unreplaced = await members(lost.orgId);
-    const quinn = account('quinn@example.com');
-    for (const action of ['invite.cancel', 'membership.create', 'membership.remove']) {
-      await expect(
-        restoreOwner(failingAudit(pool, action), directory({ quinn }), {
-          ...APPROVAL,
-          mode: 'successor',
-          successor: { username: 'quinn', name: 'Quinn Example' },
-          replaces: lost.membershipId,
-        }),
-      ).rejects.toThrow(/audit insert failed/);
-      expect(await members(lost.orgId)).toEqual(unreplaced);
-      expect(await inviteRow(lost, request)).toMatchObject({
-        status: 'pending',
+    async () => {
+      const lost = await createOrg('Provision audit failure, successor');
+      const oldSession = await signIn(t, lost);
+      const request = await invite(lost, {
+        role: 'admin',
         name: 'Old Request',
+        email: 'old.request@example.com',
+        invitedBy: lost.membershipId,
       });
-      expect((await oldSession.fetch('/api/displays')).status).toBe(200);
-      for (const written of ['invite.cancel', 'membership.create', 'membership.remove']) {
-        expect(await audits(lost.orgId, written)).toEqual([]);
-      }
-    }
+      const quinn = account('quinn@example.com');
+      return {
+        writes: ['invite.cancel', 'membership.create', 'membership.remove'],
+        orgId: () => Promise.resolve(lost.orgId),
+        run: () =>
+          PROVISION_COMMANDS['restore-owner'].run(pool, directory({ quinn }), {
+            ...APPROVAL,
+            mode: 'successor',
+            successor: { username: 'quinn', name: 'Quinn Example' },
+            replaces: lost.membershipId,
+          }),
+        state: async () => [
+          await members(lost.orgId),
+          await inviteRow(lost, request),
+          (await oldSession.fetch('/api/displays')).status,
+        ],
+      };
+    },
+  ],
+};
 
-    const orgName = `Never audited ${randomUUID().slice(0, 8)}`;
-    await expect(
-      orgCreate(broken, directory({ ellis }), {
-        orgName,
-        timezone: 'UTC',
-        siteName: 'Main site',
-        owners: [{ username: 'ellis', name: 'Ellis Example' }],
-        requestRef: 'REQ-14',
-        executedBy: STAFF,
-      }),
-    ).rejects.toThrow(/audit insert failed/);
-    expect(await organisationsNamed(orgName)).toBe(0);
+/** The actions of the audit rows the organisation holds that provisioning wrote (actor `system`). */
+async function provisioningAudits(orgId: string | null): Promise<string[]> {
+  if (orgId === null) return [];
+  return withOrg(pool, orgId, async (tx) => {
+    const { rows } = await tx.query<{ action: string }>(
+      "SELECT DISTINCT action FROM audit_event WHERE org_id = app_org_id() AND actor_type = 'system' ORDER BY action",
+    );
+    return rows.map((row) => row.action);
   });
+}
+
+describe('provision-member, every command', () => {
+  afterAll(async () => {
+    await removeAuditFault(migratorUrl());
+  });
+
+  it.each(Object.entries(PROVISION_COMMANDS))(
+    '%s commits nothing when any one of its audit inserts fails (SCR-09)',
+    async (command, { audits: declared }) => {
+      const cases = Object.hasOwn(AUDIT_FAILURE_CASES, command)
+        ? AUDIT_FAILURE_CASES[command as ProvisionCommand]
+        : undefined;
+      if (cases === undefined || cases.length === 0) {
+        throw new Error(
+          `No audit-failure case for provision-member ${command}: add its runs to AUDIT_FAILURE_CASES in tests/integration/provision-member.test.ts`,
+        );
+      }
+      const failed = new Set<string>();
+      for (const arrange of cases) {
+        const run = await arrange();
+        const before = await run.state();
+        const auditsBefore = await provisioningAudits(await run.orgId());
+        for (const action of run.writes) {
+          const outcome = await whileAuditFails(migratorUrl(), action, () =>
+            run.run().then(
+              () => null,
+              (error: unknown) => error,
+            ),
+          );
+          // The run reached that audit row, the row is why it failed, and nothing was kept:
+          // not the rows written before it either.
+          expect(outcome.refused, `${command} never wrote ${action} in this run`).toBeGreaterThan(
+            0,
+          );
+          expect(String(outcome.result)).toContain(
+            `injected audit failure: the ${action} row cannot be written`,
+          );
+          expect(await run.state()).toEqual(before);
+          expect(await provisioningAudits(await run.orgId())).toEqual(auditsBefore);
+          failed.add(action);
+        }
+        // Without the fault the same run commits, and writes the audit rows it said it writes.
+        await run.run();
+        expect(await run.state()).not.toEqual(before);
+        const written = (await provisioningAudits(await run.orgId())).filter(
+          (action) => !auditsBefore.includes(action),
+        );
+        expect(written).toEqual([...run.writes].sort());
+      }
+      expect(
+        [...failed].sort(),
+        `every audit action PROVISION_COMMANDS declares for ${command} needs a run in AUDIT_FAILURE_CASES that writes it, and a run writes nothing the table does not declare (scripts/lib/provision.ts)`,
+      ).toEqual([...declared].sort());
+    },
+  );
 
   it('refuses the superuser and the runtime role before it reads the identity provider (D4)', async () => {
     const superuser = new URL(process.env['TEST_DATABASE_MIGRATOR_URL'] ?? '');

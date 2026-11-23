@@ -11,6 +11,7 @@ import {
   MediaMimeTypeSchema,
   MediaPatchSchema,
   ROUTES,
+  type AuditEventShapes,
   type MediaDto,
   type MediaListResponse,
   type MediaUploadResponse,
@@ -36,6 +37,9 @@ import { sniffMediaType } from '../media/sniff.ts';
 import { displayNameFromUpload } from '../media/upload-name.ts';
 import { isUnknownTag, replaceTags } from '../tags.ts';
 
+/** What a refused upload records: the reason and sizes, never the file or its name. */
+type UploadRefusal = Extract<AuditEventShapes['media.upload']['detail'], { reason: unknown }>;
+
 /** One live media item of the caller's organisation, or null. */
 async function loadMediaRow(tx: Tx, id: string): Promise<MediaRow | null> {
   const { rows } = await tx.query<MediaRow>(
@@ -57,7 +61,7 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
   async function auditUpload(
     session: OperatorSession,
     result: 'failure' | 'denied',
-    detail: Record<string, unknown>,
+    detail: UploadRefusal,
   ): Promise<void> {
     await withOrg(pool, session.orgId, (tx) =>
       auditScoped(tx, {

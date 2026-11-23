@@ -1,15 +1,23 @@
 /**
  * Backend review round 1, CX-01, and security review round 3, SCU-01 and SCX-04: a
  * credential change (or a pairing session, or its lockout) and its audit event have one outcome.
- * Each case makes the audit insert fail (a trigger the test owns) and checks the outcome:
- * pairing and sign-in issue no credential; sign-out still ends the session. It then
+ * Each case makes the audit insert fail (the audit fault of @tinnox/db/testing) and checks the
+ * outcome: pairing and sign-in issue no credential; sign-out still ends the session. It then
  * removes the fault and checks that the same action works and is audited exactly once.
+ *
+ * tests/integration/audit-failure.test.ts holds the same rule for every audit action; the cases
+ * here go further into what a credential path must and must not hand out.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { IdentityProvider } from '@tinnox/api/test-support';
-import { whileUnauditedAllowed } from '@tinnox/db/testing';
+import type { AuditAction } from '@tinnox/contracts';
+import {
+  removeAuditFault,
+  whileAuditFails as whileAuditRowsFail,
+  whileUnauditedAllowed,
+} from '@tinnox/db/testing';
 import {
   addMember,
   auditEvents,
@@ -35,31 +43,13 @@ async function asMigrator<T>(work: (client: pg.Client) => Promise<T>): Promise<T
   }
 }
 
-async function removeFault(): Promise<void> {
-  await asMigrator(async (client) => {
-    await client.query('DROP TRIGGER IF EXISTS test_fail_audit ON public.audit_event');
-    await client.query('DROP FUNCTION IF EXISTS public.test_fail_audit()');
-  });
-}
-
-/** Runs `work` while every audit insert of `action` raises an error. */
-async function whileAuditFails(action: string, work: () => Promise<void>): Promise<void> {
-  if (!/^[a-z._]+$/.test(action)) throw new Error('unexpected audit action');
-  await asMigrator(async (client) => {
-    await client.query(`
-      CREATE FUNCTION public.test_fail_audit() RETURNS trigger LANGUAGE plpgsql AS $$
-      BEGIN
-        IF NEW.action = '${action}' THEN RAISE EXCEPTION 'injected audit failure'; END IF;
-        RETURN NEW;
-      END $$`);
-    await client.query(`CREATE TRIGGER test_fail_audit BEFORE INSERT ON public.audit_event
-      FOR EACH ROW EXECUTE FUNCTION public.test_fail_audit()`);
-  });
-  try {
-    await work();
-  } finally {
-    await removeFault();
-  }
+/**
+ * Runs `work` while every audit insert of `action` raises an error, and requires that at least
+ * one insert was refused: the path under test really reached its audit row.
+ */
+async function whileAuditFails(action: AuditAction, work: () => Promise<void>): Promise<void> {
+  const { refused } = await whileAuditRowsFail(migratorUrl(), action, work);
+  expect(refused, `nothing tried to write a ${action} row`).toBeGreaterThan(0);
 }
 
 /** One count as the owner of the security functions (bypasses row-level security). */
@@ -110,7 +100,7 @@ describe('credential changes and their audit events', () => {
     alice = await signIn(t, org);
   });
   afterAll(async () => {
-    await removeFault();
+    await removeAuditFault(migratorUrl());
     await t.close();
   });
 

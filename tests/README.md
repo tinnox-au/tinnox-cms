@@ -116,6 +116,27 @@ ran, also when the route answered 500 or product code caught the error.
 
 The browser suite's database (`tinnox_e2e_test`) does not get the guard.
 
+### Audit actions, one failure case each, and the row scan
+
+`integration/audit-failure.test.ts` (poteto adoption plan step 17, decision D3) has one case per
+audit action: its table is typed by `AuditAction`, so a new action without a case does not
+compile. A case names the route that writes the action (or the job, provisioning command or
+migration), the request that writes it and a read of what it changes. The harness makes every
+insert of that action fail in the database (`whileAuditFails` of `@tinnox/db/testing`, a trigger
+on `audit_event` that also counts the inserts it refused), requires that the attempt reached the
+audit write, that nothing of the change was kept, and that the same attempt goes through once
+the fault is gone. A refusal (nothing changes, and it is answered the same) and the sign-out
+(the session ends anyway, the CX-01 residual) say so in their case. `pairing.cancel`, which only
+migration 0012 writes, is failed in `packages/db/test/migration-0012.integration.test.ts`.
+`integration/provision-member.test.ts` does the same for every command of `PROVISION_COMMANDS`
+(`scripts/lib/provision.ts`) and each audit action a command declares (SCR-09).
+
+After each integration test file, `scripts/vitest-integration-file-setup.ts` reads every audit
+row the file wrote, as the database administrator, and fails the file when a row holds a URL, a
+query string, a token-shaped string or an e-mail address (`scripts/lib/audit-row-scan.ts`,
+AG-3.4). A short secret or a typed name has no shape the scan can see; the tests of the routes
+that take them check those by value.
+
 Before either suite: `npm run setup`, `npm run infra:up`, and for E2E also
 `npm run db:migrate` and `npm run db:seed -- --second-org`. For E2E the API (4000), the
 portal (5173) and the player (5174) must **not** be running: Playwright starts them.

@@ -416,6 +416,19 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
         }
         if (tagIds !== undefined) await replaceTags(tx, 'display', id, tagIds);
 
+        // The values written, in lower case as the database stores them: one spelling per
+        // object in the trail. A key is recorded when the patch named it, and also when
+        // assigning another kind took a stored assignment off the display, so the trail says
+        // so without the reader knowing the "one of three" rule.
+        const assignments: { [K in AssignmentKey]?: string | null } = {};
+        for (const key of ASSIGNMENT_KEYS) {
+          if (
+            patch[key] !== undefined ||
+            (current[ASSIGNMENT_COLUMNS[key]] !== null && after[key] === null)
+          ) {
+            assignments[key] = after[key]?.toLowerCase() ?? null;
+          }
+        }
         await auditScoped(tx, {
           actorType: 'operator',
           actorId: session.membershipId,
@@ -423,21 +436,7 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
           objectType: 'display',
           objectId: id,
           result: 'success',
-          detail: {
-            fields: Object.keys(patch).sort(),
-            // The values written, in lower case as the database stores them: one spelling
-            // per object in the trail. A key is recorded when the patch named it, and
-            // also when assigning another kind took a stored assignment off the display,
-            // so the trail says so without the reader knowing the "one of three" rule.
-            ...Object.fromEntries(
-              ASSIGNMENT_KEYS.flatMap((key) =>
-                patch[key] !== undefined ||
-                (current[ASSIGNMENT_COLUMNS[key]] !== null && after[key] === null)
-                  ? [[key, after[key]?.toLowerCase() ?? null]]
-                  : [],
-              ),
-            ),
-          },
+          detail: { fields: Object.keys(patch).sort(), ...assignments },
         });
         const row = await loadDisplay(tx, id);
         if (row === null) throw new Error('updated display is not visible');

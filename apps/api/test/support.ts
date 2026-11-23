@@ -24,6 +24,7 @@ import {
   LayoutDtoSchema,
   ScheduleDtoSchema,
   type AppContent,
+  type AuditAction,
   type AppDto,
   type LayoutDto,
   type LayoutZoneInput,
@@ -51,16 +52,55 @@ import sharp from 'sharp';
 import { runDisplayAlerts, type DisplayAlertDeps, type DisplayAlertResult } from '../src/alerts.ts';
 import { buildApp } from '../src/app.ts';
 import { IdentityProviderError, type IdentityProvider } from '../src/auth/oidc.ts';
+import { ROUTE_PERMISSIONS } from '../src/auth/permissions.ts';
 import { loadConfig, RUNTIME_ENV_NAMES, type AppConfig } from '../src/config.ts';
 import type { AppContext } from '../src/context.ts';
 import type { MailMessage, Mailer } from '../src/mail.ts';
 import { MediaPipeline } from '../src/media/pipeline.ts';
+import {
+  actionsOf,
+  declaredRouteAudit,
+  OFF_ROUTE_AUDIT,
+  OTHER_ROUTE_AUDIT,
+} from '../src/route-audit.ts';
 
 // Tests outside apps/api reach this harness only as '@tinnox/api/test-support', so the types they
 // need are re-exported here. RUNTIME_ENV_NAMES is deliberately not: the e2e stack takes it from
 // the light entry '@tinnox/api/test-support/runtime-env' (./runtime-env.ts), so that the
 // stackless layout checks never load this file (CHK-9).
 export type { IdentityProvider };
+
+/**
+ * What the route `${METHOD} ${pattern}` says a request to it can audit (src/route-audit.ts and
+ * the `audit` field of ROUTE_PERMISSIONS): the actions of its own work, and the refusals its
+ * guards record. Undefined for a route that says nothing, which the application refuses to
+ * start with.
+ */
+export function declaredAudit(
+  route: string,
+): { readonly own: readonly AuditAction[]; readonly guard: readonly AuditAction[] } | undefined {
+  const declared = declaredRouteAudit(route, ROUTE_PERMISSIONS);
+  return declared === undefined
+    ? undefined
+    : { own: actionsOf(declared.audit), guard: declared.guard };
+}
+
+/** Every route with an audit statement, each with what `declaredAudit` gives for it. */
+export function declaredAudits(): {
+  readonly route: string;
+  readonly own: readonly AuditAction[];
+  readonly guard: readonly AuditAction[];
+}[] {
+  return [...Object.keys(ROUTE_PERMISSIONS), ...Object.keys(OTHER_ROUTE_AUDIT)].flatMap((route) => {
+    const declared = declaredAudit(route);
+    return declared === undefined ? [] : [{ route, ...declared }];
+  });
+}
+
+/** What writes `action` outside the routes (a job, provisioning, a migration), or undefined. */
+export function offRouteWriter(action: AuditAction): string | undefined {
+  return OFF_ROUTE_AUDIT[action];
+}
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const envFile = join(repoRoot, '.env');
