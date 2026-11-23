@@ -49,15 +49,16 @@ import {
   type MediaJobSpec,
 } from '@tinnox/contracts';
 import {
-  auditScoped,
   CommitOutcomeUnknownError,
   mediaProcessingJobs,
   poolAsTx,
-  withOrg,
+  readOrg,
+  unaudited,
   type MediaProcessingJob,
   type Pool,
 } from '@tinnox/db';
 import { newObjectKey, type ObjectStorage } from '@tinnox/storage';
+import { changeAsJob } from '../jobs.ts';
 import { SNIFF_BYTES, sniffMediaType } from './sniff.ts';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -557,7 +558,7 @@ export class MediaPipeline {
       await this.#fail(job, result.errorCode, cleanDetail(result.errorDetail));
       return;
     }
-    const row = await withOrg(this.#pool, job.orgId, async (tx) => {
+    const row = await readOrg(this.#pool, job.orgId, async (tx) => {
       const { rows } = await tx.query<{
         status: string;
         bytes: string | null;
@@ -632,7 +633,7 @@ export class MediaPipeline {
     // its bytes. At worst an unreferenced object stays (review round 3, SCX-03).
     let keep = false;
     try {
-      keep = await withOrg(this.#pool, job.orgId, async (tx) => {
+      keep = await changeAsJob(this.#pool, 'media_pipeline', job.orgId, async (tx) => {
         const done = await tx.query(
           `UPDATE media
            SET status = 'ready', kind = $2, mime_type = $3, bytes = $4, sha256 = $5,
@@ -653,24 +654,27 @@ export class MediaPipeline {
             thumbKey,
           ],
         );
-        if (done.rowCount !== 1) return false;
-        await auditScoped(tx, {
-          actorType: 'system',
-          actorId: null,
-          action: 'media.validate',
-          objectType: 'media',
-          objectId: job.mediaId,
-          result: 'success',
-          detail: {
-            mimeType: result.mimeType,
-            bytes: stored.bytes,
-            width: result.width,
-            height: result.height,
-            durationMs: result.durationMs,
-            codec: result.codec,
+        // The row is gone or no longer waiting: this run changed nothing, so it records nothing.
+        if (done.rowCount !== 1) return { value: false, audit: unaudited('nothing_changed') };
+        return {
+          value: true,
+          audit: {
+            actorType: 'system',
+            actorId: null,
+            action: 'media.validate',
+            objectType: 'media',
+            objectId: job.mediaId,
+            result: 'success',
+            detail: {
+              mimeType: result.mimeType,
+              bytes: stored.bytes,
+              width: result.width,
+              height: result.height,
+              durationMs: result.durationMs,
+              codec: result.codec,
+            },
           },
-        });
-        return true;
+        };
       });
     } catch (error) {
       keep = error instanceof CommitOutcomeUnknownError;
@@ -685,22 +689,26 @@ export class MediaPipeline {
   }
 
   async #fail(job: MediaProcessingJob, code: MediaErrorCode, detail: string | null): Promise<void> {
-    await withOrg(this.#pool, job.orgId, async (tx) => {
+    await changeAsJob(this.#pool, 'media_pipeline', job.orgId, async (tx) => {
       const done = await tx.query(
         `UPDATE media SET status = 'failed', error_code = $2, error_detail = $3
          WHERE id = $1 AND org_id = app_org_id() AND status = 'processing'`,
         [job.mediaId, code, detail],
       );
-      if (done.rowCount !== 1) return;
-      await auditScoped(tx, {
-        actorType: 'system',
-        actorId: null,
-        action: 'media.validate',
-        objectType: 'media',
-        objectId: job.mediaId,
-        result: 'failure',
-        detail: { errorCode: code },
-      });
+      // As in #ingest: the row is gone or no longer waiting, so this run changed nothing.
+      if (done.rowCount !== 1) return { value: undefined, audit: unaudited('nothing_changed') };
+      return {
+        value: undefined,
+        audit: {
+          actorType: 'system',
+          actorId: null,
+          action: 'media.validate',
+          objectType: 'media',
+          objectId: job.mediaId,
+          result: 'failure',
+          detail: { errorCode: code },
+        },
+      };
     });
     await this.#cleanup(job.mediaId);
   }

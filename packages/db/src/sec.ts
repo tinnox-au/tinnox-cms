@@ -504,7 +504,8 @@ export interface MediaProcessingJob {
 
 /**
  * The oldest `limit` media rows still waiting for validation, in every organisation (0003): the
- * media pipeline's queue. It then enters each row's organisation with withOrg.
+ * media pipeline's queue. It then enters each row's organisation with readOrg and changeAsJob
+ * (apps/api/src/jobs.ts).
  */
 export async function mediaProcessingJobs(
   db: AnyScope,

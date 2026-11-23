@@ -749,7 +749,7 @@ export const UNSCOPED_HELPER_FILES = {
   'apps/api/src/housekeeping.ts':
     'not before the organisation is known, but across all of them: poolAsTx for the purges of expired sessions, old pairing sessions and heartbeat history (sessionPurgeExpired, pairingPurge, heartbeatLogPurge)',
   'apps/api/src/media/pipeline.ts':
-    'not before the organisation is known, but across all of them: poolAsTx for mediaProcessingJobs, the queue of media waiting for validation; each job is then handled inside withOrg',
+    'not before the organisation is known, but across all of them: poolAsTx for mediaProcessingJobs, the queue of media waiting for validation; each job is then handled inside readOrg and changeAsJob',
   'scripts/lib/provision.ts':
     'the provisioning exception of AGENTS.md section 1: withoutOrg for `pending`, which expires and lists the invites of every organisation as tinnox_definer (asDefiner from @tinnox/db/migrate)',
 };
@@ -907,11 +907,10 @@ export const LEGACY_TRANSACTION_FILES = [
   // changeOrg; withOrgDecision), deleted when their last caller has moved.
   'apps/api/src/auth/permissions.ts',
   'apps/api/src/db-helpers.ts',
-  // Helpers that write an audit row on the tx of their caller, and the two jobs that run with
-  // no request: the alert check and the media pipeline.
+  // Helpers that write an audit row on the tx of their caller, and the alert check, a job that
+  // runs with no request.
   'apps/api/src/publishing.ts',
   'apps/api/src/alerts.ts',
-  'apps/api/src/media/pipeline.ts',
   // The offline tools.
   'scripts/lib/provision.ts',
   'scripts/seed.ts',
