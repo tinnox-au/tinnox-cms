@@ -277,5 +277,8 @@ from: CMS-30
 ### CMS-34
 from: CMS-30
 
+**Notes**
+- 24 Nov: Steps: 45 controls register and check:controls; 46 control ids in test titles; 47 AGENTS.md in its final form; 48 shortcut ledger. Step 47 also removes the AGENTS.md sentences earlier steps left in place.
+
 ### CMS-35
 from: CMS-27
