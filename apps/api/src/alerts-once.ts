@@ -4,6 +4,12 @@
  * (config.ts). Exits non-zero when the configuration or the database role is refused, e-mail is
  * not configured, the run fails or an e-mail is refused. Safe beside running API instances
  * (alerts.ts).
+ *
+ * Do not schedule it in production yet: until REVIEWED_SMTP_HOSTS (config.ts) names a host, it
+ * exits 1 there on every run. With SMTP_HOST set, loadConfig refuses the unreviewed host; with
+ * it unset, there is no mailer and the run stops below. The provider review (item 4 of the
+ * pre-customer-release checklist) is what adds a host. It also exits 1 when PostgreSQL does not
+ * answer at start-up.
  */
 import { assertConnectionRole, assertRuntimeRole, createPool, RuntimeRoleError } from '@tinnox/db';
 import { runDisplayAlerts } from './alerts.ts';

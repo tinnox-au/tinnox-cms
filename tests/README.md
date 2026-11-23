@@ -109,6 +109,14 @@ previous verdict. The quality job runs the stackless checks (`playwright.layout.
 then `npm run check:test-results -- --counts layout`, which reads `tests/.run/layout-results.json`
 against the `"layout"` counts.
 
+## What CI runs
+
+`.github/workflows/ci.yml` has four jobs. The quality job runs lint, `npm run format:check`, `check:docs`, `check:migrations`, typecheck, the unit tests, the component tests, the stackless browser checks and their results gate, the build and the audit. The integration job starts PostgreSQL, Keycloak and the worker, runs `npm run verify:oidc` against the real Keycloak, then `npm run test:integration`. The secret scan is its own job. The end-to-end job (the full browser suite, then `npm run check:test-results`) runs only when started by hand or when the repository variable `RUN_E2E` is "true". The steps added on 2026-11-23 (the stackless browser checks and their gate, `verify:oidc`) had not run in GitHub Actions on 2026-11-23.
+
+## Adding a test
+
+A new test in a Vitest project (unit, component or integration) needs no registration: the project's file globs find it, and `tests/test-counts.json` holds only a floor under `"vitest"` that a full run must reach, which the reporter checks. After adding tests, run the project in full (`npm test`, `npm run test:component` or `npm run test:integration`) and read its `Tests N passed` line; raise that project's floor to N in the same change (a test under `apps/api/test` also counts toward `"api-integration"`: run `npm run test:integration -w @tinnox/api` and raise that floor too), because a floor left below the count lets the same number of tests vanish unnoticed. `npx vitest list` is not the number: it does not expand `it.each`. A browser test needs its spec file's count under `"e2e"` (or `"layout"` for `tests/playwright.layout.config.ts`) in the same change, as the gate says. `npx playwright test --list -c tests/playwright.config.ts tests/e2e/<file>.spec.ts` prints `Total: N tests in 1 file` without a stack; give `-c tests/playwright.layout.config.ts` and no file for the layout suite.
+
 ## What is substituted, and where
 
 - `integration/`: operator sessions are created through the same `sec.session_create`
