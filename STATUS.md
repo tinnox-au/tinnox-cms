@@ -3,7 +3,7 @@ contract: status/v2
 repo: tinnox-au/tinnox-cms
 initiative: TINNOX CMS
 key: CMS
-next_id: 30
+next_id: 31
 phase: Not written yet: one sentence on what this project is and where it stands
 gate: -
 seeded: 17 Nov 2026 by status init
@@ -44,7 +44,9 @@ None.
 
 ## In progress
 
-None.
+| Id | Card | Agreed | PR | Since |
+|---|---|---|---|---|
+| CMS-30 | Poteto pyramid refactor, group B: the database API (steps 13 to 22 of the adoption plan), built locally first | Michael 23 Nov | - | 23 Nov |
 
 ## In review
 
@@ -219,4 +221,7 @@ from: CMS-24
 Merged; CI green on the pull request; every suite and the browser suite passed locally on 23 Nov
 
 ### CMS-29
+from: CMS-28
+
+### CMS-30
 from: CMS-28
