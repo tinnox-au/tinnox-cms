@@ -258,6 +258,7 @@ from: CMS-30
 
 **Notes**
 - 24 Nov: Steps: 23 cross-organisation conformance test and the reworded 403 rule; 23a response contracts; 24 unknown commit outcome; 25 classifyDbError and the constraint registry; 26 SQLSTATE lint; 27 settle and a retry helper; 28 403 constructors.
+- 24 Nov: Builds on group B (CMS-30). Review findings left for these steps are in sections 6.1 and 6.2 of docs/coding_guide/poteto_pyramid/adoption-plan.md.
 
 ### CMS-32
 from: CMS-30
