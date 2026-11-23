@@ -1247,6 +1247,32 @@ describe('assign, then push', () => {
       expect(await desiredPublicationId(alice, displayId)).toBeNull();
     });
 
+    // A publishing attempt is audited whatever its result. The refusal is the value of the
+    // change, so its audit row has committed by the time the route answers 422.
+    it('D3: leaves the failure audit row of a refused publish, and still answers 422 with the reasons', async () => {
+      const display = await createDisplay(alice, orgA, 'Refused publish');
+      const empty = await createPlaylist(alice, 'Empty, refused');
+      const refused = await publish(empty, display.id);
+      expect(refused.status).toBe(422);
+      const body = (await refused.json()) as ErrorBody;
+      expect(body.error.code).toBe('publication_rejected');
+      expect(body.error.details).toEqual([
+        expect.objectContaining({ path: 'playlist', code: 'playlist_empty' }),
+      ]);
+      const events = (await auditEvents(alice, '&category=publication&result=failure')).filter(
+        (e) => e.objectId === empty,
+      );
+      expect(events).toEqual([
+        expect.objectContaining({
+          action: 'publication.create',
+          result: 'failure',
+          objectType: 'playlist',
+          detail: { displayId: display.id, reasons: ['playlist_empty'], via: 'publish' },
+        }),
+      ]);
+      expect(await publications(orgA, display.id)).toEqual([]);
+    });
+
     it('shares its Idempotency-Key space with push, per display', async () => {
       // A key used to publish to a display names that publication for a push as well.
       const { displayId, playlistId } = await assigned(alice, orgA, [imageA], 'Shared key');

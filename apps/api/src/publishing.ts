@@ -34,7 +34,7 @@ import {
   isMediaItem,
   isPushPending,
 } from '@tinnox/contracts';
-import { auditScoped, sql, type OrgReadTx, type OrgTx } from '@tinnox/db';
+import { sql, type AuditInput, type Change, type OrgReadTx, type OrgTx } from '@tinnox/db';
 import {
   buildManifest,
   decidePushState,
@@ -827,14 +827,15 @@ export interface NewPublication {
 
 /**
  * Creates the immutable publication for an accepted plan and makes it the
- * display's desired one, with its audit event, in the caller's transaction.
+ * display's desired one, in the caller's transaction. Its audit event travels with the
+ * row, so the caller returns it as the audit of its change and it commits with the publication.
  * The caller holds the publish key lock and the display (see above).
  */
 export async function createPublication(
   tx: OrgTx,
   ctx: AppContext,
   input: NewPublication,
-): Promise<PublicationRow> {
+): Promise<Change<PublicationRow>> {
   const { display, playlistId } = input;
   const publicationId = randomUUID();
   const createdAt = ctx.now();
@@ -877,53 +878,54 @@ export async function createPublication(
            desired_at = EXCLUDED.desired_at`,
     [display.id, publicationId, createdAt],
   );
-  await auditScoped(tx, {
-    actorType: 'operator',
-    actorId: input.membershipId,
-    action: 'publication.create',
-    objectType: 'publication',
-    objectId: publicationId,
-    result: 'success',
-    detail: {
-      displayId: display.id,
-      playlistId,
-      // A schedule has no column on the publication: it can be deleted, a publication cannot.
-      ...(input.scheduleId === null ? {} : { scheduleId: input.scheduleId }),
-      // A layout has none either, for the same reason.
-      ...(input.layoutId === null ? {} : { layoutId: input.layoutId }),
-      // Publishing a playlist takes the display's schedule or layout off it (not
-      // `scheduleId` or `layoutId`, which say what the publication was built from).
-      ...(input.via === 'publish' && display.assigned_schedule_id !== null
-        ? { assignedScheduleId: null }
-        : {}),
-      ...(input.via === 'publish' && display.assigned_layout_id !== null
-        ? { assignedLayoutId: null }
-        : {}),
-      items: manifest.assets.length,
-      route: display.route,
-      via: input.via,
+  return {
+    value: row,
+    audit: {
+      actorType: 'operator',
+      actorId: input.membershipId,
+      action: 'publication.create',
+      objectType: 'publication',
+      objectId: publicationId,
+      result: 'success',
+      detail: {
+        displayId: display.id,
+        playlistId,
+        // A schedule has no column on the publication: it can be deleted, a publication cannot.
+        ...(input.scheduleId === null ? {} : { scheduleId: input.scheduleId }),
+        // A layout has none either, for the same reason.
+        ...(input.layoutId === null ? {} : { layoutId: input.layoutId }),
+        // Publishing a playlist takes the display's schedule or layout off it (not
+        // `scheduleId` or `layoutId`, which say what the publication was built from).
+        ...(input.via === 'publish' && display.assigned_schedule_id !== null
+          ? { assignedScheduleId: null }
+          : {}),
+        ...(input.via === 'publish' && display.assigned_layout_id !== null
+          ? { assignedLayoutId: null }
+          : {}),
+        items: manifest.assets.length,
+        route: display.route,
+        via: input.via,
+      },
     },
-  });
-  return row;
+  };
 }
 
 /**
- * Records that a playlist, or a schedule or a layout (then the object of the event),
- * was refused for a display. Commits with the caller's transaction.
+ * The audit event of a playlist, or a schedule or a layout (then the object of the event),
+ * that was refused for a display. The caller returns it as the audit of its change, with the
+ * refusal as the value, so it commits with the caller's transaction (D3: a publishing attempt
+ * is audited whatever its result).
  */
-export async function auditRejectedPublication(
-  tx: OrgTx,
-  input: {
-    readonly membershipId: string;
-    readonly playlistId: string;
-    readonly scheduleId: string | null;
-    readonly layoutId: string | null;
-    readonly displayId: string;
-    readonly issues: readonly PublishIssue[];
-    readonly via: 'publish' | 'push';
-  },
-): Promise<void> {
-  await auditScoped(tx, {
+export function auditRejectedPublication(input: {
+  readonly membershipId: string;
+  readonly playlistId: string;
+  readonly scheduleId: string | null;
+  readonly layoutId: string | null;
+  readonly displayId: string;
+  readonly issues: readonly PublishIssue[];
+  readonly via: 'publish' | 'push';
+}): AuditInput {
+  return {
     actorType: 'operator',
     actorId: input.membershipId,
     action: 'publication.create',
@@ -936,5 +938,5 @@ export async function auditRejectedPublication(
       reasons: [...new Set(input.issues.map((issue) => issue.code))].slice(0, 20),
       via: input.via,
     },
-  });
+  };
 }

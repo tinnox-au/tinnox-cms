@@ -87,12 +87,9 @@ const source = (path: string): string => readFileSync(join(repoRoot, path), 'utf
 const FOUND_BY_STEP_19 = [
   'apps/api/src/auth/permissions.ts',
   'apps/api/src/db-helpers.ts',
-  'apps/api/src/publishing.ts',
   'apps/api/src/routes/auth.ts',
   'apps/api/src/routes/members.ts',
   'apps/api/src/routes/player.ts',
-  'apps/api/src/routes/playlists.ts',
-  'apps/api/src/routes/push.ts',
   'scripts/lib/provision.ts',
   'scripts/seed.ts',
 ];

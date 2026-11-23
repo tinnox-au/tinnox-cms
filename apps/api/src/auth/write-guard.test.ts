@@ -28,8 +28,8 @@ const READS: Readonly<Record<string, number>> = {
   'media.ts': 0,
   'members.ts': 3,
   'overview.ts': 0,
-  'playlists.ts': 2,
-  'push.ts': 2,
+  'playlists.ts': 0,
+  'push.ts': 0,
   'schedules.ts': 0,
   'tags.ts': 0,
 };

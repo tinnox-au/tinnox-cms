@@ -897,8 +897,6 @@ export const LEGACY_TRANSACTION_FILES = [
   // The operator routes: reads in plain withOrg, writes through withOrgAllowed or
   // withOrgDecisionAllowed with auditScoped in the callback.
   'apps/api/src/routes/members.ts',
-  'apps/api/src/routes/playlists.ts',
-  'apps/api/src/routes/push.ts',
   // Sign-in, sign-out and the player protocol: no role, and partly before the organisation is
   // known.
   'apps/api/src/routes/auth.ts',
@@ -907,8 +905,6 @@ export const LEGACY_TRANSACTION_FILES = [
   // changeOrg; withOrgDecision), deleted when their last caller has moved.
   'apps/api/src/auth/permissions.ts',
   'apps/api/src/db-helpers.ts',
-  // Helpers that write an audit row on the tx of their caller.
-  'apps/api/src/publishing.ts',
   // The offline tools.
   'scripts/lib/provision.ts',
   'scripts/seed.ts',

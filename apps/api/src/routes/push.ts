@@ -14,9 +14,9 @@ import {
   type PushResponse,
   type PushResult,
 } from '@tinnox/contracts';
-import { withOrg } from '@tinnox/db';
+import { readOrg, unaudited, type Change } from '@tinnox/db';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { withOrgAllowed } from '../auth/permissions.ts';
+import { changeAsOperator } from '../auth/permissions.ts';
 import { operatorOf, type OperatorSession } from '../auth/session.ts';
 import { perMinute, type AppContext } from '../context.ts';
 import { iso } from '../db-helpers.ts';
@@ -52,7 +52,7 @@ export function registerPushRoutes(app: FastifyInstance, ctx: AppContext): void 
 
   app.get(ROUTES.push, async (request): Promise<PushPlanResponse> => {
     const session = operatorOf(request);
-    return withOrg(pool, session.orgId, async (tx) => {
+    return readOrg(pool, session.orgId, async (tx) => {
       const assessments = await loadPushPlan(tx, ctx);
       return { items: assessments.map(toPlanRow), pendingCount: pendingCount(assessments) };
     });
@@ -63,7 +63,8 @@ export function registerPushRoutes(app: FastifyInstance, ctx: AppContext): void 
    * request is reused per display under the same lock as publishing, so a
    * repeat of the request finds the publication it made and creates nothing.
    * The member's role is checked again first in each transaction, before the key lock, so a
-   * demoted member's replay of the same key is refused too.
+   * demoted member's replay of the same key is refused too. The audit row of a publication, or
+   * of a rejected one, is returned with the result and commits with it.
    */
   function pushDisplay(
     request: FastifyRequest,
@@ -71,13 +72,16 @@ export function registerPushRoutes(app: FastifyInstance, ctx: AppContext): void 
     displayId: string,
     key: string,
   ): Promise<PushResult> {
-    return withOrgAllowed(ctx, request, async (tx): Promise<PushResult> => {
+    return changeAsOperator(ctx, request, async (tx): Promise<Change<PushResult>> => {
       await lockPublishKey(tx, displayId, key);
       // Checked before anything else, so a repeat answers as the first call did
       // even when the display would by now count as up to date.
       const previous = await findPublicationByKey(tx, displayId, key);
       if (previous !== null) {
-        return { displayId, outcome: 'published', publicationId: previous.id, issues: [] };
+        return {
+          value: { displayId, outcome: 'published', publicationId: previous.id, issues: [] },
+          audit: unaudited('idempotent_replay'),
+        };
       }
       const display = await lockDisplayForPublish(tx, displayId);
       if (display === null) throw notFound('The screen');
@@ -90,38 +94,46 @@ export function registerPushRoutes(app: FastifyInstance, ctx: AppContext): void 
       // Still "nothing is assigned": a display with a schedule or a layout carries its
       // default or main-zone playlist here.
       if (assessment.playlist === null) {
-        return { displayId, outcome: 'skipped', publicationId: null, issues: [] };
+        return {
+          value: { displayId, outcome: 'skipped', publicationId: null, issues: [] },
+          audit: unaudited('nothing_changed'),
+        };
       }
       if (assessment.state === 'blocked') {
         // Nothing is written but the audit event: the display keeps the
         // publication it has, and what it is playing is not interrupted.
-        await auditRejectedPublication(tx, {
-          membershipId: session.membershipId,
-          playlistId: assessment.playlist.id,
-          scheduleId: assessment.schedule?.id ?? null,
-          layoutId: assessment.layout?.id ?? null,
-          displayId,
-          issues: assessment.issues,
-          via: 'push',
-        });
         return {
-          displayId,
-          outcome: 'rejected',
-          publicationId: null,
-          issues: issueDetails(assessment.issues),
+          value: {
+            displayId,
+            outcome: 'rejected',
+            publicationId: null,
+            issues: issueDetails(assessment.issues),
+          },
+          audit: auditRejectedPublication({
+            membershipId: session.membershipId,
+            playlistId: assessment.playlist.id,
+            scheduleId: assessment.schedule?.id ?? null,
+            layoutId: assessment.layout?.id ?? null,
+            displayId,
+            issues: assessment.issues,
+            via: 'push',
+          }),
         };
       }
       if (assessment.state === 'up_to_date' && assessment.current !== null) {
         return {
-          displayId,
-          outcome: 'unchanged',
-          publicationId: assessment.current.publicationId,
-          issues: [],
+          value: {
+            displayId,
+            outcome: 'unchanged',
+            publicationId: assessment.current.publicationId,
+            issues: [],
+          },
+          audit: unaudited('nothing_changed'),
         };
       }
       // Asked for above (`keepDraft`); without it nothing may be published.
       if (assessment.draft === null) throw new Error('a display was assessed without its draft');
-      const row = await createPublication(tx, ctx, {
+      const made = await createPublication(tx, ctx, {
         display,
         playlistId: assessment.playlist.id,
         scheduleId: assessment.schedule?.id ?? null,
@@ -131,7 +143,10 @@ export function registerPushRoutes(app: FastifyInstance, ctx: AppContext): void 
         membershipId: session.membershipId,
         via: 'push',
       });
-      return { displayId, outcome: 'published', publicationId: row.id, issues: [] };
+      return {
+        value: { displayId, outcome: 'published', publicationId: made.value.id, issues: [] },
+        audit: made.audit,
+      };
     });
   }
 
@@ -147,7 +162,7 @@ export function registerPushRoutes(app: FastifyInstance, ctx: AppContext): void 
 
       // Every id must be a display of this organisation before anything is written.
       // Another organisation's display is invisible here, so it answers like an unknown id.
-      const known = await withOrg(pool, session.orgId, async (tx) => {
+      const known = await readOrg(pool, session.orgId, async (tx) => {
         const { rows } = await tx.query<{ id: string }>(
           'SELECT id FROM display WHERE org_id = app_org_id() AND id = ANY($1::uuid[])',
           [displayIds],
