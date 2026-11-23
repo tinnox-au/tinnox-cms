@@ -22,7 +22,7 @@ const READS: Readonly<Record<string, number>> = {
   'alert-recipients.ts': 1,
   'apps.ts': 0,
   'audit.ts': 0,
-  'displays.ts': 5,
+  'displays.ts': 0,
   'folders.ts': 0,
   'layouts.ts': 0,
   'media.ts': 6,
