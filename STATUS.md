@@ -270,6 +270,9 @@ from: CMS-30
 ### CMS-33
 from: CMS-30
 
+**Notes**
+- 24 Nov: Steps: 38 session wake and layoutBoxes (LYX-01, LYX-02); 39 reads through useLoad; 40 raw-dialog ban; 41 to 41c draft saving, write errors, patchOf, version check on PUTs; 42 and 42a truncation, URL markers, announcements; 43 fetch ban; 44 and 44a.
+
 ### CMS-34
 from: CMS-30
 
