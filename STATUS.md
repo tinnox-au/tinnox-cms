@@ -282,3 +282,6 @@ from: CMS-30
 
 ### CMS-35
 from: CMS-27
+
+**Notes**
+- 24 Nov: The list is REVIEWED_SMTP_HOSTS in apps/api/src/config.ts, empty today. Until a host is added, production refuses any SMTP_HOST and the alert job exits 1 there. Related question for TINNOX: CMS-27.
