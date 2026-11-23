@@ -85,7 +85,6 @@ const source = (path: string): string => readFileSync(join(repoRoot, path), 'utf
  * are empty the rule, its two lists and this test's allow-list cases can go.
  */
 const FOUND_BY_STEP_19 = [
-  'apps/api/src/alerts.ts',
   'apps/api/src/auth/permissions.ts',
   'apps/api/src/db-helpers.ts',
   'apps/api/src/publishing.ts',

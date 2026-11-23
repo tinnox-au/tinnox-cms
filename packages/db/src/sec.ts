@@ -523,7 +523,7 @@ export async function mediaProcessingJobs(
   }));
 }
 
-/** Every organisation's id, for the alert check (0014); it then enters each with withOrg. */
+/** Every organisation's id, for the alert check (0014); it then enters each with changeAsJob. */
 export async function displayAlertOrgs(db: AnyScope): Promise<OrgId[]> {
   const { rows } = await statementsOf(db).query<{ org_id: string }>(
     'SELECT org_id FROM sec.display_alert_orgs()',

@@ -745,7 +745,7 @@ export const UNSCOPED_HELPER_FILES = {
   'apps/api/src/routes/player.ts':
     'before the organisation is known: poolAsTx for deviceByTokenHash and deviceByRegistrationId, which resolve a device credential or a signed media URL to its organisation, and withoutOrg for pairingCreate and pairingPoll, when the pairing session belongs to no organisation yet',
   'apps/api/src/alerts.ts':
-    'not before the organisation is known, but across all of them: poolAsTx for displayAlertOrgs, the list of organisations the alert check then enters one by one with withOrg',
+    'not before the organisation is known, but across all of them: poolAsTx for displayAlertOrgs, the list of organisations the alert check then enters one by one with changeAsJob and readOrg',
   'apps/api/src/housekeeping.ts':
     'not before the organisation is known, but across all of them: poolAsTx for the purges of expired sessions, old pairing sessions and heartbeat history (sessionPurgeExpired, pairingPurge, heartbeatLogPurge)',
   'apps/api/src/media/pipeline.ts':
@@ -907,10 +907,8 @@ export const LEGACY_TRANSACTION_FILES = [
   // changeOrg; withOrgDecision), deleted when their last caller has moved.
   'apps/api/src/auth/permissions.ts',
   'apps/api/src/db-helpers.ts',
-  // Helpers that write an audit row on the tx of their caller, and the alert check, a job that
-  // runs with no request.
+  // Helpers that write an audit row on the tx of their caller.
   'apps/api/src/publishing.ts',
-  'apps/api/src/alerts.ts',
   // The offline tools.
   'scripts/lib/provision.ts',
   'scripts/seed.ts',
