@@ -23,7 +23,7 @@ import {
   STAGE_A_CONSTRAINTS,
   violatedConstraint,
   withOrg,
-  type OrgTx,
+  type OrgReadTx,
 } from '@tinnox/db';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { abandonBody, withOrgAllowed, withOrgDecisionAllowed } from '../auth/permissions.ts';
@@ -41,7 +41,7 @@ import { isUnknownTag, replaceTags } from '../tags.ts';
 type UploadRefusal = Extract<AuditEventShapes['media.upload']['detail'], { reason: unknown }>;
 
 /** One live media item of the caller's organisation, or null. */
-async function loadMediaRow(tx: OrgTx, id: string): Promise<MediaRow | null> {
+async function loadMediaRow(tx: OrgReadTx, id: string): Promise<MediaRow | null> {
   const { rows } = await tx.query<MediaRow>(
     `SELECT ${MEDIA_COLUMNS} FROM media m
      WHERE m.id = $1 AND m.org_id = app_org_id() AND m.deleted_at IS NULL`,

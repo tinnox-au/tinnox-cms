@@ -14,7 +14,7 @@ RuleTester.it = it;
 const tester = new RuleTester({ languageOptions: { parser: tseslint.parser } });
 
 const REMEDY =
-  'Use readOrg(pool, orgId, fn) for reads and changeOrg(pool, orgId, permit, fn) returning { value, audit } for changes; the permit comes from the role guard: an operator route calls changeAsOperator(ctx, request, fn) (apps/api/src/auth/permissions.ts), which issues it and checks the role again first. Before the organisation is known, use changePreOrg(pool, fn), in the files of PRE_ORG_CHANGE_FILES (eslint.config.js) only. The wrapper writes the audit rows you return on the transaction of the change; a change that records nothing returns unaudited(reason) (all from @tinnox/db). This file is not in LEGACY_TRANSACTION_FILES of eslint.config.js, and that list only shrinks: do not add to it.';
+  'Use readOrg(pool, orgId, fn) for reads and changeOrg(pool, orgId, permit, fn) returning { value, audit } for changes; the permit comes from the role guard: an operator route calls changeAsOperator(ctx, request, fn) (apps/api/src/auth/permissions.ts), which issues it and checks the role again first. A change with no operator behind it gets its permit the same way: a player route calls changeAsDevice(ctx, request, device, fn) (apps/api/src/auth/device.ts), a job changeAsJob(pool, job, orgId, fn) (apps/api/src/jobs.ts), an offline tool changeOrgAsMigrator(pool, orgId, statement, fn) (@tinnox/db/migrate), and a refusal that changed nothing is written with recordRefusal(ctx, request, session, event) (apps/api/src/auth/refusal.ts). Before the organisation is known, use changePreOrg(pool, statement, fn), in the files of PRE_ORG_CHANGE_FILES (eslint.config.js) only. The wrapper writes the audit rows you return on the transaction of the change; a change that records nothing returns unaudited(reason) (all from @tinnox/db). This file is not in LEGACY_TRANSACTION_FILES of eslint.config.js, and that list only shrinks: do not add to it.';
 const OPENS = 'opens a transaction that anything may be written on, with no role check';
 const BY_HAND = 'writes an audit row by hand, on whatever transaction it is given';
 const WRAPS = 'is for a callback that writes its audit rows by hand';
@@ -36,7 +36,20 @@ describe('no-legacy-transaction (AG-3.1, SCR-34)', { timeout: 30_000 }, () => {
           import { changeAsOperator } from '../auth/permissions.ts';
           await readOrg(pool, session.orgId, (tx) => tx.query('SELECT 1'));
           await changeAsOperator(ctx, request, async (tx) => ({ value: await save(tx), audit: event }));
-          await changePreOrg(pool, async (pre) => ({ value: 1, audit: unaudited('login_state') }));
+          await changePreOrg(pool, routeStatement(request), async (pre) => ({ value: 1, audit: unaudited('nothing_changed') }));
+        `,
+      },
+      {
+        name: 'the changes with no operator behind them, and a refusal recorded on its own (step 20)',
+        code: `
+          import { changeOrgAsMigrator } from '@tinnox/db/migrate';
+          import { changeAsDevice, verifyDeviceCredential } from '../auth/device.ts';
+          import { recordRefusal } from '../auth/refusal.ts';
+          import { changeAsJob } from './jobs.ts';
+          await changeAsDevice(ctx, request, device, async (tx) => ({ value: 1, audit: event }));
+          await changeAsJob(pool, 'media_pipeline', orgId, async (tx) => ({ value: 1, audit: event }));
+          await changeOrgAsMigrator(pool, orgId, statement, async (tx) => ({ value: 1, audit: event }));
+          await recordRefusal(ctx, request, session, event);
         `,
       },
       {

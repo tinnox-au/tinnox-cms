@@ -353,12 +353,13 @@ const NO_ORG_ID_FORGERY = [
       'Do not make an OrgId here (AG-2.3): not by a cast, a type predicate, or a type argument of a call such as the row type of query(). The type says the database named the organisation. In the API it comes from operatorOf(request).orgId, the device credential (deviceByTokenHash) or another lookup of packages/db/src/sec.ts, never from the request; a lookup that is missing is added there. An offline tool that creates an organisation calls newOrgId(), and one that looks a member or an invite up reads its org_id through asDefiner (both from @tinnox/db/migrate). A test names its organisation with testOrgId(id) from @tinnox/db/testing.',
   },
 ];
-// SCR-34 (adoption plan step 19): a WritePermit says the role guard issued it, so its re-check of
-// the member's role is the first statement of the change, and changeOrg of @tinnox/db runs no
-// change without one. A cast would let a write past the role check as far as the types go
-// (changeOrg then refuses the value when it runs: it holds no terms). In every file, tests
-// included, and in packages/db too, where issueWritePermit builds one without a cast. Matched
-// like MigratorPool above, with the same three forms left to review.
+// SCR-34 (adoption plan steps 19 and 20): a WritePermit says that what judged the caller issued
+// it (for an operator the role guard, whose re-check of the member's role is the first statement
+// of the change), and changeOrg of @tinnox/db runs no change without one. A cast would let a
+// write past that check as far as the types go (changeOrg then refuses the value when it runs:
+// it holds no terms). In every file, tests included, and in packages/db too, where
+// issueWritePermit builds one without a cast. Matched like MigratorPool above, with the same
+// three forms left to review.
 const WRITE_PERMIT = ":matches([typeName.name='WritePermit'], [typeName.right.name='WritePermit'])";
 const NO_WRITE_PERMIT_CAST = [
   {
@@ -367,7 +368,43 @@ const NO_WRITE_PERMIT_CAST = [
       `:matches(TSAsExpression, TSTypeAssertion) > .typeAnnotation TSTypeReference${WRITE_PERMIT}`,
     ].join(', '),
     message:
-      'Do not cast to WritePermit: the type says the role guard issued the permit, so the role is read again as the first statement of the change (SCR-34). An operator route calls changeAsOperator(ctx, request, fn) (apps/api/src/auth/permissions.ts), which issues the permit and gives it to changeOrg; a test issues one with issueWritePermit({ recheck, stated, statedIn }) from @tinnox/db.',
+      'Do not cast to WritePermit: the type says the role guard issued the permit, so the role is read again as the first statement of the change (SCR-34). An operator route calls changeAsOperator(ctx, request, fn) (apps/api/src/auth/permissions.ts), which issues the permit and gives it to changeOrg; a change with no operator behind it calls changeAsDevice (apps/api/src/auth/device.ts), changeAsJob (apps/api/src/jobs.ts) or changeOrgAsMigrator (@tinnox/db/migrate), which do the same for what judged it. A test issues one with issueWritePermit({ recheck, stated, statedIn }) from @tinnox/db.',
+  },
+];
+// SCR-34 (adoption plan step 20): a VerifiedDevice says the device-credential check returned it
+// (verifyDeviceCredential in apps/api/src/auth/device.ts), and changeAsDevice issues the permit
+// of a player's change to nothing else. A cast would let a handler that resolved no credential
+// change an organisation as far as the types go (changeAsDevice then refuses the value when it
+// runs: it carries no mark). In every file, tests included. Matched like MigratorPool above,
+// with the same three forms left to review.
+const VERIFIED_DEVICE =
+  ":matches([typeName.name='VerifiedDevice'], [typeName.right.name='VerifiedDevice'])";
+const NO_VERIFIED_DEVICE_CAST = [
+  {
+    selector: [
+      `:matches(TSAsExpression, TSTypeAssertion) > TSTypeReference.typeAnnotation${VERIFIED_DEVICE}`,
+      `:matches(TSAsExpression, TSTypeAssertion) > .typeAnnotation TSTypeReference${VERIFIED_DEVICE}`,
+    ].join(', '),
+    message:
+      "Do not cast to VerifiedDevice: the type says the device-credential check accepted the credential of this request, and the permit of a player's change is issued to nothing else (SCR-34). Resolve the credential with verifyDeviceCredential(unscoped, tokenHash) from apps/api/src/auth/device.ts and pass the device it returns to changeAsDevice(ctx, request, device, fn); a test gets one the same way, from a pool that answers the lookup.",
+  },
+];
+// SCR-34 (adoption plan step 20, review): an AuditStatement says it was read from the table that
+// holds the statement of a route, a job or a command (STATEMENT_ISSUERS below), and changePreOrg
+// and changeOrgAsMigrator hold a change to nothing else, as changeOrg holds one to its permit. A
+// cast would hold a change to a statement its caller wrote (both refuse the value when they run:
+// it carries no mark). In every file, tests included. Matched like MigratorPool above, with the
+// same three forms left to review.
+const AUDIT_STATEMENT =
+  ":matches([typeName.name='AuditStatement'], [typeName.right.name='AuditStatement'])";
+const NO_AUDIT_STATEMENT_CAST = [
+  {
+    selector: [
+      `:matches(TSAsExpression, TSTypeAssertion) > TSTypeReference.typeAnnotation${AUDIT_STATEMENT}`,
+      `:matches(TSAsExpression, TSTypeAssertion) > .typeAnnotation TSTypeReference${AUDIT_STATEMENT}`,
+    ].join(', '),
+    message:
+      'Do not cast to AuditStatement: the type says the statement was read from the table of its route, job or command, so the change is compared with what that table says it audits (SCR-34). A route outside the operator table passes routeStatement(request), a job jobStatement(name), a refusal refusalStatement(request, audit) (all apps/api/src/route-audit.ts), and a provisioning command provisionStatement(command) (scripts/lib/provision.ts). A test makes one with issueAuditStatement({ stated, statedIn }) from @tinnox/db.',
   },
 ];
 // The types only packages/db may make.
@@ -377,6 +414,8 @@ const NO_BRAND_CAST = [
   ...NO_SQL_FRAGMENT_CAST,
   ...NO_ORG_ID_FORGERY,
   ...NO_WRITE_PERMIT_CAST,
+  ...NO_VERIFIED_DEVICE_CAST,
+  ...NO_AUDIT_STATEMENT_CAST,
 ];
 
 // Adoption plan section 3.2: the API reads the time from one injected clock, so tests can set it.
@@ -716,17 +755,59 @@ export const UNSCOPED_HELPER_FILES = {
 };
 const UNSCOPED_HELPERS = ['withoutOrg', 'poolAsTx'];
 
-// SCR-34 (adoption plan step 19): changeOrg of @tinnox/db runs no change without a WritePermit,
-// and issueWritePermit makes one from any re-check, so only the role guard may import it: there
-// the re-check is assertStillAllowed, and the audit statement is the route's row of
-// ROUTE_PERMISSIONS. legacyAudit is the guard's too: it lets the callback of withOrgAllowed
-// write its audit rows by hand, until the last file of LEGACY_TRANSACTION_FILES has moved. Test
-// files are outside the rule. Not seen: the names taken from a dynamic import.
+// SCR-34 (adoption plan steps 19 and 20): changeOrg of @tinnox/db runs no change without a
+// WritePermit, and issueWritePermit makes one from any re-check and any statement, so only what
+// judges the caller of a change may import it. One file per kind of caller, each with its
+// reason: every one issues its permit inside a function that takes the proof (the request the
+// role guard let through, the device the credential check returned, the pool connectMigrator
+// checked), carries the audit statement of the route, job or command, and never hands the
+// permit out. A new kind of caller is a new entry here, decided in its pull request; a route,
+// a job or a tool never issues its own. legacyAudit is the role guard's alone: it lets the
+// callback of withOrgAllowed write its audit rows by hand, until the last file of
+// LEGACY_TRANSACTION_FILES has moved (the lint below refuses it outside the issuers, and
+// scripts/lib/legacy-transaction-lint.test.ts in every issuer but the role guard). Test files
+// are outside the rule. Not seen: the names taken from a dynamic import. The last entry is in
+// packages/db, which the import rule does not read: packages/db/src/entries.test.ts holds that
+// no other file of the package issues a permit.
 export const WRITE_PERMIT_ISSUERS = {
   'apps/api/src/auth/permissions.ts':
     'the role guard: changeAsOperator issues the permit of an operator write from what permissionGuard resolved for the request, and withOrgAllowed returns legacyAudit for the callbacks that still write their audit rows by hand',
+  'apps/api/src/auth/refusal.ts':
+    'the refusal record of the guards (SCR-32, D2): recordRefusal issues a permit that reads no role again, because the request is already refused, and gives the transaction one refusal event and no callback, so nothing but that audit row is written',
+  'apps/api/src/auth/device.ts':
+    "the device-credential check: changeAsDevice issues the permit of a player's change to the VerifiedDevice that verifyDeviceCredential returned and to nothing else; a player has no role to read again (D8)",
+  'apps/api/src/jobs.ts':
+    "the entry of the jobs that run with no request: changeAsJob issues the permit of a change by the alert check or the media pipeline, held to the job's row of JOB_AUDIT; only the files of JOB_CHANGE_FILES may import it",
+  'packages/db/src/migrate.ts':
+    'the migrator connection of the offline tools: changeOrgAsMigrator issues the permit of a provisioning or seed change to the pool that connectMigrator checked; the API cannot import this entry (AG-1.10)',
 };
 const PERMIT_MAKERS = ['issueWritePermit', 'legacyAudit'];
+
+// SCR-34 (adoption plan step 20, review): changePreOrg and changeOrgAsMigrator take an
+// AuditStatement where changeOrg takes a permit, and issueAuditStatement makes one from any
+// actions, so only the files whose helpers read a statement from its table may import it, each
+// with its reason. A route, a job or a tool never writes its own: a new table of statements is
+// a new entry here, decided in its pull request. Test files are outside the rule. Not seen: the
+// names taken from a dynamic import.
+export const STATEMENT_ISSUERS = {
+  'apps/api/src/route-audit.ts':
+    'the audit tables of the routes and the jobs: routeStatement reads the entry of a route in OTHER_ROUTE_AUDIT, jobStatement the row of a job in JOB_AUDIT, and refusalStatement the guards of a route with the actions of its row that D2 lets a refusal record on its own (ATTEMPT_AUDITED_ACTIONS: an upload)',
+  'scripts/lib/provision.ts':
+    'the provisioning commands: provisionStatement reads the audits of a command from its row in PROVISION_COMMANDS, the table the audit-failure cases of tests/integration/provision-member.test.ts go through',
+};
+const STATEMENT_MAKERS = ['issueAuditStatement'];
+
+// SCR-34 (adoption plan step 20): changeAsJob of apps/api/src/jobs.ts changes any organisation
+// with no role check and no credential, because a job has neither. Nothing in its arguments
+// proves the caller is a job, so only the two job files may import that module, each with its
+// reason; an operator route that reached for it would skip the role guard. Test files are
+// outside the rule. Not seen: a dynamic import.
+export const JOB_CHANGE_FILES = {
+  'apps/api/src/alerts.ts':
+    'the alert check: it runs on a timer with no request, enters every organisation that displayAlertOrgs names, and claims the offline and back-online transitions of its screens',
+  'apps/api/src/media/pipeline.ts':
+    'the media pipeline: it runs on a timer with no request, takes the jobs that mediaProcessingJobs names in every organisation, and records the verdict of each validation',
+};
 
 // SCR-34 (adoption plan step 19): changePreOrg, and withResolvedOrg of which it is the new form,
 // hand their callback enterOrg, which turns any OrgId into a handle that writes, with no permit
@@ -1164,7 +1245,34 @@ const IMPORT_FACETS = [
         regex: '^@tinnox/db$',
         importNames: PERMIT_MAKERS,
         message:
-          "Only the role guard issues a WritePermit (SCR-34): its re-check of the member's role is the first statement of the change, and legacyAudit is for its withOrgAllowed alone. An operator route calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts and returns { value, audit }; it never holds the permit. A change with no operator behind it (a player, a job, an offline tool) does not make a permit of its own: say so in the pull request, where a permit-free opener for that kind of caller is decided.",
+          "Only what judges the caller of a change issues its WritePermit (SCR-34; the files of WRITE_PERMIT_ISSUERS in eslint.config.js), and legacyAudit is for the role guard's withOrgAllowed alone. An operator route calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts and returns { value, audit }; it never holds the permit. A change with no operator behind it does not make a permit of its own either: a player route calls changeAsDevice(ctx, request, device, fn) with the device verifyDeviceCredential returned (apps/api/src/auth/device.ts), the alert check and the media pipeline call changeAsJob(pool, job, orgId, fn) (apps/api/src/jobs.ts), an offline tool calls changeOrgAsMigrator(pool, orgId, statement, fn) from @tinnox/db/migrate, and a refusal that changed nothing is written with recordRefusal(ctx, request, session, event) (apps/api/src/auth/refusal.ts). A caller of a kind none of these fits is decided in its pull request, as a new entry of WRITE_PERMIT_ISSUERS.",
+      },
+    ],
+  },
+  {
+    // SCR-34: the maker of an audit statement, outside the files that read the tables.
+    only: DB_CALLERS,
+    files: [CODE_FILES],
+    ignores: [...TEST_FILES, ...Object.keys(STATEMENT_ISSUERS)],
+    patterns: [
+      {
+        regex: '^@tinnox/db$',
+        importNames: STATEMENT_MAKERS,
+        message:
+          'Only the helpers that read a statement from its table make an AuditStatement (SCR-34; the files of STATEMENT_ISSUERS in eslint.config.js), so a change is never held to a statement its caller wrote. A route outside the operator table passes routeStatement(request) to changePreOrg, a job runs through changeAsJob(pool, job, orgId, fn) (jobStatement), a refusal through recordRefusal(ctx, request, session, event) (refusalStatement; all three in apps/api/src/route-audit.ts and its callers), and a provisioning command passes provisionStatement(command) from scripts/lib/provision.ts to changeOrgAsMigrator or changePreOrg. A new table of statements is decided in its pull request, as a new entry of STATEMENT_ISSUERS.',
+      },
+    ],
+  },
+  {
+    // SCR-34: the entry of the jobs, outside the two job files.
+    only: ['apps/api'],
+    files: [CODE_FILES],
+    ignores: [...TEST_FILES, ...Object.keys(JOB_CHANGE_FILES)],
+    patterns: [
+      {
+        regex: '(^|/)jobs\\.ts$',
+        message:
+          'apps/api/src/jobs.ts is the entry of the jobs that run with no request (SCR-34): changeAsJob changes an organisation with no role check and no credential, so only the alert check and the media pipeline may import it (JOB_CHANGE_FILES in eslint.config.js). An operator route calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts, which checks the role again first; a player route calls changeAsDevice(ctx, request, device, fn) from apps/api/src/auth/device.ts; a read calls readOrg(pool, orgId, fn) from @tinnox/db. A new job gets its row in JOB_AUDIT (apps/api/src/route-audit.ts) and its file in JOB_CHANGE_FILES with its reason, in its pull request.',
       },
     ],
   },

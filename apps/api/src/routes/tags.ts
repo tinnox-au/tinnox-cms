@@ -21,7 +21,7 @@ import {
   STAGE_A_CONSTRAINTS,
   violatedConstraint,
   withOrg,
-  type OrgTx,
+  type OrgReadTx,
 } from '@tinnox/db';
 import type { FastifyInstance } from 'fastify';
 import { requirePermission, tagScopeKey, withOrgAllowed } from '../auth/permissions.ts';
@@ -63,7 +63,7 @@ function toTagDto(row: TagRow): TagDto {
   };
 }
 
-async function loadTag(tx: OrgTx, id: string): Promise<TagDto | null> {
+async function loadTag(tx: OrgReadTx, id: string): Promise<TagDto | null> {
   const { rows } = await tx.query<TagRow>(
     `SELECT ${TAG_COLUMNS} FROM tag t WHERE t.id = $1 AND t.org_id = app_org_id()`,
     [id],

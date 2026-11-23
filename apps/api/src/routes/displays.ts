@@ -34,7 +34,7 @@ import {
   STAGE_B_CONSTRAINTS,
   violatedConstraint,
   withOrg,
-  type OrgTx,
+  type OrgReadTx,
 } from '@tinnox/db';
 import type { FastifyInstance } from 'fastify';
 import { withOrgAllowed, withOrgDecisionAllowed } from '../auth/permissions.ts';
@@ -189,7 +189,7 @@ function assignmentAfter(
   };
 }
 
-async function loadDisplay(tx: OrgTx, id: string): Promise<DisplayRow | null> {
+async function loadDisplay(tx: OrgReadTx, id: string): Promise<DisplayRow | null> {
   const { rows } = await tx.query<DisplayRow>(`${DISPLAY_SELECT} AND d.id = $1`, [id]);
   return rows[0] ?? null;
 }

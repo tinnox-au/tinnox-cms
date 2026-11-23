@@ -1,10 +1,10 @@
 /**
- * changeOrg and changePreOrg (adoption plan section 2.1 B, step 19; AG-3.1, SCR-34): the audit
- * rows a change returns are written on its transaction before COMMIT, a change runs only with a
- * permit, and what it recorded is held to what its route states. The statements are read off a
- * fake connection; the database's half is in packages/db/test/change.integration.test.ts. The
- * type cases are checked by `npm run typecheck`, which reads this file: an unused
- * @ts-expect-error is an error there.
+ * changeOrg and changePreOrg (adoption plan section 2.1 B, steps 19 and 20; AG-3.1, SCR-34): the
+ * audit rows a change returns are written on its transaction before COMMIT, a change runs only
+ * with a permit, and what it recorded is held to what its route states, before the organisation
+ * is known too. The statements are read off a fake connection; the database's half is in
+ * packages/db/test/change.integration.test.ts. The type cases are checked by
+ * `npm run typecheck`, which reads this file: an unused @ts-expect-error is an error there.
  */
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
@@ -12,13 +12,16 @@ import {
   auditUnscoped,
   changeOrg,
   changePreOrg,
+  issueAuditStatement,
   issueWritePermit,
   legacyAudit,
   readOrg,
+  termsOfStatement,
   unaudited,
   withOrg,
   type Audit,
   type AuditInput,
+  type AuditStatement,
   type Change,
   type OrgReadTx,
   type OrgTx,
@@ -28,6 +31,7 @@ import {
   type Unaudited,
   type WritePermit,
 } from './index.ts';
+import { changeOrgAsMigrator, type MigratorPool } from './migrate.ts';
 import { testOrgId } from './testing.ts';
 
 const ORG = testOrgId('00000000-0000-4000-8000-000000000001');
@@ -171,7 +175,7 @@ describe('changeOrg (AG-3.1, SCR-34)', () => {
     const { pool, statements } = fakePool();
     expect(
       await changeOrg(pool, ORG, FOLDER_WRITES, () =>
-        Promise.resolve({ value: 'unchanged', audit: unaudited('read_only') }),
+        Promise.resolve({ value: 'unchanged', audit: unaudited('nothing_changed') }),
       ),
     ).toBe('unchanged');
     expect(statements).toEqual(['BEGIN', SET_ORG, 'ROLE RE-CHECK', 'COMMIT']);
@@ -185,7 +189,7 @@ describe('changeOrg (AG-3.1, SCR-34)', () => {
         return { value: 1, audit: [] };
       }),
     ).rejects.toThrow(
-      'changeOrg: the change returned an empty list of audit events, so nothing says why it records nothing. Return the event of what it changed, or { value, audit: unaudited(reason) } with a reason of NO_AUDIT_REASONS (packages/contracts/src/audit.ts) when it really writes no audit row. Nothing was committed.',
+      'changeOrg: the change returned an empty list of audit events, so nothing says why it records nothing. Return the event of what it changed, or { value, audit: unaudited(reason) } with a reason of UNAUDITED_REASONS (packages/contracts/src/audit.ts) when it really writes no audit row. Nothing was committed.',
     );
     expect(statements.at(-1)).toBe('ROLLBACK');
   });
@@ -195,10 +199,10 @@ describe('changeOrg (AG-3.1, SCR-34)', () => {
     await expect(
       changeOrg(pool, ORG, FOLDER_WRITES, async (tx) => {
         await auditScoped(tx, CREATED);
-        return { value: 1, audit: unaudited('read_only') };
+        return { value: 1, audit: unaudited('nothing_changed') };
       }),
     ).rejects.toThrow(
-      "changeOrg: the change returned unaudited('read_only'), yet its callback wrote audit rows itself (folder.create). Return those events as { value, audit } and let changeOrg write them, or return no unaudited(...). Nothing was committed.",
+      "changeOrg: the change returned unaudited('nothing_changed'), yet its callback wrote audit rows itself (folder.create). Return those events as { value, audit } and let changeOrg write them, or return no unaudited(...). Nothing was committed.",
     );
     expect(statements.at(-1)).toBe('ROLLBACK');
   });
@@ -271,15 +275,74 @@ describe('what a change records against what its route states (D3)', () => {
     expect(statements.at(-1)).toBe('ROLLBACK');
   });
 
-  it('takes the reason the route states, and read_only on any route, and no other', async () => {
+  // Adoption plan step 20: UNAUDITED_REASONS and NO_AUDIT_REASONS, and how the two relate.
+  it('takes what one run found under any statement: nothing changed, a replay', async () => {
+    const { pool, statements } = fakePool();
+    for (const stated of [
+      { actions: ['folder.create'] },
+      { none: 'telemetry' },
+      { none: 'read_only' },
+    ] as const satisfies readonly StatedAudit[]) {
+      for (const reason of ['nothing_changed', 'idempotent_replay'] as const) {
+        await changeOrg(pool, ORG, permitFor(stated), () =>
+          Promise.resolve({ value: 1, audit: unaudited(reason) }),
+        );
+      }
+    }
+    expect(statements.filter((text) => text === 'COMMIT')).toHaveLength(6);
+    expect(statements).not.toContain('ROLLBACK');
+  });
+
+  it('takes an uncounted attempt only where the statement grants it (D3, step 20 review)', async () => {
+    // The pairing poll counts a wrong polling token under its limit and audits none: a write
+    // left unaudited on purpose, so it is the route's to grant, not any change's to claim.
+    const granted = fakePool();
+    await changeOrg(
+      granted.pool,
+      ORG,
+      issueWritePermit({
+        recheck: () => Promise.resolve(),
+        stated: { actions: ['pairing.complete', 'pairing.lock'] },
+        statedIn: 'the entry of GET /player/pairing/:id in OTHER_ROUTE_AUDIT (fixture)',
+        grants: ['counter_under_threshold'],
+      }),
+      () => Promise.resolve({ value: 1, audit: unaudited('counter_under_threshold') }),
+    );
+    expect(granted.statements.at(-1)).toBe('COMMIT');
+
+    const { pool, statements } = fakePool();
+    for (const stated of [
+      { actions: ['folder.create', 'folder.update'] },
+      { none: 'telemetry' },
+    ] as const satisfies readonly StatedAudit[]) {
+      await expect(
+        changeOrg(pool, ORG, permitFor(stated), () =>
+          Promise.resolve({ value: 1, audit: unaudited('counter_under_threshold') }),
+        ),
+      ).rejects.toThrow(
+        `changeOrg: the change returned unaudited('counter_under_threshold'), but ${STATED_IN} does not grant it. 'counter_under_threshold' leaves a write unaudited on purpose, which only a route that counts attempts may do: its entry in OTHER_ROUTE_AUDIT (apps/api/src/route-audit.ts) grants the reason (D3). Return the audit event of what changed, or unaudited('nothing_changed') when this run changed nothing. Nothing was committed.`,
+      );
+    }
+    expect(statements).not.toContain('COMMIT');
+  });
+
+  it('names a statement with no action as such, not as an empty list (step 20 review)', async () => {
+    const { pool } = fakePool();
+    await expect(
+      changeOrg(pool, ORG, permitFor({ actions: [] }), () =>
+        Promise.resolve({ value: 1, audit: CREATED }),
+      ),
+    ).rejects.toThrow(
+      `changeOrg: the change recorded folder.create, which ${STATED_IN} does not state: it states no action at all. Name every action`,
+    );
+  });
+
+  it('takes telemetry only where the route states telemetry (the reason of both lists)', async () => {
     const telemetry = fakePool();
     await changeOrg(telemetry.pool, ORG, permitFor({ none: 'telemetry' }), () =>
       Promise.resolve({ value: 1, audit: unaudited('telemetry') }),
     );
-    await changeOrg(telemetry.pool, ORG, permitFor({ none: 'telemetry' }), () =>
-      Promise.resolve({ value: 1, audit: unaudited('read_only') }),
-    );
-    expect(telemetry.statements.filter((text) => text === 'COMMIT')).toHaveLength(2);
+    expect(telemetry.statements.at(-1)).toBe('COMMIT');
 
     const { pool, statements } = fakePool();
     await expect(
@@ -287,21 +350,30 @@ describe('what a change records against what its route states (D3)', () => {
         Promise.resolve({ value: 1, audit: unaudited('telemetry') }),
       ),
     ).rejects.toThrow(
-      `changeOrg: the change returned unaudited('telemetry'), but ${STATED_IN} states folder.create, folder.update. Return the audit event of what changed, or unaudited('read_only') when this run changed nothing. Nothing was committed.`,
+      `changeOrg: the change returned unaudited('telemetry'), but ${STATED_IN} states folder.create, folder.update. 'telemetry' says what the route stores on every request, so its statement has to give the same reason. Return the audit event of what changed, or unaudited('nothing_changed') when this run changed nothing. Nothing was committed.`,
     );
     await expect(
-      changeOrg(pool, ORG, permitFor({ none: 'telemetry' }), () =>
-        Promise.resolve({ value: 1, audit: unaudited('login_state') }),
+      changeOrg(pool, ORG, permitFor({ none: 'login_state' }), () =>
+        Promise.resolve({ value: 1, audit: unaudited('telemetry') }),
       ),
-    ).rejects.toThrow(/unaudited\('login_state'\), but .* states no audit row \(telemetry\)/);
+    ).rejects.toThrow(/unaudited\('telemetry'\), but .* states no audit row \(login_state\)/);
     expect(statements).not.toContain('COMMIT');
   });
 });
 
+const NOT_ISSUED =
+  'requires the audit statement of its route or command, as the table that holds it gives it: a route outside the operator table passes routeStatement(request) (apps/api/src/route-audit.ts), its entry in OTHER_ROUTE_AUDIT; a provisioning command passes provisionStatement(command) (scripts/lib/provision.ts), the audits of its row in PROVISION_COMMANDS. A statement written in place is not one';
+
+/** What a route outside the operator table says it audits, as its entry in OTHER_ROUTE_AUDIT. */
+const statementOf = (stated: StatedAudit, route: string): AuditStatement =>
+  issueAuditStatement({ stated, statedIn: `the entry of ${route} in OTHER_ROUTE_AUDIT (fixture)` });
+const PAIRING = statementOf({ actions: ['pairing.create'] }, 'POST /player/pairing');
+const FOLDERS = statementOf({ actions: ['folder.create'] }, 'POST /fixture/folders');
+
 describe('changePreOrg (AG-3.1)', () => {
   it('writes the event with no organisation when the change entered none', async () => {
     const { pool, statements } = fakePool();
-    const value = await changePreOrg(pool, () =>
+    const value = await changePreOrg(pool, PAIRING, () =>
       Promise.resolve({ value: 'pairing', audit: PAIRING_CREATED }),
     );
     expect(value).toBe('pairing');
@@ -310,7 +382,7 @@ describe('changePreOrg (AG-3.1)', () => {
 
   it('writes the event for the organisation the change entered, on the same transaction', async () => {
     const { pool, statements } = fakePool();
-    await changePreOrg(pool, async (_pre, enterOrg) => {
+    await changePreOrg(pool, FOLDERS, async (_pre, enterOrg) => {
       const tx = await enterOrg(ORG);
       await tx.query('TENANT CHANGE');
       return { value: undefined, audit: CREATED };
@@ -326,28 +398,142 @@ describe('changePreOrg (AG-3.1)', () => {
 
   it('keeps the same rules: a reason or an event, never both, and a rollback on a throw', async () => {
     const { pool, statements } = fakePool();
-    await changePreOrg(pool, () => Promise.resolve({ value: 1, audit: unaudited('login_state') }));
+    await changePreOrg(pool, PAIRING, () =>
+      Promise.resolve({ value: 1, audit: unaudited('nothing_changed') }),
+    );
     expect(statements).toEqual(['BEGIN', 'COMMIT']);
 
     await expect(
-      changePreOrg(pool, () => Promise.resolve({ value: 1, audit: [] })),
+      changePreOrg(pool, PAIRING, () => Promise.resolve({ value: 1, audit: [] })),
     ).rejects.toThrow(/^changePreOrg: the change returned an empty list of audit events/);
     await expect(
-      changePreOrg(pool, async (pre) => {
+      changePreOrg(pool, PAIRING, async (pre) => {
         await auditUnscoped(pre, PAIRING_CREATED);
-        return { value: 1, audit: unaudited('read_only') };
+        return { value: 1, audit: unaudited('nothing_changed') };
       }),
-    ).rejects.toThrow(/^changePreOrg: the change returned unaudited\('read_only'\), yet/);
-    await expect(changePreOrg(pool, () => Promise.reject(new Error('boom')))).rejects.toThrow(
-      'boom',
-    );
+    ).rejects.toThrow(/^changePreOrg: the change returned unaudited\('nothing_changed'\), yet/);
+    await expect(
+      changePreOrg(pool, PAIRING, () => Promise.reject(new Error('boom'))),
+    ).rejects.toThrow('boom');
     expect(statements.filter((text) => text === 'COMMIT')).toHaveLength(1);
 
     const nested = (): Promise<number> =>
-      changePreOrg(pool, () => Promise.resolve({ value: 1, audit: PAIRING_CREATED }));
+      changePreOrg(pool, PAIRING, () => Promise.resolve({ value: 1, audit: PAIRING_CREATED }));
     await expect(withOrg(pool, ORG, () => nested())).rejects.toThrow(
       /^changePreOrg was called while a transaction is open/,
     );
+  });
+
+  // Adoption plan step 20: the sign-in, sign-out, confirmation and pairing routes are held to
+  // their entry in OTHER_ROUTE_AUDIT at run time, as an operator write is to its row.
+  it('refuses an action its route does not state, written with or without an organisation', async () => {
+    const unscoped = fakePool();
+    await expect(
+      changePreOrg(unscoped.pool, statementOf({ actions: ['pairing.lock'] }, 'GET /fixture'), () =>
+        Promise.resolve({ value: 1, audit: PAIRING_CREATED }),
+      ),
+    ).rejects.toThrow(
+      'changePreOrg: the change recorded pairing.create, which the entry of GET /fixture in OTHER_ROUTE_AUDIT (fixture) does not state: it states pairing.lock. Name every action the route writes in that statement, and give a new one its case in tests/integration/audit-failure.test.ts; or correct the event. Nothing was committed.',
+    );
+    expect(unscoped.statements).toEqual(['BEGIN', 'UNSCOPED AUDIT pairing.create', 'ROLLBACK']);
+
+    const scoped = fakePool();
+    await expect(
+      changePreOrg(scoped.pool, PAIRING, async (_pre, enterOrg) => {
+        const tx = await enterOrg(ORG);
+        await tx.query('TENANT CHANGE');
+        return { value: 1, audit: [CREATED] };
+      }),
+    ).rejects.toThrow(/^changePreOrg: the change recorded folder\.create, which .* does not state/);
+    expect(scoped.statements.at(-1)).toBe('ROLLBACK');
+    expect(scoped.statements).not.toContain('COMMIT');
+  });
+
+  it('holds a row the callback wrote by hand, and a reason, to the same statement', async () => {
+    const { pool, statements } = fakePool();
+    await expect(
+      changePreOrg(pool, statementOf({ none: 'login_state' }, 'GET /fixture'), async (pre) => {
+        await auditUnscoped(pre, PAIRING_CREATED);
+        return { value: 1, audit: legacyAudit() };
+      }),
+    ).rejects.toThrow(
+      /^changePreOrg: the change recorded pairing\.create, which .* states no audit row \(login_state\)\./,
+    );
+    await expect(
+      changePreOrg(pool, PAIRING, () =>
+        Promise.resolve({ value: 1, audit: unaudited('telemetry') }),
+      ),
+    ).rejects.toThrow(
+      /^changePreOrg: the change returned unaudited\('telemetry'\), but the entry of POST \/player\/pairing in OTHER_ROUTE_AUDIT \(fixture\) states pairing\.create\./,
+    );
+    // A counted attempt under the limit, on a route that does not grant it (step 20 review).
+    await expect(
+      changePreOrg(pool, PAIRING, () =>
+        Promise.resolve({ value: 1, audit: unaudited('counter_under_threshold') }),
+      ),
+    ).rejects.toThrow(
+      /^changePreOrg: the change returned unaudited\('counter_under_threshold'\), but the entry of POST \/player\/pairing in OTHER_ROUTE_AUDIT \(fixture\) does not grant it\./,
+    );
+    expect(statements).not.toContain('COMMIT');
+
+    // The pairing poll grants it: a wrong polling token under the limit is counted, not audited.
+    const poll = fakePool();
+    await changePreOrg(
+      poll.pool,
+      issueAuditStatement({
+        stated: { actions: ['pairing.complete', 'pairing.lock'] },
+        statedIn: 'the entry of GET /player/pairing/:id in OTHER_ROUTE_AUDIT (fixture)',
+        grants: ['counter_under_threshold'],
+      }),
+      () => Promise.resolve({ value: 1, audit: unaudited('counter_under_threshold') }),
+    );
+    expect(poll.statements).toEqual(['BEGIN', 'COMMIT']);
+  });
+
+  it('refuses to run with no statement, before any statement is sent', async () => {
+    const { pool, statements } = fakePool();
+    const withoutStatement = (() => Promise.resolve({ value: 1, audit: PAIRING_CREATED })) as never;
+    await expect(
+      changePreOrg(pool, withoutStatement, () =>
+        Promise.resolve({ value: 1, audit: PAIRING_CREATED }),
+      ),
+    ).rejects.toThrow(`changePreOrg ${NOT_ISSUED}`);
+    expect(statements).toEqual([]);
+  });
+
+  it('refuses a statement written in place, which no table gave (step 20 review)', async () => {
+    const { pool, statements } = fakePool();
+    // What a route could otherwise hold itself to: any actions it likes.
+    const written = { stated: { actions: ['pairing.create'] }, statedIn: 'x' } as never;
+    await expect(
+      changePreOrg(pool, written, () => Promise.resolve({ value: 1, audit: PAIRING_CREATED })),
+    ).rejects.toThrow(`changePreOrg ${NOT_ISSUED}`);
+    expect(statements).toEqual([]);
+  });
+
+  it('holds a spread of a statement to the statement it copied, not to the keys beside it (step 20 review)', async () => {
+    const { pool, statements } = fakePool();
+    // What a route could otherwise do with the statement its table gave: widen it in place.
+    const widened = { ...PAIRING, stated: { actions: ['folder.create'] }, statedIn: 'x' };
+    await expect(
+      changePreOrg(pool, widened, async (_pre, enterOrg) => {
+        await enterOrg(ORG);
+        return { value: 1, audit: CREATED };
+      }),
+    ).rejects.toThrow(
+      'changePreOrg: the change recorded folder.create, which the entry of POST /player/pairing in OTHER_ROUTE_AUDIT (fixture) does not state: it states pairing.create.',
+    );
+    expect(statements).not.toContain('COMMIT');
+
+    // The terms are the ones the table gave, and they cannot be changed afterwards either.
+    const cases = (): void => {
+      // @ts-expect-error a key written beside the spread is not a term of the statement
+      const written: AuditStatement = { ...PAIRING, stated: { actions: ['folder.create'] } };
+      expect(written).toBeDefined();
+    };
+    expect(cases).toBeTypeOf('function');
+    expect(Object.isFrozen(PAIRING)).toBe(true);
+    expect(Object.isFrozen(termsOfStatement('a test', PAIRING))).toBe(true);
   });
 });
 
@@ -366,7 +552,15 @@ describe('a change needs a permit, and a permit comes from the role guard (SCR-3
       // @ts-expect-error and the audit is an event or unaudited(reason), never left out
       await changeOrg(pool, ORG, permit, () => Promise.resolve({ value: 1 }));
       // @ts-expect-error before the organisation is known the same holds
-      await changePreOrg(pool, () => Promise.resolve(1));
+      await changePreOrg(pool, PAIRING, () => Promise.resolve(1));
+      // @ts-expect-error and there the route's statement stands where the permit does: no form without
+      await changePreOrg(pool, () => Promise.resolve({ value: 1, audit: PAIRING_CREATED }));
+      // @ts-expect-error nor one the caller wrote in place: only a table's helper makes one (step 20 review)
+      await changePreOrg(pool, { stated: { actions: ['pairing.create'] }, statedIn: 'x' }, () =>
+        Promise.resolve({ value: 1, audit: PAIRING_CREATED }),
+      );
+      // @ts-expect-error a bare list of actions says nothing of where it is written
+      await changePreOrg(pool, { actions: ['pairing.create'] }, change);
     };
     expect(cases).toBeTypeOf('function');
     expectTypeOf(changeOrg).parameter(2).toExtend<WritePermit<unknown>>();
@@ -394,21 +588,29 @@ describe('a change needs a permit, and a permit comes from the role guard (SCR-3
     await expect(
       changeOrg(pool, ORG, forged, () => Promise.resolve({ value: 1, audit: CREATED })),
     ).rejects.toThrow(
-      'changeOrg requires a WritePermit that the role guard issued: an operator route calls changeAsOperator(ctx, request, fn) (apps/api/src/auth/permissions.ts), which issues the permit and checks the role again first',
+      'changeOrg requires a WritePermit that the role guard issued: an operator route calls changeAsOperator(ctx, request, fn) (apps/api/src/auth/permissions.ts), which issues the permit and checks the role again first. A change with no operator behind it gets its permit the same way, from what judged it: changeAsDevice (apps/api/src/auth/device.ts), changeAsJob (apps/api/src/jobs.ts), or changeOrgAsMigrator of @tinnox/db/migrate for an offline tool',
     );
     expect(statements).toEqual([]);
   });
 
   it('the reason of unaudited() is one of the closed list, and only unaudited() makes one', () => {
     expect(unaudited('telemetry')).not.toBe(unaudited('telemetry'));
-    // @ts-expect-error a reason is a key of NO_AUDIT_REASONS (packages/contracts/src/audit.ts)
+    // @ts-expect-error a reason is a key of UNAUDITED_REASONS (packages/contracts/src/audit.ts)
     unaudited('nothing_to_see');
+    // @ts-expect-error a change is not a read: a route that only reads opens readOrg
+    unaudited('read_only');
+    // @ts-expect-error the login state is stored outside any change, by the Autocommit wrappers (D2)
+    unaudited('login_state');
     // @ts-expect-error a string is not a reason given
-    const bare: Audit = 'read_only';
+    const bare: Audit = 'nothing_changed';
     // @ts-expect-error nor an object that spells the reason: the mark is not exported
-    const spelled: Unaudited = { unaudited: 'read_only' };
+    const spelled: Unaudited = { unaudited: 'nothing_changed' };
     expect([bare, spelled]).toHaveLength(2);
-    expectTypeOf(unaudited).parameter(0).toEqualTypeOf<'read_only' | 'telemetry' | 'login_state'>();
+    expectTypeOf(unaudited)
+      .parameter(0)
+      .toEqualTypeOf<
+        'nothing_changed' | 'idempotent_replay' | 'telemetry' | 'counter_under_threshold'
+      >();
   });
 
   it('the handle of readOrg cannot be given to a change, nor a change to readOrg', () => {
@@ -424,9 +626,51 @@ describe('a change needs a permit, and a permit comes from the role guard (SCR-3
       // A change may read with the same helper.
       await changeOrg(pool, ORG, permit, async (tx) => ({
         value: await read(tx),
-        audit: unaudited('read_only'),
+        audit: unaudited('nothing_changed'),
       }));
     };
     expect(cases).toBeTypeOf('function');
+  });
+});
+
+// Adoption plan step 20: an offline tool has no operator, and its permit comes from the
+// migrator's connection. The database's half is in packages/db/test/change.integration.test.ts,
+// where connectMigrator gives a real MigratorPool.
+describe('a change by an offline tool needs the migrator connection (SCR-34)', () => {
+  const PROVISIONING = issueAuditStatement({
+    stated: { actions: ['membership.create'] },
+    statedIn: 'the audits of org-create in PROVISION_COMMANDS (fixture)',
+  });
+
+  it('takes a MigratorPool, and no other pool', () => {
+    const cases = async (pool: Pool, migrator: MigratorPool): Promise<void> => {
+      const change = (): Promise<Change<number>> => Promise.resolve({ value: 1, audit: CREATED });
+      await changeOrgAsMigrator(migrator, ORG, PROVISIONING, change);
+      // @ts-expect-error the runtime pool is not the migrator's: connectMigrator checks the role
+      await changeOrgAsMigrator(pool, ORG, PROVISIONING, change);
+      // @ts-expect-error and the tool says what it audits: there is no form without the statement
+      await changeOrgAsMigrator(migrator, ORG, change);
+      // @ts-expect-error nor with one written in place: provisionStatement(command) reads its row
+      await changeOrgAsMigrator(migrator, ORG, { stated: { actions: [] }, statedIn: 'x' }, change);
+      // @ts-expect-error a MigratorPool is the proof for changeOrgAsMigrator, not a permit for changeOrg
+      await changeOrg(migrator, ORG, migrator, change);
+      // @ts-expect-error nor does changeOrg run for an offline tool without one
+      await changeOrg(migrator, ORG, change);
+    };
+    expect(cases).toBeTypeOf('function');
+    expectTypeOf(changeOrgAsMigrator).parameter(0).toEqualTypeOf<MigratorPool>();
+    expectTypeOf<Pool>().not.toExtend<MigratorPool>();
+  });
+
+  it('refuses at run time a pool that connectMigrator did not return, and sends nothing', async () => {
+    const { pool, statements } = fakePool();
+    await expect(
+      changeOrgAsMigrator(pool as never, ORG, PROVISIONING, () =>
+        Promise.resolve({ value: 1, audit: CREATED }),
+      ),
+    ).rejects.toThrow(
+      'changeOrgAsMigrator requires the pool that connectMigrator returned: call connectMigrator(connectionString, { applicationName }) from @tinnox/db/migrate and pass that pool. The API has no migrator connection: an operator route calls changeAsOperator(ctx, request, fn) (apps/api/src/auth/permissions.ts)',
+    );
+    expect(statements).toEqual([]);
   });
 });

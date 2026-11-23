@@ -1,9 +1,9 @@
 /**
- * changeOrg, changePreOrg and readOrg against PostgreSQL (adoption plan section 2.1 B, step 19;
- * AG-3.1, SCR-34): the audit rows a change returns commit with it or not at all, a READ ONLY
- * read refuses every write, and what the wrapper cannot see (an `unaudited` that is not true)
- * is caught by the audit-debt guard. The statements and the types are in
- * ../src/change.test.ts and ../src/tx.test.ts.
+ * changeOrg, changePreOrg, changeOrgAsMigrator and readOrg against PostgreSQL (adoption plan
+ * section 2.1 B, steps 19 and 20; AG-3.1, SCR-34): the audit rows a change returns commit with
+ * it or not at all, a READ ONLY read refuses every write, and what the wrapper cannot see (an
+ * `unaudited` that is not true) is caught by the audit-debt guard. The statements and the types
+ * are in ../src/change.test.ts and ../src/tx.test.ts.
  */
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -11,17 +11,21 @@ import {
   changeOrg,
   changePreOrg,
   createPool,
+  issueAuditStatement,
   issueWritePermit,
   membershipForCheck,
   pairingCreate,
   readOrg,
+  termsOfStatement,
   unaudited,
   withOrg,
   type AuditInput,
+  type AuditStatement,
   type OrgTx,
   type Pool,
   type WritePermit,
 } from '../src/index.ts';
+import { changeOrgAsMigrator, connectMigrator, type MigratorPool } from '../src/migrate.ts';
 import {
   AUDIT_DEBT_SQLSTATE,
   ensureAuditDebtGuard,
@@ -174,7 +178,7 @@ describe('changeOrg against the database (AG-3.1, SCR-34)', () => {
     await expect(
       changeOrg(judged, other.orgId, permit(), () => {
         ran = true;
-        return Promise.resolve({ value: 1, audit: unaudited('read_only') });
+        return Promise.resolve({ value: 1, audit: unaudited('nothing_changed') });
       }),
     ).rejects.toThrow('not a member of this organisation');
     expect(ran).toBe(false);
@@ -186,7 +190,7 @@ describe('changeOrg against the database (AG-3.1, SCR-34)', () => {
     const error = await rejection(
       changeOrg(judged, org.orgId, permit(), async (tx) => {
         await newFolder(tx, 'Falsely unaudited');
-        return { value: 1, audit: unaudited('read_only') };
+        return { value: 1, audit: unaudited('nothing_changed') };
       }),
     );
     expect(error).toBeInstanceOf(pg.DatabaseError);
@@ -208,8 +212,15 @@ describe('changePreOrg against the database (AG-3.1)', () => {
       detail: null,
     }) as const satisfies AuditInput;
 
+  /** As a route outside the operator table states it, in its entry of OTHER_ROUTE_AUDIT. */
+  const stating = (...actions: AuditInput['action'][]): AuditStatement =>
+    issueAuditStatement({
+      stated: { actions },
+      statedIn: 'the entry of the route in OTHER_ROUTE_AUDIT (test)',
+    });
+
   it('writes the event with no organisation when none was entered, with the change', async () => {
-    const pairingId = await changePreOrg(judged, async (pre) => {
+    const pairingId = await changePreOrg(judged, stating('pairing.create'), async (pre) => {
       const created = await pairingCreate(pre, {
         code: pairingCode(),
         pollingTokenHash: hash(),
@@ -236,7 +247,7 @@ describe('changePreOrg against the database (AG-3.1)', () => {
   });
 
   it('writes the event for the organisation the change entered', async () => {
-    await changePreOrg(judged, async (_pre, enterOrg) => {
+    await changePreOrg(judged, stating('folder.create'), async (_pre, enterOrg) => {
       const tx = await enterOrg(org.orgId);
       const id = await newFolder(tx, 'Entered and audited');
       return { value: id, audit: folderCreated(id) };
@@ -244,6 +255,110 @@ describe('changePreOrg against the database (AG-3.1)', () => {
     expect(await committed('Entered and audited')).toEqual({
       folders: 1,
       audited: ['folder.create'],
+    });
+  });
+
+  // Adoption plan step 20: the route's statement is held before the organisation is known too.
+  it('commits nothing of a change that recorded an action its route does not state', async () => {
+    const error = await rejection(
+      changePreOrg(judged, stating('alert_recipient.confirm'), async (_pre, enterOrg) => {
+        const tx = await enterOrg(org.orgId);
+        const id = await newFolder(tx, 'Entered and unstated');
+        return { value: id, audit: folderCreated(id) };
+      }),
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(
+      /^changePreOrg: the change recorded folder\.create, which the entry of the route in OTHER_ROUTE_AUDIT \(test\) does not state: it states alert_recipient\.confirm\./,
+    );
+    expect(await committed('Entered and unstated')).toEqual({ folders: 0, audited: [] });
+  });
+});
+
+// Adoption plan step 20: an offline tool changes an organisation with the permit of its
+// migrator connection. No role is read again, and the audit rows still commit with the change.
+describe('changeOrgAsMigrator against the database (AG-3.1, SCR-34)', () => {
+  let pool: MigratorPool;
+  const PROVISIONING = issueAuditStatement({
+    stated: { actions: ['folder.create'] },
+    statedIn: 'the audits of the command in PROVISION_COMMANDS (test)',
+  });
+
+  beforeAll(async () => {
+    pool = await connectMigrator(migratorUrl(), { applicationName: 'tinnox-test-offline-change' });
+  });
+  afterAll(async () => {
+    await pool.end();
+  });
+
+  it('commits the change and the audit row it returned, as the migrator', async () => {
+    const who = await changeOrgAsMigrator(pool, org.orgId, PROVISIONING, async (tx) => {
+      const id = await newFolder(tx, 'Changed offline');
+      const { rows } = await tx.query<{ current_user: string }>('SELECT current_user');
+      return { value: rows[0]?.current_user, audit: folderCreated(id) };
+    });
+    expect(who).toBe('tinnox_migrator');
+    expect(await committed('Changed offline')).toEqual({ folders: 1, audited: ['folder.create'] });
+  });
+
+  it('rolls the change back when its audit row cannot be written (CX-01)', async () => {
+    const { result, refused } = await whileAuditFails(migratorUrl(), 'folder.create', () =>
+      rejection(
+        changeOrgAsMigrator(pool, org.orgId, PROVISIONING, async (tx) => {
+          const id = await newFolder(tx, 'Offline audit fails');
+          return { value: id, audit: folderCreated(id) };
+        }),
+      ),
+    );
+    expect(refused).toBe(1);
+    expect(result).toBeInstanceOf(pg.DatabaseError);
+    expect(await committed('Offline audit fails')).toEqual({ folders: 0, audited: [] });
+  });
+
+  it('commits nothing of a change that recorded an action the tool does not state', async () => {
+    const error = await rejection(
+      changeOrgAsMigrator(
+        pool,
+        org.orgId,
+        issueAuditStatement({
+          stated: { actions: ['membership.create'] },
+          statedIn: termsOfStatement('a test', PROVISIONING).statedIn,
+        }),
+        async (tx) => {
+          const id = await newFolder(tx, 'Offline and unstated');
+          return { value: id, audit: folderCreated(id) };
+        },
+      ),
+    );
+    expect((error as Error).message).toMatch(
+      /^changeOrg: the change recorded folder\.create, which the audits of the command in PROVISION_COMMANDS \(test\) does not state: it states membership\.create\./,
+    );
+    expect(await committed('Offline and unstated')).toEqual({ folders: 0, audited: [] });
+  });
+
+  it('refuses the runtime pool, which connectMigrator never checked', async () => {
+    await expect(
+      changeOrgAsMigrator(judged as never, org.orgId, PROVISIONING, async (tx) => {
+        const id = await newFolder(tx, 'Offline on the runtime pool');
+        return { value: id, audit: folderCreated(id) };
+      }),
+    ).rejects.toThrow(/^changeOrgAsMigrator requires the pool that connectMigrator returned/);
+    expect(await committed('Offline on the runtime pool')).toEqual({ folders: 0, audited: [] });
+  });
+
+  it('refuses a statement the tool wrote in place, before anything is sent (step 20 review)', async () => {
+    const written = { stated: { actions: ['folder.create'] }, statedIn: 'x' } as never;
+    await expect(
+      changeOrgAsMigrator(pool, org.orgId, written, async (tx) => {
+        const id = await newFolder(tx, 'Offline under its own statement');
+        return { value: id, audit: folderCreated(id) };
+      }),
+    ).rejects.toThrow(
+      /^changeOrgAsMigrator requires the audit statement of its route or command, as the table that holds it gives it: .* provisionStatement\(command\) \(scripts\/lib\/provision\.ts\)/,
+    );
+    expect(await committed('Offline under its own statement')).toEqual({
+      folders: 0,
+      audited: [],
     });
   });
 });

@@ -82,6 +82,7 @@ describe('the entries of @tinnox/db (AG-1.10)', () => {
     expect(Object.keys(migrate)).toEqual(
       expect.arrayContaining([
         'asDefiner',
+        'changeOrgAsMigrator',
         'connectMigrator',
         'newOrgId',
         'resetTestDatabase',
@@ -139,6 +140,35 @@ describe('the entries of @tinnox/db (AG-1.10)', () => {
     }
     expect(Object.keys(orgId).sort()).toEqual(['mintOrgId', 'readAsDefiner']);
     expect(Object.keys(preOrg).sort()).toEqual(['keepStatements', 'statementsOf']);
+  });
+
+  // SCR-34 (adoption plan step 20): lint keeps issueWritePermit to the files of
+  // WRITE_PERMIT_ISSUERS in the API and the offline tools, and does not read this package. Here
+  // one module issues a permit, for the migrator's connection, and it is not in the runtime
+  // entry; scripts/lib/legacy-transaction-lint.test.ts holds its entry in that list.
+  it('only the migrator entry issues a permit inside the package', () => {
+    const sources = readdirSync(SRC).filter(
+      (name) => name.endsWith('.ts') && !name.endsWith('.test.ts'),
+    );
+    expect(
+      sources.filter((name) => /\bissueWritePermit\b/.test(readFileSync(join(SRC, name), 'utf8'))),
+      'a permit says what judged the caller of a change. Inside this package only changeOrgAsMigrator (src/migrate.ts) issues one, to the pool connectMigrator checked; src/change.ts defines the maker',
+    ).toEqual(['change.ts', 'migrate.ts']);
+    expect(reachable('index.ts').has(join(SRC, 'migrate.ts'))).toBe(false);
+  });
+
+  // Step 20 review: the same for an audit statement, which lint keeps to the files of
+  // STATEMENT_ISSUERS. This package takes the statement it is given and makes none.
+  it('no module of the package makes an audit statement', () => {
+    const sources = readdirSync(SRC).filter(
+      (name) => name.endsWith('.ts') && !name.endsWith('.test.ts'),
+    );
+    expect(
+      sources.filter((name) =>
+        /\bissueAuditStatement\(/.test(readFileSync(join(SRC, name), 'utf8')),
+      ),
+      'a statement is read from the table of its route, job or command (STATEMENT_ISSUERS in eslint.config.js); this package only checks the one it is given. src/change.ts defines the maker',
+    ).toEqual(['change.ts']);
   });
 
   it('the runtime entry has no MigratorPool type either (checked by npm run typecheck)', () => {

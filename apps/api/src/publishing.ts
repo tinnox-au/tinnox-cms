@@ -34,7 +34,7 @@ import {
   isMediaItem,
   isPushPending,
 } from '@tinnox/contracts';
-import { auditScoped, sql, type OrgTx } from '@tinnox/db';
+import { auditScoped, sql, type OrgReadTx, type OrgTx } from '@tinnox/db';
 import {
   buildManifest,
   decidePushState,
@@ -94,6 +94,14 @@ export interface PublicationRow {
 }
 
 const PUBLICATION_COLUMNS = 'id, display_id, playlist_id, manifest, created_at';
+
+/**
+ * Whether a loader may be asked to lock what it reads, by the handle it is given: yes inside a
+ * change (an `OrgTx`), never on the read-only handle of `readOrg` (an `OrgReadTx`), where the
+ * database refuses a row lock with SQLSTATE 25006 (SCR-34). So a read handler passes `false`,
+ * and `true` there does not compile.
+ */
+export type LockOn<T extends OrgReadTx> = T extends OrgTx ? boolean : false;
 
 // The row lock a read takes when its caller asks for one, and the text when it asks for none.
 const FOR_SHARE = sql`FOR SHARE`;
@@ -232,7 +240,7 @@ export async function lockPublishKey(tx: OrgTx, displayId: string, key: string):
 
 /** The publication already made for this display under this key, if any. */
 export async function findPublicationByKey(
-  tx: OrgTx,
+  tx: OrgReadTx,
   displayId: string,
   key: string,
 ): Promise<PublicationRow | null> {
@@ -268,10 +276,10 @@ export async function lockDisplayForPublish(
  * for any number of playlists. With `lock`, the playlists cannot be edited or
  * deleted until the transaction ends.
  */
-export async function loadPlaylistDrafts(
-  tx: OrgTx,
+export async function loadPlaylistDrafts<T extends OrgReadTx>(
+  tx: T,
   playlistIds: readonly string[],
-  lock: boolean,
+  lock: LockOn<T>,
 ): Promise<Map<string, PlaylistDraft>> {
   const drafts = new Map<string, PlaylistDraft>();
   const ids = [...new Set(playlistIds.map((id) => id.toLowerCase()))];
@@ -335,10 +343,10 @@ export async function loadPlaylistDrafts(
  * and an edit or a delete locks the schedule row before it touches the events.
  * Without `lock` (the push plan) the one statement is one snapshot.
  */
-export async function loadScheduleDrafts(
-  tx: OrgTx,
+export async function loadScheduleDrafts<T extends OrgReadTx>(
+  tx: T,
   scheduleIds: readonly string[],
-  lock: boolean,
+  lock: LockOn<T>,
 ): Promise<Map<string, ScheduleDraft>> {
   const drafts = new Map<string, ScheduleDraft>();
   const ids = [...new Set(scheduleIds.map((id) => id.toLowerCase()))];
@@ -408,10 +416,10 @@ export async function loadScheduleDrafts(
  * delete locks the layout row before it touches the zones. Without `lock` (the push plan)
  * the second statement alone is one snapshot.
  */
-export async function loadLayoutDrafts(
-  tx: OrgTx,
+export async function loadLayoutDrafts<T extends OrgReadTx>(
+  tx: T,
   layoutIds: readonly string[],
-  lock: boolean,
+  lock: LockOn<T>,
 ): Promise<Map<string, LayoutDraft>> {
   const drafts = new Map<string, LayoutDraft>();
   const ids = [...new Set(layoutIds.map((id) => id.toLowerCase()))];
@@ -477,10 +485,10 @@ interface MediaRecordRow {
  * id. Deleted media is left out, so the rules report it as missing. With
  * `lock`, the rows cannot be deleted until the transaction ends.
  */
-export async function loadMediaRecords(
-  tx: OrgTx,
+export async function loadMediaRecords<T extends OrgReadTx>(
+  tx: T,
   ids: readonly string[],
-  lock: boolean,
+  lock: LockOn<T>,
 ): Promise<Map<string, MediaRecord>> {
   const byId = new Map<string, MediaRecord>();
   if (ids.length === 0) return byId;
@@ -529,10 +537,10 @@ export function itemRefs(items: readonly DraftItem[]): { mediaIds: string[]; app
  * rather than failing the whole push plan. With `lock`, the rows cannot be
  * deleted until the transaction ends.
  */
-export async function loadAppRecords(
-  tx: OrgTx,
+export async function loadAppRecords<T extends OrgReadTx>(
+  tx: T,
   ids: readonly string[],
-  lock: boolean,
+  lock: LockOn<T>,
 ): Promise<Map<string, AppRecord>> {
   const byId = new Map<string, AppRecord>();
   if (ids.length === 0) return byId;
@@ -582,7 +590,7 @@ export function planDraft(
  * The manifest (up to 1 MiB each) is fetched only for `manifestFor`.
  */
 async function loadCurrentPublications(
-  tx: OrgTx,
+  tx: OrgReadTx,
   displayIds: readonly string[],
   manifestFor: readonly string[],
 ): Promise<Map<string, LoadedPublication>> {
@@ -630,11 +638,11 @@ async function loadCurrentPublications(
  *   every issue. Without it (the push plan) neither a draft nor a manifest
  *   outlives its comparison, so memory does not grow with displays times items.
  */
-export async function assessDisplays(
-  tx: OrgTx,
+export async function assessDisplays<T extends OrgReadTx>(
+  tx: T,
   ctx: AppContext,
   displays: readonly DisplayPlanRow[],
-  options: { readonly lock: boolean; readonly keepDraft: boolean },
+  options: { readonly lock: LockOn<T>; readonly keepDraft: boolean },
 ): Promise<DisplayAssessment[]> {
   const schedules = await loadScheduleDrafts(
     tx,
@@ -782,7 +790,7 @@ export async function assessDisplays(
  * The push plan of the organisation: one assessment per display, in the order
  * of the display list. At most `ABSOLUTE.maxListItems` displays are assessed.
  */
-export async function loadPushPlan(tx: OrgTx, ctx: AppContext): Promise<DisplayAssessment[]> {
+export async function loadPushPlan(tx: OrgReadTx, ctx: AppContext): Promise<DisplayAssessment[]> {
   const { rows } = await tx.query<DisplayPlanRow>(
     `SELECT ${DISPLAY_PLAN_COLUMNS} FROM display d
      WHERE d.org_id = app_org_id()

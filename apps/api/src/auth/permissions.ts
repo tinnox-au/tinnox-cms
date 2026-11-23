@@ -10,9 +10,10 @@
  * - Every write transaction re-reads the member row FOR SHARE as its first statement, so no
  *   write commits under a role, or a session, that was taken away while the request was on its
  *   way. `changeOrg` of @tinnox/db runs no change without a `WritePermit`, and this module is
- *   the only one that issues it (`changeAsOperator`; `withOrgAllowed` for the route files that
- *   still write their audit rows by hand): the permit's re-check is that first statement
- *   (SCR-34, adoption plan step 19). `changePreOrg` and `withResolvedOrg` enter an
+ *   the only one that issues an operator's (`changeAsOperator`; `withOrgAllowed` for the route
+ *   files that still write their audit rows by hand): the permit's re-check is that first
+ *   statement (SCR-34, adoption plan step 19). A refusal recorded on its own has the permit of
+ *   ./refusal.ts, which changes nothing. `changePreOrg` and `withResolvedOrg` enter an
  *   organisation with no permit, so lint keeps them to the files of PRE_ORG_CHANGE_FILES
  *   (eslint.config.js), whose transactions start before the organisation is known.
  *
@@ -63,8 +64,11 @@ export type Requirement =
 
 declare module 'fastify' {
   interface FastifyRequest {
-    /** Set by `permissionGuard`: what the route needs from this request's role. */
-    permission: { readonly required: Requirement } | null;
+    /**
+     * Set by `permissionGuard`: what the route needs from this request's role, and what the
+     * route's row says it audits (for a refused attempt recorded on its own, ./refusal.ts).
+     */
+    permission: { readonly required: Requirement; readonly audit: RouteAudit } | null;
   }
 }
 
@@ -420,8 +424,9 @@ export function permissionGuard(
       else failed = keysOf(candidate);
     }
 
-    if (required !== null) {
-      request.permission = { required };
+    // A requirement was resolved only from a row, so the row is there.
+    if (required !== null && rule !== undefined) {
+      request.permission = { required, audit: rule.audit };
       return;
     }
     if (!SAFE_METHODS.has(request.method)) {

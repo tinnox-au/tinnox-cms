@@ -68,9 +68,10 @@ export const AuditActionSchema = z.enum(AUDIT_ACTIONS);
 export type AuditAction = z.infer<typeof AuditActionSchema>;
 
 /**
- * Why no audit row is written (D3). Closed: a new reason is a decision, recorded here. A route
- * gives one in the tables of apps/api/src/route-audit.ts, and a change that records nothing
- * gives one to `unaudited` of `@tinnox/db`, which takes this type (D19: types only).
+ * Why a route writes no audit row at all (D3). Closed: a new reason is a decision, recorded
+ * here. A route gives one in the tables of apps/api/src/route-audit.ts: it is the route's
+ * statement, true of every request. What one run of a change says when it records nothing is
+ * the other list, `UNAUDITED_REASONS` below, which also says how the two relate.
  */
 export const NO_AUDIT_REASONS = {
   read_only:
@@ -81,6 +82,62 @@ export const NO_AUDIT_REASONS = {
     'the route stores pre-sign-in login state, which grants nothing; the outcome of the sign-in it belongs to is audited at the callback (D3)',
 } as const;
 export type NoAuditReason = keyof typeof NO_AUDIT_REASONS;
+
+/**
+ * Why one run of a change commits with no audit row (D3; adoption plan section 2.1 B). Closed: a
+ * new reason is a decision, recorded here. A change gives one to `unaudited` of `@tinnox/db`,
+ * which takes this type (D19: types only).
+ *
+ * How this list and `NO_AUDIT_REASONS` relate, which `changeOrg` and `changePreOrg` hold when
+ * the change runs:
+ *  - a reason in both lists (`telemetry`) says what the route stores on every request. A change
+ *    may give it only when its route, job or tool states the same reason;
+ *  - a reason in this list alone is what one run found. A change may give `nothing_changed` or
+ *    `idempotent_replay` whatever its route states, because a route that audits its changes
+ *    still has runs that change nothing;
+ *  - `counter_under_threshold` (GRANTED_UNAUDITED_REASONS) is a run that did change something
+ *    and is deliberately not audited, so a change may give it only when its route grants it:
+ *    the `grants` of the route's entry in OTHER_ROUTE_AUDIT (apps/api/src/route-audit.ts),
+ *    which only the pairing poll has;
+ *  - a reason in `NO_AUDIT_REASONS` alone (`read_only`, `login_state`) is never given by a
+ *    change, and `unaudited` does not take it: a route that only reads opens `readOrg`, whose
+ *    transaction refuses a write, and the login state is stored through the sec.* wrappers
+ *    that take an `Autocommit`, outside any change (D2).
+ *
+ * No reason says "this was changed and deliberately not audited" beyond the two D3 names here
+ * (telemetry, a counter under its threshold). A path like that which D3 does not name has no
+ * reason to give until it is decided: it is audited, or D3 gains the exemption and this list
+ * its reason.
+ */
+export const UNAUDITED_REASONS = {
+  nothing_changed:
+    'this run found nothing to change, so no row was written, updated or deleted: the conditional statement matched no row, the values were the ones already stored, or a refusal that is not audited was decided without a write (D3, SCR-14)',
+  idempotent_replay:
+    'this run repeated a request that an earlier one already carried out under the same Idempotency-Key: it returns what that one made and writes nothing; the earlier run wrote the audit row',
+  telemetry: NO_AUDIT_REASONS.telemetry,
+  counter_under_threshold:
+    'this run only counted a refused attempt that is still under its threshold: the wrong polling token of a pairing poll. The attempt that reaches the threshold locks the session and is audited as pairing.lock (D3)',
+} as const;
+export type UnauditedReason = keyof typeof UNAUDITED_REASONS;
+
+/**
+ * The reasons of both lists: a change gives one only under a statement that gives the same.
+ * `satisfies` refuses a key the two tables do not share, and ./audit.test.ts a shared one that
+ * is missing.
+ */
+export const STATED_UNAUDITED_REASONS = ['telemetry'] as const satisfies readonly (UnauditedReason &
+  NoAuditReason)[];
+export type StatedUnauditedReason = UnauditedReason & NoAuditReason;
+
+/**
+ * The reasons of this list alone that are still a write left unaudited: a change gives one only
+ * when its route's statement grants it (the `grants` of an entry in OTHER_ROUTE_AUDIT), so a
+ * route that does not count attempts cannot use it to skip an audit row. ./audit.test.ts pins it.
+ */
+export const GRANTED_UNAUDITED_REASONS = [
+  'counter_under_threshold',
+] as const satisfies readonly Exclude<UnauditedReason, NoAuditReason>[];
+export type GrantedUnauditedReason = (typeof GRANTED_UNAUDITED_REASONS)[number];
 
 /** The references and staff ids a provisioning run records: never a name or an address. */
 interface ProvisioningRun {

@@ -31,6 +31,7 @@ import {
 import {
   STAGE_C_CONSTRAINTS,
   auditScoped,
+  issueAuditStatement,
   lockOrgMembership,
   sessionRevokeMembership,
   sql,
@@ -38,6 +39,7 @@ import {
   withOrg,
   withResolvedOrg,
   withoutOrg,
+  type AuditStatement,
   type OrgId,
   type OrgTx,
 } from '@tinnox/db';
@@ -1150,6 +1152,26 @@ export const PROVISION_COMMANDS = {
     audits: ['membership.role_change', 'invite.cancel', 'membership.create', 'membership.remove'],
   },
 } as const satisfies ProvisionCommandTable;
+
+/**
+ * The statement a change of `command` is held to: the audits of its row in PROVISION_COMMANDS,
+ * which changePreOrg and changeOrgAsMigrator of @tinnox/db compare with what the change recorded
+ * before COMMIT (adoption plan step 20). They take no statement written in place, so a command
+ * gets its statement here, from the table the audit-failure test goes through.
+ */
+export function provisionStatement(command: ProvisionCommand): AuditStatement {
+  // A name the type checker did not read reaches no row.
+  if (!Object.hasOwn(PROVISION_COMMANDS, command)) {
+    throw new Error(
+      `no provisioning command is called ${String(command)}: a command gets its row in PROVISION_COMMANDS (scripts/lib/provision.ts) with the audit actions it writes, and each its case in tests/integration/provision-member.test.ts`,
+    );
+  }
+  const row: { readonly audits: readonly ProvisionAuditAction[] } = PROVISION_COMMANDS[command];
+  return issueAuditStatement({
+    stated: { actions: row.audits },
+    statedIn: `the audits of ${command} in PROVISION_COMMANDS (scripts/lib/provision.ts)`,
+  });
+}
 
 type ProvisionCommandTable = {
   readonly [C in Command]: {

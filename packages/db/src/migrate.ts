@@ -6,6 +6,13 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import pg from 'pg';
+import {
+  changeOrg,
+  issueWritePermit,
+  termsOfStatement,
+  type AuditStatement,
+  type Change,
+} from './change.ts';
 import { errorField } from './error-field.ts';
 import { mintOrgId } from './org-id.ts';
 import type { Pool } from './pool.ts';
@@ -14,7 +21,7 @@ import {
   assertSchemaInvariants,
   schemaProblemsInTransaction,
 } from './schema-invariants.ts';
-import type { OrgId } from './tx.ts';
+import type { OrgId, OrgTx } from './tx.ts';
 
 // The definer switch belongs to this entry too: it needs the MigratorPool (D25).
 export { asDefiner, type DefinerTx } from './definer.ts';
@@ -41,6 +48,9 @@ declare const migratorBrand: unique symbol;
  * and what that rule cannot see is left to review.
  */
 export type MigratorPool = Pool & { readonly [migratorBrand]: true };
+
+/** The pools connectMigrator returned, for what must not run on any other. */
+const checked = new WeakSet<Pool>();
 
 /**
  * The one way the offline tools connect as tinnox_migrator: the runner, the test reset, the
@@ -83,7 +93,43 @@ export async function connectMigrator(
     await pool.end().catch(() => undefined);
     throw error;
   }
+  checked.add(pool);
   return pool as MigratorPool;
+}
+
+/**
+ * A change for an organisation by an offline tool, with its audit rows (adoption plan step 20;
+ * SCR-34): `changeOrg` of the runtime entry, with the permit this entry issues to the
+ * migrator's connection. A tool has no operator whose role could be read again, so what stands
+ * behind the change is the connection itself: `pool` is the one `connectMigrator` returned,
+ * which only a person on TINNOX's controlled host can open, and lint keeps this entry out of
+ * the API (AG-1.10). `orgId` is an organisation the tool is creating (`newOrgId`) or one whose
+ * row `asDefiner` read (D25).
+ *
+ * `statement` is what the tool says the change audits (for provisioning, `provisionStatement`
+ * of scripts/lib/provision.ts, the `audits` of the command's row in PROVISION_COMMANDS: a tool
+ * cannot write a statement in place), and the change is refused before COMMIT when it
+ * recorded an action the statement does not name. `fn` returns `{ value, audit }` and writes no
+ * audit row itself.
+ */
+export async function changeOrgAsMigrator<T>(
+  pool: MigratorPool,
+  orgId: OrgId,
+  statement: AuditStatement,
+  fn: (tx: OrgTx) => Promise<Change<T>>,
+): Promise<T> {
+  // A pool that was cast to the type was never checked: say so before anything is sent.
+  if (!checked.has(pool)) {
+    throw new Error(
+      'changeOrgAsMigrator requires the pool that connectMigrator returned: call connectMigrator(connectionString, { applicationName }) from @tinnox/db/migrate and pass that pool. The API has no migrator connection: an operator route calls changeAsOperator(ctx, request, fn) (apps/api/src/auth/permissions.ts)',
+    );
+  }
+  const permit = issueWritePermit({
+    ...termsOfStatement('changeOrgAsMigrator', statement),
+    // Nothing to read again: the connection was checked when it was opened.
+    recheck: () => Promise.resolve(),
+  });
+  return changeOrg(pool, orgId, permit, (tx) => fn(tx));
 }
 
 export interface MigrationOptions {

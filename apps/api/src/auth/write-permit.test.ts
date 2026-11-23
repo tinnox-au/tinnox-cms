@@ -238,7 +238,7 @@ describe('the permit of a write comes from the role guard only (SCR-34)', () => 
   it('a route cannot run a change without it, nor make one of its own', () => {
     const cases = async (ctx: AppContext, request: FastifyRequest): Promise<void> => {
       const change = (tx: OrgTx): Promise<Change<number>> =>
-        tx.query('SELECT 1').then(() => ({ value: 1, audit: unaudited('read_only') }));
+        tx.query('SELECT 1').then(() => ({ value: 1, audit: unaudited('nothing_changed') }));
       await changeAsOperator(ctx, request, change);
       // @ts-expect-error changeOrg takes the permit, and a route has none to give
       await changeOrg(ctx.pool, ORG, change);

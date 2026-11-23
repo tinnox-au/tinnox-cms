@@ -22,9 +22,9 @@
     "09-review-round-2.spec.ts": 2
   },
   "vitest": {
-    "unit": 3629,
+    "unit": 3702,
     "component (chromium)": 96,
-    "integration": 712,
+    "integration": 717,
     "api-integration": 188
   }
 }

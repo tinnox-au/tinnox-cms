@@ -19,6 +19,7 @@ const REMEDY = `${SECOND} Pass the outer tx to the helper: give it a \`tx: OrgTx
 // tx, not a parameter the function does not have.
 const AUDIT_REMEDY = `${SECOND} Write the event on the outer transaction instead: inside changeOrg or changePreOrg, return it as { value, audit } and the wrapper writes it there; in a file of LEGACY_TRANSACTION_FILES (eslint.config.js), auditUnscoped(tx, event), or auditScoped(tx, event) when the outer transaction is withOrg (both from @tinnox/db). auditStandalone is only for a refusal that no transaction carries: call it after the outer call has returned or thrown.`;
 const REVOKE_REMEDY = `${SECOND} End the session on the outer tx instead: sessionRevoke(tx, idHash) (from @tinnox/db), with its audit row on the same tx. sessionRevokeUnaudited is only for the sign-out fallback: call it after the outer call has returned or thrown.`;
+const REFUSAL_REMEDY = `${SECOND} A refusal that commits with what the outer transaction wrote is returned from it, as { value: refuse(error), audit: event } (refuse from apps/api/src/db-helpers.ts): the wrapper writes the event there. recordRefusal is for a refusal that changed nothing: throw the refusal, and call it after the outer call has rolled back (SCR-32).`;
 const inCallback = (opener: string, outer: string, remedy = REMEDY) =>
   `${opener}() is called inside the callback of ${outer}(), ${remedy}`;
 const withHandle = (opener: string, handle: string, remedy = REMEDY) =>
@@ -42,6 +43,19 @@ tester.run('no-nested-transaction (U-3)', rule, {
           await withOrg(pool, orgId, (tx) => auditScoped(tx, event));
           throw error;
         }
+      `,
+    },
+    {
+      name: 'a refusal recorded with recordRefusal after the change has rolled back (SCR-32)',
+      code: `
+        try {
+          await changeAsOperator(ctx, request, (tx) => change(tx));
+        } catch (error) {
+          await recordRefusal(ctx, request, session, event);
+          throw error;
+        }
+        // It takes no callback: a function among its arguments is not inside a transaction.
+        await recordRefusal(ctx, request, session, eventFor(() => readOrg(pool, orgId, load)));
       `,
     },
     {
@@ -90,6 +104,17 @@ tester.run('no-nested-transaction (U-3)', rule, {
           return 'query' in db ? one(db) : withOrg(db, orgId, one);
         }
         function wrapped(tx: Promise<Tx>, other: Readonly<Pool>) { return withoutOrg(pool, work); }
+      `,
+    },
+    {
+      name: 'a type parameter with no constraint, or one that names no handle, is no handle',
+      code: `
+        async function a<T>(value: T, pool: Pool) { await withOrg(pool, orgId, work); }
+        async function b<P extends Pool>(pool: P) { await withoutOrg(pool, work); }
+        // The inner T is its own and unconstrained: the outer one's constraint does not reach it.
+        function c<T extends OrgTx>() {
+          return function d<T>(value: T) { return withOrg(pool, orgId, work); };
+        }
       `,
     },
     {
@@ -154,6 +179,33 @@ tester.run('no-nested-transaction (U-3)', rule, {
         { message: inCallback('changeOrg', 'changePreOrg') },
         { message: inCallback('changePreOrg', 'withOrg') },
         { message: withHandle('readOrg', 'tx: OrgReadTx') },
+      ],
+    },
+    {
+      name: 'the openers of step 20: a device, a job, an offline tool and a refusal, inside and outside',
+      code: `
+        await changeAsDevice(ctx, request, device, async (tx) => {
+          await readOrg(pool, device.orgId, (inner) => load(inner));
+          return { value: 1, audit: event };
+        });
+        await changeAsJob(pool, 'display_alerts', orgId, async (tx) => changeAsJob(pool, 'media_pipeline', orgId, write));
+        await changeOrgAsMigrator(pool, orgId, statement, async (tx) => changePreOrg(pool, statement, write));
+        await readOrg(pool, orgId, async (tx) => changeAsDevice(ctx, request, device, write));
+        await changeAsOperator(ctx, request, async (tx) => {
+          await recordRefusal(ctx, request, session, event);
+          return { value: 1, audit: event };
+        });
+        async function refuse(tx: OrgTx): Promise<void> {
+          await recordRefusal(ctx, request, session, event);
+        }
+      `,
+      errors: [
+        { message: inCallback('readOrg', 'changeAsDevice') },
+        { message: inCallback('changeAsJob', 'changeAsJob') },
+        { message: inCallback('changePreOrg', 'changeOrgAsMigrator') },
+        { message: inCallback('changeAsDevice', 'readOrg') },
+        { message: inCallback('recordRefusal', 'changeAsOperator', REFUSAL_REMEDY) },
+        { message: withHandle('recordRefusal', 'tx: OrgTx', REFUSAL_REMEDY) },
       ],
     },
     {
@@ -249,6 +301,26 @@ tester.run('no-nested-transaction (U-3)', rule, {
         { message: withHandle('withoutOrg', 'pre: PreOrgTx') },
         { message: withHandle('withResolvedOrg', 'tx: Tx') },
         { message: withHandle('withOrg', 'definer: DefinerTx') },
+      ],
+    },
+    {
+      name: 'a handle typed by a type parameter whose constraint names a handle (step 20 review)',
+      code: `
+        async function a<T extends OrgReadTx>(tx: T, lock: LockOn<T>) {
+          await readOrg(pool, orgId, (inner) => inner.query('SELECT 1'));
+        }
+        const b = async <H extends Readonly<OrgTx>>(handle: H | undefined) => withoutOrg(pool, work);
+        async function c<T extends db.Tx>(tx: Readonly<T>) { await poolAsTx(pool); }
+        // The parameter of an enclosing function reaches an inner one.
+        function d<T extends PreOrgTx>() {
+          return async (tx: T) => withOrg(pool, orgId, work);
+        }
+      `,
+      errors: [
+        { message: withHandle('readOrg', 'tx: T extends OrgReadTx') },
+        { message: withHandle('withoutOrg', 'handle: H extends OrgTx') },
+        { message: withHandle('poolAsTx', 'tx: T extends Tx') },
+        { message: withHandle('withOrg', 'tx: T extends PreOrgTx') },
       ],
     },
     {

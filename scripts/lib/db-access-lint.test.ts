@@ -625,7 +625,12 @@ describe('the unscoped helpers (AG-2.2)', { timeout: 30_000 }, () => {
       // A namespace also carries the maker of a WritePermit, which only the role guard imports
       // (step 19; scripts/lib/legacy-transaction-lint.test.ts).
       expect.stringMatching(
-        /^\* import is invalid because 'issueWritePermit' and 'legacyAudit' from '@tinnox\/db' are restricted from being used by a pattern\. Only the role guard issues a WritePermit/,
+        /^\* import is invalid because 'issueWritePermit' and 'legacyAudit' from '@tinnox\/db' are restricted from being used by a pattern\. Only what judges the caller of a change issues its WritePermit \(SCR-34; the files of WRITE_PERMIT_ISSUERS in eslint\.config\.js\)/,
+      ),
+      // ...the maker of an audit statement, which only the files that read the tables import
+      // (step 20 review; the same file)...
+      expect.stringMatching(
+        /^\* import is invalid because 'issueAuditStatement' from '@tinnox\/db' is restricted from being used by a pattern\. Only the helpers that read a statement from its table make an AuditStatement \(SCR-34; the files of STATEMENT_ISSUERS in eslint\.config\.js\)/,
       ),
       // ...and the openers that enter an organisation with no permit, which only the files
       // whose transactions start before the organisation is known import (the same file).

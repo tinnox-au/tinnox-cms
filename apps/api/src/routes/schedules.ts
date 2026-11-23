@@ -18,7 +18,7 @@ import {
   type ScheduleListResponse,
   type ScheduleSummaryDto,
 } from '@tinnox/contracts';
-import { auditScoped, withOrg, type OrgTx } from '@tinnox/db';
+import { auditScoped, withOrg, type OrgReadTx, type OrgTx } from '@tinnox/db';
 import type { FastifyInstance } from 'fastify';
 import { withOrgAllowed } from '../auth/permissions.ts';
 import { operatorOf, type OperatorSession } from '../auth/session.ts';
@@ -62,7 +62,7 @@ function scheduleFacts(row: ScheduleRow): Omit<ScheduleSummaryDto, 'eventCount'>
   };
 }
 
-async function loadScheduleDto(tx: OrgTx, id: string): Promise<ScheduleDto | null> {
+async function loadScheduleDto(tx: OrgReadTx, id: string): Promise<ScheduleDto | null> {
   const schedule = await tx.query<ScheduleRow>(
     `SELECT ${SCHEDULE_COLUMNS} FROM ${SCHEDULE_FROM}
      WHERE s.id = $1 AND s.org_id = app_org_id()`,

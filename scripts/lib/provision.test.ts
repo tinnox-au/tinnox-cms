@@ -1,6 +1,12 @@
+import { termsOfStatement } from '@tinnox/db';
 import { describe, expect, it } from 'vitest';
 import { keycloakDirectory } from './idp.ts';
-import { UsageError, parseInvocation } from './provision.ts';
+import {
+  PROVISION_COMMANDS,
+  UsageError,
+  parseInvocation,
+  provisionStatement,
+} from './provision.ts';
 
 const INVITE = '3f9a12c4-1111-4222-8333-444455556666';
 const MEMBER = '0b7e1a2c-aaaa-4bbb-8ccc-dddddddddddd';
@@ -240,6 +246,30 @@ describe('the identity-provider reader', () => {
     ).toThrow(/https/);
     expect(() => keycloakDirectory({ ...options, issuer: 'https://idp.example.com/' })).toThrow(
       /realm URL/,
+    );
+  });
+});
+
+// Adoption plan step 20 (review): a provisioning change is held to its row, never to a statement
+// the command wrote in place.
+describe('the audit statement of a provisioning command', () => {
+  it('is the audits of its row in PROVISION_COMMANDS, for every command', () => {
+    for (const [command, row] of Object.entries(PROVISION_COMMANDS)) {
+      const statement = termsOfStatement(
+        'a test',
+        provisionStatement(command as keyof typeof PROVISION_COMMANDS),
+      );
+      expect(statement.stated, command).toEqual({ actions: row.audits });
+      expect(statement.statedIn).toBe(
+        `the audits of ${command} in PROVISION_COMMANDS (scripts/lib/provision.ts)`,
+      );
+      expect(statement.grants).toBeUndefined();
+    }
+  });
+
+  it('refuses a command that has no row', () => {
+    expect(() => provisionStatement('org-delete' as never)).toThrow(
+      'no provisioning command is called org-delete: a command gets its row in PROVISION_COMMANDS (scripts/lib/provision.ts) with the audit actions it writes, and each its case in tests/integration/provision-member.test.ts',
     );
   });
 });
