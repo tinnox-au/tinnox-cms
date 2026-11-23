@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { join, posix } from 'node:path';
+import { join, posix, relative } from 'node:path';
+import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { repoRoot } from './env.ts';
 import {
@@ -203,5 +204,50 @@ describe('the repository', () => {
     expect(workflows).toContain('.github/workflows/ci.yml');
     const run = configsRunBy(workflows.map(read).flatMap(workflowCommands), packages, configs);
     expect(unrunConfigProblems(configs, run)).toEqual([]);
+  });
+});
+
+/**
+ * The repository files `entry` loads through static imports and re-exports, followed through
+ * workspace packages (their package.json exports) but not into installed libraries.
+ */
+function staticImportGraph(entry: string): string[] {
+  const options: ts.CompilerOptions = {
+    module: ts.ModuleKind.NodeNext,
+    moduleResolution: ts.ModuleResolutionKind.NodeNext,
+    allowImportingTsExtensions: true,
+  };
+  const seen = new Set<string>();
+  const queue = [join(repoRoot, entry)];
+  for (let file = queue.pop(); file !== undefined; file = queue.pop()) {
+    if (seen.has(file)) continue;
+    seen.add(file);
+    for (const { fileName } of ts.preProcessFile(readFileSync(file, 'utf8'), true, true)
+      .importedFiles) {
+      // A workspace package resolves to its real path in the repository, a library does not.
+      const resolved = ts.resolveModuleName(fileName, file, options, ts.sys).resolvedModule;
+      const path = resolved?.resolvedFileName;
+      if (path !== undefined && !path.includes('/node_modules/') && /\.tsx?$/.test(path)) {
+        queue.push(path);
+      }
+    }
+  }
+  return [...seen].map((file) => relative(repoRoot, file)).sort();
+}
+
+describe('the stackless layout checks (CHK-9)', { timeout: 30_000 }, () => {
+  it("load the API's configuration but not its test harness", () => {
+    // The one spec file tests/playwright.layout.config.ts matches. The harness loads buildApp,
+    // sharp and the root .env: a break there would fail a check about layout.
+    const loaded = staticImportGraph('tests/e2e/09-review-round-2.spec.ts');
+    expect(loaded).toEqual(
+      expect.arrayContaining(['tests/e2e/support/stack.ts', 'apps/api/src/config.ts']),
+    );
+    expect(
+      loaded,
+      "the layout spec must not load the API's test harness: import RUNTIME_ENV_NAMES from " +
+        "'@tinnox/api/test-support/runtime-env', and keep tests/e2e/support/stack.ts and its " +
+        "imports off '@tinnox/api/test-support'",
+    ).not.toContain('apps/api/test/support.ts');
   });
 });

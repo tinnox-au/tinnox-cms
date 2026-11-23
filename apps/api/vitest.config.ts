@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 
 /**
  * Integration tests of the API against real PostgreSQL (database tinnox_test, role
@@ -11,6 +11,10 @@ import { defineConfig } from 'vitest/config';
  */
 export default defineConfig({
   test: {
+    // As in the repository's vitest.config.ts: a test skipped, todo or never started, or a full
+    // run below the "api-integration" floor in tests/test-counts.json, fails the run (U-15,
+    // CHK-4). Resolved from this folder.
+    reporters: [...configDefaults.reporters, '../../scripts/vitest-results-reporter.ts'],
     name: 'api-integration',
     environment: 'node',
     include: ['test/**/*.integration.test.ts'],

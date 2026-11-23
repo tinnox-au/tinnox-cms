@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { parseEnv } from 'node:util';
 import { LIMIT_ENV_VARS } from '@tinnox/contracts';
 import { describe, expect, it } from 'vitest';
 import {
@@ -377,6 +378,29 @@ describe('the allow-listed configuration input (D5, AG-1.9, AG-1.17)', () => {
     }
     for (const name of Object.values(LIMIT_ENV_VARS)) expect(RUNTIME_ENV_NAMES).toContain(name);
     expect(RUNTIME_ENV_NAMES.filter(isAdministratorName)).toEqual([]);
+  });
+
+  it("reads every allow-listed name of .env.example as the line reader does, on this Node's parseEnv (GAP-3)", () => {
+    // runtimeEnv reads the root .env with node:util parseEnv, whose handling of a last line has
+    // differed between Node versions; CI runs the .nvmrc one. Only the allow-listed names reach
+    // the API, so only they must agree.
+    const text = readFileSync(join(REPO_ROOT, '.env.example'), 'utf8');
+    const lines = new Map(
+      [...text.matchAll(/^([A-Z][A-Z0-9_]*)=(.*)$/gm)].map((match) => [match[1], match[2]]),
+    );
+    const parsed = parseEnv(text);
+    for (const name of RUNTIME_ENV_NAMES) {
+      // The line reader takes the raw text after '=', so a quoted value or an inline comment
+      // differs from what parseEnv (and so the API) reads without being a parser change.
+      expect(
+        parsed[name],
+        `${name}: node:util parseEnv and the line reader disagree on .env.example. Write the ` +
+          'value unquoted and with no inline comment; if it already is, this Node changed ' +
+          'parseEnv: check runtimeEnv in apps/api/src/config.ts against it',
+      ).toBe(lines.get(name));
+    }
+    // A control: the file does set allow-listed names.
+    expect(RUNTIME_ENV_NAMES.filter((name) => lines.has(name)).length).toBeGreaterThan(10);
   });
 
   it('finds every administrator name of .env.example, and none is a name the API reads', () => {

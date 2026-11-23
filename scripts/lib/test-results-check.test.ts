@@ -1,19 +1,24 @@
 // The results gate over Playwright and Vitest results (U-15, adoption plan section 4.1). The
 // Playwright fixtures below are trimmed real reports, not hand-written shapes: the plan marked
 // the JSON shape unverified, and these settle it.
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createVitest } from 'vitest/node';
 import ResultsReporter from '../vitest-results-reporter.ts';
+import { repoRoot } from './env.ts';
 import {
   type AllowEntry,
   SKIPPED_MESSAGE,
   classify,
   e2eVerdict,
+  filteredRun,
+  PLAYWRIGHT_SUITES,
   parseAllowlist,
   parseCounts,
+  parseGateArguments,
   playwrightTests,
   vitestCountFindings,
   vitestFindings,
@@ -466,10 +471,86 @@ describe('e2eVerdict', () => {
       TODAY,
     ).blocking;
     expect(blocking).toEqual([
-      '03-isolation.spec.ts is not in this run, tests/test-counts.json expects 1 test(s) from it: run the whole suite (npm run test:e2e) before this check, with no file, grep or project filter. If the file was renamed or deleted, change tests/test-counts.json in the same change',
-      '12-layouts-portal.spec.ts holds 2 test(s) in this run, tests/test-counts.json expects 3: a test or file that should run was not loaded (a grep, a testMatch or a renamed file), or a test was added or deleted. If the change is deliberate, set the count in tests/test-counts.json in the same change',
+      '03-isolation.spec.ts is not in this run, tests/test-counts.json expects 1 test(s) from it: run the whole suite (npm run test:e2e) before this check, with no file, grep or project filter. If the file no longer declares any test (a describe or a loop that lost its tests), bring them back; if it was renamed or deleted, change tests/test-counts.json in the same change',
+      '12-layouts-portal.spec.ts holds 2 test(s) in this run, tests/test-counts.json expects 3: a test or file that should run was not loaded (a grep, a testMatch or a renamed file), or a test was added or deleted. If the change is deliberate, set the count under "e2e" in tests/test-counts.json in the same change',
       'new.spec.ts holds 1 test(s) and tests/test-counts.json lists no count for it: add "new.spec.ts": 1 under "e2e" in the same change',
     ]);
+  });
+});
+
+describe('the layout suite (CHK-2)', () => {
+  const LAYOUT = PLAYWRIGHT_SUITES['layout'];
+  const counts = new Map([['12-layouts-portal.spec.ts', 2]]);
+
+  it('names its own counts and command when a file is missing or new', () => {
+    if (LAYOUT === undefined) throw new Error('no layout suite');
+    const blocking = e2eVerdict(
+      { ...PASSED, suites: [{ ...PASSED.suites[0], file: 'new.spec.ts', title: 'new.spec.ts' }] },
+      counts,
+      [],
+      TODAY,
+      LAYOUT,
+    ).blocking;
+    expect(blocking).toEqual([
+      '12-layouts-portal.spec.ts is not in this run, tests/test-counts.json expects 2 test(s) from it: run the whole suite (npx playwright test -c tests/playwright.layout.config.ts) before this check, with no file, grep or project filter. If the file no longer declares any test (a describe or a loop that lost its tests), bring them back; if it was renamed or deleted, change tests/test-counts.json in the same change',
+      'new.spec.ts holds 2 test(s) and tests/test-counts.json lists no count for it: add "new.spec.ts": 2 under "layout" in the same change',
+    ]);
+  });
+
+  it('fails a test skipped at run time, as the full suite does', () => {
+    if (LAYOUT === undefined) throw new Error('no layout suite');
+    expect(e2eVerdict(SHAPES, SPEC_02, [], TODAY, LAYOUT).blocking).toContain(
+      `${SKIPPED_ID}: ${SKIPPED_MESSAGE}`,
+    );
+  });
+
+  it('leaves an allow-list entry for a test outside its run to the full suite, and still applies one inside it', () => {
+    if (LAYOUT === undefined) throw new Error('no layout suite');
+    const outside = entry({ test: '01-journey.spec.ts › a test the layout run never holds' });
+    const verdict = e2eVerdict(SHAPES, SPEC_02, [outside, entry()], TODAY, LAYOUT);
+    expect(verdict.blocking.some((line) => line.includes('01-journey.spec.ts'))).toBe(false);
+    expect(verdict.allowed).toHaveLength(1);
+    // The full suite still calls the same entry stale.
+    expect(
+      e2eVerdict(SHAPES, SPEC_02, [outside], TODAY).blocking.some((line) =>
+        line.includes('names no test of this run'),
+      ),
+    ).toBe(true);
+  });
+});
+
+describe('the full suite report (CHK-3)', () => {
+  it('is removed before Playwright starts, so a run that never wrote one meets "no report", not the last run', () => {
+    const pkg = JSON.parse(readFileSync(join(repoRoot, 'tests', 'package.json'), 'utf8')) as {
+      scripts: Record<string, string>;
+    };
+    // The script runs in tests/, the gate reads from the repository root.
+    expect(PLAYWRIGHT_SUITES['e2e']?.report).toBe('tests/.run/e2e-results.json');
+    expect(pkg.scripts['e2e']).toMatch(
+      /^node -e "require\('node:fs'\)\.rmSync\('\.run\/e2e-results\.json', \{ force: true \}\)" && playwright test$/,
+    );
+  });
+});
+
+describe('parseGateArguments', () => {
+  it('reads the full suite by default, and a counts section and a report path when given', () => {
+    expect(parseGateArguments([])).toEqual({ suite: PLAYWRIGHT_SUITES['e2e'], report: undefined });
+    expect(parseGateArguments(['--counts', 'layout'])).toEqual({
+      suite: PLAYWRIGHT_SUITES['layout'],
+      report: undefined,
+    });
+    expect(parseGateArguments(['--counts=layout', 'x.json'])).toEqual({
+      suite: PLAYWRIGHT_SUITES['layout'],
+      report: 'x.json',
+    });
+    expect(PLAYWRIGHT_SUITES['layout']?.report).toBe('tests/.run/layout-results.json');
+  });
+
+  it('refuses a suite it does not know and a second report, saying what to pass', () => {
+    expect(() => parseGateArguments(['--counts', 'vitest'])).toThrow(
+      /no Playwright suite "vitest": use one of e2e, layout/,
+    );
+    expect(() => parseGateArguments(['a.json', 'b.json'])).toThrow(/unknown argument "b\.json"/);
   });
 });
 
@@ -520,6 +601,27 @@ describe('vitestFindings', () => {
   });
 });
 
+describe('filteredRun (CHK-1)', () => {
+  it('is false for a run of whole files, with no filter of any kind', () => {
+    expect(filteredRun(undefined, undefined, [{}, {}])).toBe(false);
+    expect(filteredRun(undefined, [], [{ testLines: [], testIds: [], testTagsFilter: [] }])).toBe(
+      false,
+    );
+  });
+
+  it.each([
+    ['a test name pattern (-t, or the watch mode t)', /one/, undefined, {}],
+    ['a tag filter in the config', undefined, ['slow'], {}],
+    ['a file:line location', undefined, undefined, { testLines: [2] }],
+    ['test ids from an IDE', undefined, undefined, { testIds: ['abc_0_1'] }],
+    ['full test names', undefined, undefined, { testNames: ['group > case'] }],
+    ['a name pattern on one file', undefined, undefined, { testNamePattern: /two/ }],
+    ['a tag filter on one file', undefined, undefined, { testTagsFilter: ['slow'] }],
+  ] as const)('is true for %s', (_what, pattern, tags, spec) => {
+    expect(filteredRun(pattern, tags, [{}, spec])).toBe(true);
+  });
+});
+
 describe('vitestCountFindings', () => {
   it('fails a project below its floor or with no floor, and passes one at or above it', () => {
     const floors = new Map([
@@ -552,16 +654,19 @@ describe('vitestCountFindings', () => {
 // stretch past the 5 s default.
 describe('the Vitest results reporter', { timeout: 30_000 }, () => {
   /**
-   * Writes the files to a temporary folder, runs them (only `filters`, if given) with the
-   * reporter and returns its findings. Globals, so a file needs no import that would have to
+   * Writes the files to a temporary folder, runs them (only `filters`, paths in that folder, if
+   * given) with the reporter and returns its findings. Globals, so a file needs no import that would have to
    * resolve from the temporary folder. Its one project has the name "".
    */
   async function findingsOf(
     files: Record<string, string[]>,
     floors: ReadonlyMap<string, number>,
     filters: string[] = [],
+    options: Parameters<typeof createVitest>[1] = {},
   ): Promise<string[]> {
-    const dir = mkdtempSync(join(tmpdir(), 'tinnox-results-'));
+    // The real path: on macOS the temporary folder is behind the /var link, and Vitest matches
+    // a location filter against the resolved path.
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'tinnox-results-')));
     try {
       for (const [name, lines] of Object.entries(files)) {
         writeFileSync(join(dir, name), lines.join('\n'));
@@ -575,11 +680,12 @@ describe('the Vitest results reporter', { timeout: 30_000 }, () => {
           globals: true,
           watch: false,
           reporters: [new ResultsReporter({ fail: (findings) => found.push(...findings), floors })],
+          ...options,
         },
         {},
       );
       try {
-        await vitest.start(filters);
+        await vitest.start(filters.map((filter) => join(dir, filter)));
       } finally {
         await vitest.close();
       }
@@ -655,5 +761,77 @@ describe('the Vitest results reporter', { timeout: 30_000 }, () => {
 
   it('does not count a run of some files only', async () => {
     expect(await findingsOf(TWO_FILES, new Map([['', 3]]), ['a.test.js'])).toEqual([]);
+  });
+
+  const THREE = {
+    'a.test.js': [
+      "test('one', () => {});",
+      "test('two', (ctx) => { ctx.skip(); });",
+      "test('three', () => {});",
+    ],
+  };
+
+  it('does not report the tests a file:line location leaves out (CHK-1)', async () => {
+    expect(
+      await findingsOf(THREE, new Map([['', 3]]), ['a.test.js:1'], { includeTaskLocation: true }),
+    ).toEqual([]);
+  });
+
+  it('decides for every run whether it is filtered, as when the watch mode t filter changes (CHK-1)', async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'tinnox-results-')));
+    try {
+      writeFileSync(join(dir, 'a.test.js'), THREE['a.test.js'].join('\n'));
+      const found: string[][] = [];
+      const reporter = new ResultsReporter({
+        fail: (findings) => found.push(findings),
+        floors: new Map([['', 3]]),
+      });
+      const vitest = await createVitest(
+        'test',
+        { root: dir, config: false, globals: true, watch: false, reporters: [reporter] },
+        {},
+      );
+      try {
+        // The first run selects 'one' by name, the second runs every test of the same file.
+        vitest.setGlobalTestNamePattern('one');
+        const { testModules } = await vitest.start();
+        expect(found).toEqual([]);
+        vitest.resetGlobalTestNamePattern();
+        await vitest.rerunTestSpecifications(
+          testModules.map((module) => module.toTestSpecification()),
+        );
+      } finally {
+        await vitest.close();
+      }
+      expect(found).toEqual([[`[] a.test.js > two was skipped: ${SKIPPED_MESSAGE}`]]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// A second config that runs the same files without the reporter lets a ctx.skip() there exit 0
+// (CHK-4: apps/api/vitest.config.ts, `npm run test:integration -w @tinnox/api`).
+describe('every Vitest config of the repository', { timeout: 30_000 }, () => {
+  const configs = spawnSync('git', ['-C', repoRoot, 'ls-files', '-z'], { encoding: 'utf8' })
+    .stdout.split('\0')
+    .filter((path) => /(^|\/)vitest\.(config|workspace)\.[cm]?[jt]s$/.test(path));
+
+  it('finds the repository config and the API one', () => {
+    expect(configs).toEqual(
+      expect.arrayContaining(['vitest.config.ts', 'apps/api/vitest.config.ts']),
+    );
+  });
+
+  it.each(configs)('%s lists the results reporter (CHK-4)', async (path) => {
+    const config = ((await import(join(repoRoot, path))) as { default: unknown }).default as {
+      test?: { reporters?: unknown[] };
+    };
+    expect(
+      (config.test?.reporters ?? []).filter(
+        (reporter) =>
+          typeof reporter === 'string' && reporter.endsWith('scripts/vitest-results-reporter.ts'),
+      ),
+    ).toHaveLength(1);
   });
 });

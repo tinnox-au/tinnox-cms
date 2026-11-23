@@ -3,7 +3,8 @@
 // (testInfo.skip(), ctx.skip()), with tests that never ran behind a failure in a serial file, or
 // with a whole spec file missing; the lint of eslint.config.js (NO_SKIPPED_TESTS) sees only the
 // declared forms. Used by:
-//   - scripts/check-test-results.ts, over the JSON report of the Playwright suite (the e2e job);
+//   - scripts/check-test-results.ts, over the JSON report of a Playwright run: the full suite
+//     (the e2e job) or the stackless layout checks (the quality job), PLAYWRIGHT_SUITES below;
 //   - scripts/vitest-results-reporter.ts, over the unit, component and integration runs.
 // A skip, declared or at run time, has no allow-list. tests/skip-allowlist.json covers a test
 // that did not run or passed only on a retry, each entry with an owner, a reason and a review
@@ -33,6 +34,73 @@ export interface Verdict {
   blocking: string[];
   allowed: string[];
   summary: string;
+}
+
+/** A Playwright run the gate reads: its counts under tests/test-counts.json and its report. */
+export interface PlaywrightSuite {
+  /** The object of tests/test-counts.json that holds the number of tests per spec file. */
+  section: string;
+  /** The command that runs the suite and writes its report. */
+  command: string;
+  /** The report its json reporter writes, from the repository root. */
+  report: string;
+  /**
+   * The run holds some tests of the spec files the full suite also runs. An allow-list entry
+   * for a test outside it is the full suite's to check, so it neither applies nor is "stale".
+   */
+  subset: boolean;
+}
+
+const E2E_SUITE: PlaywrightSuite = {
+  section: 'e2e',
+  command: 'npm run test:e2e',
+  report: 'tests/.run/e2e-results.json',
+  subset: false,
+};
+
+export const PLAYWRIGHT_SUITES: Readonly<Record<string, PlaywrightSuite>> = {
+  e2e: E2E_SUITE,
+  // tests/playwright.layout.config.ts, in the quality job (CHK-2).
+  layout: {
+    section: 'layout',
+    command: 'npx playwright test -c tests/playwright.layout.config.ts',
+    report: 'tests/.run/layout-results.json',
+    subset: true,
+  },
+};
+
+const GATE_USAGE =
+  'usage: npm run check:test-results -- [--counts <e2e|layout>] [<report.json>]; with no report, the one the suite writes';
+
+/**
+ * The arguments of scripts/check-test-results.ts: `--counts <suite>` picks a suite of
+ * PLAYWRIGHT_SUITES (e2e by default), and a path, the report to read instead of its own.
+ */
+export function parseGateArguments(args: readonly string[]): {
+  suite: PlaywrightSuite;
+  report: string | undefined;
+} {
+  let name = 'e2e';
+  let report: string | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] ?? '';
+    if (arg === '--counts') {
+      name = args[(index += 1)] ?? '';
+    } else if (arg.startsWith('--counts=')) {
+      name = arg.slice('--counts='.length);
+    } else if (arg.startsWith('-') || report !== undefined) {
+      throw new Error(`unknown argument "${arg}". ${GATE_USAGE}`);
+    } else {
+      report = arg;
+    }
+  }
+  const suite = PLAYWRIGHT_SUITES[name];
+  if (suite === undefined) {
+    throw new Error(
+      `no Playwright suite "${name}": use one of ${Object.keys(PLAYWRIGHT_SUITES).join(', ')}, or add it to PLAYWRIGHT_SUITES in scripts/lib/test-results-check.ts with its counts in tests/test-counts.json. ${GATE_USAGE}`,
+    );
+  }
+  return { suite, report };
 }
 
 const ALLOW_FILE = 'tests/skip-allowlist.json';
@@ -174,7 +242,11 @@ function parseDay(value: string): number | undefined {
     : time;
 }
 
-function countProblems(tests: TestRecord[], expected: Map<string, number>): string[] {
+function countProblems(
+  tests: TestRecord[],
+  expected: Map<string, number>,
+  suite: PlaywrightSuite,
+): string[] {
   const found = new Map<string, number>();
   for (const test of tests) found.set(test.file, (found.get(test.file) ?? 0) + 1);
   const files = [...new Set([...expected.keys(), ...found.keys()])].sort();
@@ -184,15 +256,15 @@ function countProblems(tests: TestRecord[], expected: Map<string, number>): stri
     const have = found.get(file) ?? 0;
     if (want === undefined) {
       problems.push(
-        `${file} holds ${have} test(s) and ${COUNTS_FILE} lists no count for it: add "${file}": ${have} under "e2e" in the same change`,
+        `${file} holds ${have} test(s) and ${COUNTS_FILE} lists no count for it: add "${file}": ${have} under "${suite.section}" in the same change`,
       );
     } else if (have === 0) {
       problems.push(
-        `${file} is not in this run, ${COUNTS_FILE} expects ${want} test(s) from it: run the whole suite (npm run test:e2e) before this check, with no file, grep or project filter. If the file was renamed or deleted, change ${COUNTS_FILE} in the same change`,
+        `${file} is not in this run, ${COUNTS_FILE} expects ${want} test(s) from it: run the whole suite (${suite.command}) before this check, with no file, grep or project filter. If the file no longer declares any test (a describe or a loop that lost its tests), bring them back; if it was renamed or deleted, change ${COUNTS_FILE} in the same change`,
       );
     } else if (have !== want) {
       problems.push(
-        `${file} holds ${have} test(s) in this run, ${COUNTS_FILE} expects ${want}: a test or file that should run was not loaded (a grep, a testMatch or a renamed file), or a test was added or deleted. If the change is deliberate, set the count in ${COUNTS_FILE} in the same change`,
+        `${file} holds ${have} test(s) in this run, ${COUNTS_FILE} expects ${want}: a test or file that should run was not loaded (a grep, a testMatch or a renamed file), or a test was added or deleted. If the change is deliberate, set the count under "${suite.section}" in ${COUNTS_FILE} in the same change`,
       );
     }
   }
@@ -200,8 +272,8 @@ function countProblems(tests: TestRecord[], expected: Map<string, number>): stri
 }
 
 /**
- * @param report the Playwright JSON report of a full run
- * @param counts parseCounts(tests/test-counts.json, 'e2e')
+ * @param report the Playwright JSON report of a full run of `suite`
+ * @param counts parseCounts(tests/test-counts.json, suite.section)
  * @param today YYYY-MM-DD in UTC
  */
 export function e2eVerdict(
@@ -209,6 +281,7 @@ export function e2eVerdict(
   counts: Map<string, number>,
   allowlist: AllowEntry[],
   today: string,
+  suite: PlaywrightSuite = E2E_SUITE,
 ): Verdict {
   const todayTime = parseDay(today);
   if (todayTime === undefined) throw new Error(`today must be YYYY-MM-DD, got "${today}"`);
@@ -226,6 +299,7 @@ export function e2eVerdict(
   const seen = new Set<string>();
   const ids = new Set(tests.map((test) => test.id));
   for (const entry of allowlist) {
+    if (suite.subset && !ids.has(entry.test)) continue;
     const label = `${ALLOW_FILE} entry "${entry.test || '(no test)'}"`;
     const reviewTime = parseDay(entry.reviewBy);
     if (!ALLOWABLE.some((outcome) => outcome === entry.result)) {
@@ -270,7 +344,7 @@ export function e2eVerdict(
     }
   }
 
-  blocking.push(...countProblems(tests, counts));
+  blocking.push(...countProblems(tests, counts, suite));
 
   const files = new Set(tests.map((test) => test.file)).size;
   const outcomes = [...tally.entries()].map(([outcome, n]) => `${n} ${outcome}`).join(', ');
@@ -294,6 +368,43 @@ export interface VitestCase {
   mode: string;
   /** A beforeAll of an enclosing suite, or the module itself, failed before the test ran. */
   hookFailed: boolean;
+}
+
+/** The filters of one test file in a Vitest run (TestSpecification in vitest/node, 5.1). */
+export interface SpecificationFilters {
+  testLines?: readonly number[] | undefined;
+  testIds?: readonly string[] | undefined;
+  testNames?: readonly string[] | undefined;
+  testNamePattern?: RegExp | undefined;
+  testTagsFilter?: readonly string[] | undefined;
+}
+
+/**
+ * True when a Vitest run selects only some tests of its files: a test name pattern (-t, or the
+ * watch mode's `t`), a file:line location, test ids or names (an IDE), or a tag filter. Vitest
+ * marks every test such a run leaves out "skipped", so its skips are not a finding (CHK-1). The
+ * forms of Vitest's own isPartialRun, apart from .only: the lint bans that, and CI forbids it.
+ * @param namePattern Vitest.getGlobalTestNamePattern() at the start of the run
+ * @param tagsFilter the resolved config's tagsFilter
+ */
+export function filteredRun(
+  namePattern: RegExp | undefined,
+  tagsFilter: readonly string[] | undefined,
+  specifications: readonly SpecificationFilters[],
+): boolean {
+  const some = (items: readonly unknown[] | undefined): boolean => (items?.length ?? 0) > 0;
+  return (
+    namePattern !== undefined ||
+    some(tagsFilter) ||
+    specifications.some(
+      (spec) =>
+        some(spec.testLines) ||
+        some(spec.testIds) ||
+        some(spec.testNames) ||
+        spec.testNamePattern !== undefined ||
+        some(spec.testTagsFilter),
+    )
+  );
 }
 
 /**

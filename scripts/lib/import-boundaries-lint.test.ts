@@ -267,6 +267,8 @@ const ROWS: readonly {
     ],
     allowed: [
       '@tinnox/api/test-support',
+      // The light entry of the API's names (CHK-9): a subpath of the harness's own entry.
+      '@tinnox/api/test-support/runtime-env',
       '@tinnox/db',
       '@tinnox/app-render',
       'pg',
@@ -284,6 +286,7 @@ const ROWS: readonly {
         /scripts may import only @tinnox\/contracts, @tinnox\/db, @tinnox\/domain/,
       ],
       ['@tinnox/api/test-support', APP],
+      ['@tinnox/api/test-support/runtime-env', APP],
     ],
     allowed: ['@tinnox/db', '@tinnox/contracts', '@tinnox/domain', 'node:child_process'],
   },

@@ -47,11 +47,11 @@ import type { AppContext } from '../src/context.ts';
 import type { MailMessage, Mailer } from '../src/mail.ts';
 import { MediaPipeline } from '../src/media/pipeline.ts';
 
-// Tests outside apps/api reach the harness only as '@tinnox/api/test-support' (the package's
-// one export), so the types they need are re-exported here. The e2e stack builds the API's
-// environment from RUNTIME_ENV_NAMES (EAX-09).
+// Tests outside apps/api reach this harness only as '@tinnox/api/test-support', so the types they
+// need are re-exported here. RUNTIME_ENV_NAMES is deliberately not: the e2e stack takes it from
+// the light entry '@tinnox/api/test-support/runtime-env' (./runtime-env.ts), so that the
+// stackless layout checks never load this file (CHK-9).
 export type { IdentityProvider };
-export { RUNTIME_ENV_NAMES };
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const envFile = join(repoRoot, '.env');

@@ -1,5 +1,5 @@
 {
-  "note": "Under \"e2e\", the tests each spec file of tests/e2e holds, which npm run check:test-results compares with the run's report. Under \"vitest\", the floor of tests each Vitest project holds when every one of its files runs, which scripts/vitest-results-reporter.ts checks (U-15). Change a count in the same change that adds, deletes or splits a test; raise a floor when a project grows.",
+  "note": "Under \"e2e\", the tests each spec file of tests/e2e holds, which npm run check:test-results compares with the run's report. Under \"layout\", the same for the stackless checks of tests/playwright.layout.config.ts that the quality job runs (npm run check:test-results -- --counts layout). Under \"vitest\", the floor of tests each Vitest project holds when every one of its files runs, which scripts/vitest-results-reporter.ts checks (U-15); \"api-integration\" is the API's own runner of its integration tests (apps/api/vitest.config.ts). Change a count in the same change that adds, deletes or splits a test; raise a floor when a project grows.",
   "e2e": {
     "01-journey.spec.ts": 16,
     "02-canvases.spec.ts": 4,
@@ -18,9 +18,13 @@
     "14-roles.spec.ts": 7,
     "15-alerts.spec.ts": 3
   },
+  "layout": {
+    "09-review-round-2.spec.ts": 2
+  },
   "vitest": {
     "unit": 2871,
     "component (chromium)": 96,
-    "integration": 597
+    "integration": 597,
+    "api-integration": 185
   }
 }

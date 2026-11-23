@@ -231,7 +231,9 @@ export function runApiEntryPoint(
       child.kill('SIGKILL');
       reject(new Error(`${script} kept running with an unacceptable configuration:\n${output}`));
     }, 20_000);
-    child.once('exit', (code) => {
+    // 'close', not 'exit': it comes after stdout and stderr are drained, and the refusal the
+    // callers assert on is the last thing the entry point prints before it exits (E2E-4).
+    child.once('close', (code) => {
       clearTimeout(timer);
       resolve({ code, output });
     });

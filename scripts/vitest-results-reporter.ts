@@ -2,9 +2,11 @@
 // never started (U-15; rules in scripts/lib/test-results-check.ts). Vitest exits 0 for those,
 // and the lint (NO_SKIPPED_TESTS in eslint.config.js) sees only the declared forms, not
 // ctx.skip() or a skip decided inside a helper. vitest.config.ts lists it after the default
-// reporters, so it runs for every project. A run filtered by test name (-t) skips the rest on
-// purpose and is not checked. A project whose every file ran must also hold at least the
-// tests its floor in tests/test-counts.json names; a run of some files only is not counted.
+// reporters, so it runs for every project (apps/api/vitest.config.ts adds it too). A run that
+// selects some tests of its files (-t, a file:line, an IDE's test ids, a tag filter, or the
+// watch mode's `t`) skips the rest on purpose and is not checked. A project whose every file
+// ran must also hold at least the tests its floor in tests/test-counts.json names; a run of
+// some files only is not counted.
 import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import type {
@@ -12,11 +14,13 @@ import type {
   TestModule,
   TestProject,
   TestRunEndReason,
+  TestSpecification,
   TestSuite,
   Vitest,
 } from 'vitest/node';
 import { repoRoot } from './lib/env.ts';
 import {
+  filteredRun,
   parseCounts,
   type VitestCase,
   vitestCountFindings,
@@ -56,6 +60,7 @@ function failRun(findings: string[]): void {
 export default class ResultsReporter implements Reporter {
   readonly #fail: (findings: string[]) => void;
   readonly #floors: ReadonlyMap<string, number>;
+  #vitest: Vitest | undefined;
   #filtered = false;
 
   constructor(options: ResultsReporterOptions = {}) {
@@ -64,7 +69,16 @@ export default class ResultsReporter implements Reporter {
   }
 
   onInit(vitest: Vitest): void {
-    this.#filtered = vitest.config.testNamePattern !== undefined;
+    this.#vitest = vitest;
+  }
+
+  // Decided again for every run: in watch mode the filter changes between runs.
+  onTestRunStart(specifications: ReadonlyArray<TestSpecification>): void {
+    this.#filtered = filteredRun(
+      this.#vitest?.getGlobalTestNamePattern(),
+      this.#vitest?.config.tagsFilter,
+      specifications,
+    );
   }
 
   async onTestRunEnd(

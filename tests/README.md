@@ -88,10 +88,12 @@ portal (5173) and the player (5174) must **not** be running: Playwright starts t
 ## A run is green only when every test ran
 
 A skipped, todo or focused test is a red run (U-15): the lint refuses the declared forms, and
-two checks catch what happens at run time. `vitest.config.ts` adds
+two checks catch what happens at run time. `vitest.config.ts` (and `apps/api/vitest.config.ts`,
+the API's own `npm run test:integration -w @tinnox/api`) adds
 `scripts/vitest-results-reporter.ts` to the reporters, which fails a unit, component or
 integration run that reports a test skipped, todo or never started (`ctx.skip()` included; a
-run filtered with `-t` is not checked). When every file of a project ran, the reporter also
+run that selects some tests of its files, by `-t`, a `file:line`, an editor's test ids, a tag
+filter or the watch mode's `t`, is not checked). When every file of a project ran, the reporter also
 fails it below its floor under `"vitest"` in `test-counts.json` (a describe or a loop that
 lost its tests); raise the floor as the project grows. After the browser suite, `npm run check:test-results`
 reads `tests/.run/e2e-results.json` and fails on a test skipped at run time
@@ -101,7 +103,11 @@ out), and a spec file whose number of tests is not the one in `test-counts.json`
 count in the same change that adds or deletes a test. `skip-allowlist.json` may excuse a test
 that did not run or was flaky until its review date, with an owner and a reason; a skip has no
 entry. The CI e2e job runs the check whether the suite passed or failed, and keeps the result
-file. Run the check on a full run: a run of some spec files fails the counts.
+file. Run the check on a full run: a run of some spec files fails the counts. `npm run test:e2e`
+first removes the last run's result file, so a run that never wrote one is "no report", not the
+previous verdict. The quality job runs the stackless checks (`playwright.layout.config.ts`) and
+then `npm run check:test-results -- --counts layout`, which reads `tests/.run/layout-results.json`
+against the `"layout"` counts.
 
 ## What is substituted, and where
 

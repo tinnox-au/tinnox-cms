@@ -13,7 +13,9 @@ export default defineConfig({
   workers: 1,
   retries: 0,
   forbidOnly: true,
-  reporter: [['list']],
+  // The quality job's results gate reads the JSON report: a test skipped at run time leaves
+  // Playwright exiting 0 (npm run check:test-results -- --counts layout, CHK-2).
+  reporter: [['list'], ['json', { outputFile: './.run/layout-results.json' }]],
   use: { trace: 'off', video: 'off', screenshot: 'off' },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
 });

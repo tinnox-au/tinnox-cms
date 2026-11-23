@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } 
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseEnv } from 'node:util';
-import { RUNTIME_ENV_NAMES } from '@tinnox/api/test-support';
+import { RUNTIME_ENV_NAMES } from '@tinnox/api/test-support/runtime-env';
 import {
   allowListedEnv,
   hostsOf,

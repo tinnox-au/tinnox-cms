@@ -61,7 +61,13 @@ jobs:
       # installed above and before the build, which they do not need. The full e2e suite also
       # runs them, but only in the manual job below. scripts/lib/playwright-configs.test.ts fails
       # when no workflow step runs a Playwright config (the manual e2e job counts until step 36).
-      - run: npx playwright test -c tests/playwright.layout.config.ts
+      - id: layout
+        run: npx playwright test -c tests/playwright.layout.config.ts
+      # Playwright exits 0 with a test skipped at run time: the gate reads the step's report
+      # whether it passed or failed, but not when an earlier failure skipped it (CHK-2, U-15).
+      - name: Every expected layout check ran once and passed
+        if: ${{ !cancelled() && steps.layout.outcome != 'skipped' }}
+        run: npm run check:test-results -- --counts layout
       - run: npm run build
       # Fails on high or critical advisories, apart from the dated development-only exceptions in
       # scripts/audit-exceptions.json. Lower-severity findings are tracked in the docs.
