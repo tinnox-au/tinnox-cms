@@ -907,9 +907,6 @@ export const LEGACY_TRANSACTION_FILES = [
   // changeOrg; withOrgDecision), deleted when their last caller has moved.
   'apps/api/src/auth/permissions.ts',
   'apps/api/src/db-helpers.ts',
-  // The refusal-only audit transactions of SCR-32 (permission denied, CSRF rejected).
-  'apps/api/src/auth/permission-audit.ts',
-  'apps/api/src/auth/session.ts',
   // Helpers that write an audit row on the tx of their caller, and the two jobs that run with
   // no request: the alert check and the media pipeline.
   'apps/api/src/publishing.ts',

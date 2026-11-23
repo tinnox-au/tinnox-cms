@@ -9,18 +9,12 @@
  *   CSRF token in X-CSRF-Token.
  */
 import { HEADERS, OpaqueTokenSchema } from '@tinnox/contracts';
-import {
-  auditScoped,
-  poolAsTx,
-  sessionByIdHash,
-  sha256,
-  withOrg,
-  type SessionLookup,
-} from '@tinnox/db';
+import { poolAsTx, sessionByIdHash, sha256, type SessionLookup } from '@tinnox/db';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { AppContext } from '../context.ts';
 import { HttpError } from '../errors.ts';
 import { safeEqual } from '../security.ts';
+import { recordRefusal } from './refusal.ts';
 
 export interface OperatorSession extends SessionLookup {
   /** SHA-256 of the cookie value; identifies the session row. */
@@ -80,6 +74,11 @@ export async function readSession(
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
+/**
+ * Writes the `security.csrf_rejected` row of a refused request. Nothing changed, so it is a
+ * transaction of its own (`recordRefusal`, ./refusal.ts; SCR-32, D2). A failure is logged and
+ * swallowed: the refusal stands whether or not it could be recorded.
+ */
 async function recordCsrfRejection(
   ctx: AppContext,
   request: FastifyRequest,
@@ -87,17 +86,15 @@ async function recordCsrfRejection(
   reason: string,
 ): Promise<void> {
   try {
-    await withOrg(ctx.pool, session.orgId, (tx) =>
-      auditScoped(tx, {
-        actorType: 'operator',
-        actorId: session.membershipId,
-        action: 'security.csrf_rejected',
-        objectType: null,
-        objectId: null,
-        result: 'denied',
-        detail: { reason, method: request.method, route: request.routeOptions.url ?? null },
-      }),
-    );
+    await recordRefusal(ctx, request, session, {
+      actorType: 'operator',
+      actorId: session.membershipId,
+      action: 'security.csrf_rejected',
+      objectType: null,
+      objectId: null,
+      result: 'denied',
+      detail: { reason, method: request.method, route: request.routeOptions.url ?? null },
+    });
   } catch (error) {
     request.log.error({ err: error }, 'failed to record csrf rejection');
   }
