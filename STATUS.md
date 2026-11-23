@@ -272,6 +272,7 @@ from: CMS-30
 
 **Notes**
 - 24 Nov: Steps: 38 session wake and layoutBoxes (LYX-01, LYX-02); 39 reads through useLoad; 40 raw-dialog ban; 41 to 41c draft saving, write errors, patchOf, version check on PUTs; 42 and 42a truncation, URL markers, announcements; 43 fetch ban; 44 and 44a.
+- 24 Nov: The live-region lint of step 42a waits for the screen-reader listening pass (CMS-6).
 
 ### CMS-34
 from: CMS-30
