@@ -42,6 +42,7 @@ import {
   withoutOrg,
   type Pool,
 } from '@tinnox/db';
+import { unjudgedSql } from '@tinnox/db/testing';
 import { createDeliveryRegistry } from '@tinnox/delivery';
 import { LocalObjectStorage } from '@tinnox/storage';
 import type { FastifyInstance } from 'fastify';
@@ -101,7 +102,16 @@ export interface TestApp {
   readonly app: FastifyInstance;
   readonly ctx: AppContext;
   readonly config: AppConfig;
+  /** The application's own pool: every route, the media pipeline and the alert check use it. */
   readonly pool: Pool;
+  /**
+   * A second pool as tinnox_app, for SQL a test writes itself: arranging rows no route makes,
+   * ending a member's sessions under a route's feet, a sign-in without the provider. The
+   * audit-debt guard of the test database judges every write on `pool`, which is product code,
+   * and none on this one (packages/db/src/audit-debt-guard.ts), so each use says why: `why` is
+   * what the SQL is, and never a route's or a job's own call. Reading on `pool` is fine.
+   */
+  testSql(why: string): Pool;
   readonly url: string;
   readonly jobsDir: string;
   readonly mediaRoot: string;
@@ -158,6 +168,13 @@ export async function startTestApp(
     max: 12,
   });
   const pool = options.wrapPool?.(created) ?? created;
+  const testSqlPool = createPool({
+    connectionString: config.databaseUrl,
+    applicationName: unjudgedSql(
+      'the API harness pool for SQL a test writes itself; each use of testSql() gives its own reason',
+    ),
+    max: 4,
+  });
   const storage = await LocalObjectStorage.create({ root: mediaRoot });
   const silent = { info: () => undefined, warn: () => undefined, error: () => undefined };
   const media = new MediaPipeline({
@@ -202,6 +219,10 @@ export async function startTestApp(
     ctx,
     config,
     pool,
+    testSql(why: string): Pool {
+      unjudgedSql(why); // refuses a use with no reason
+      return testSqlPool;
+    },
     url: `http://127.0.0.1:${address.port}`,
     jobsDir,
     mediaRoot,
@@ -213,6 +234,7 @@ export async function startTestApp(
       await app.close();
       await media.stop();
       await created.end();
+      await testSqlPool.end();
       await rm(scratch, { recursive: true, force: true });
     },
   };
@@ -322,16 +344,20 @@ export async function signIn(
 ): Promise<Operator> {
   const sessionId = randomBytes(32).toString('base64url');
   const csrfToken = randomBytes(32).toString('base64url');
-  // In a transaction, as the callback route calls it: sessionCreate takes a Tx (D2).
-  const created = await withoutOrg(t.pool, (tx) =>
-    sessionCreate(tx, {
-      idHash: sha256(sessionId),
-      oidcSub: org.oidcSub,
-      csrfToken,
-      ttlSeconds: 3600,
-      idToken: null,
-      authTime: options.authTime === undefined ? new Date(Date.now() + 60_000) : options.authTime,
-    }),
+  // In a transaction, as the callback route calls it: sessionCreate takes a Tx (D2). On the
+  // test's own pool: the callback writes auth.login with the session, and this stand-in for it
+  // writes no audit row, which the audit-debt guard would refuse on the application's pool.
+  const created = await withoutOrg(
+    t.testSql('a sign-in without the provider, standing in for the callback'),
+    (tx) =>
+      sessionCreate(tx, {
+        idHash: sha256(sessionId),
+        oidcSub: org.oidcSub,
+        csrfToken,
+        ttlSeconds: 3600,
+        idToken: null,
+        authTime: options.authTime === undefined ? new Date(Date.now() + 60_000) : options.authTime,
+      }),
   );
   if (created.outcome !== 'created') {
     throw new Error(`test member could not sign in: ${created.outcome}`);

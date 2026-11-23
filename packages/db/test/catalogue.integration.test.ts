@@ -36,10 +36,18 @@ import {
   triggerProblems,
   type TableFacts,
 } from '../src/schema-invariants.ts';
+import { removeAuditDebtGuard } from '../src/testing.ts';
 import { MEMBER_REFERENCES } from './catalogue/member-references.ts';
 import { NULL_PASSING_CHECKS } from './catalogue/null-passing-checks.ts';
 import { SEC_FUNCTIONS } from './catalogue/sec-functions.ts';
-import { appPool, createOrg, migratorClient, superuserUrl, type TestOrg } from './support.ts';
+import {
+  appPool,
+  createOrg,
+  migratorClient,
+  migratorUrl,
+  superuserUrl,
+  type TestOrg,
+} from './support.ts';
 
 const GRANTS_FILE = 'packages/db/test/catalogue/grants.json';
 const SEC_FILE = 'packages/db/test/catalogue/sec-functions.ts';
@@ -138,7 +146,12 @@ let catalogue: pg.Client;
 let admin: pg.Client;
 
 beforeAll(async () => {
-  pool = appPool();
+  // This file describes the schema the migrations produce. The audit-debt guard is a test-only
+  // addition to the integration database (a trigger on audit_event among its objects), so it is
+  // taken out before anything is read: no rule below has to look past it. The set-up of the
+  // next test file puts it back (scripts/vitest-integration-file-setup.ts).
+  await removeAuditDebtGuard(migratorUrl());
+  pool = appPool('reads the catalogue as the runtime role');
   arrange = await migratorClient();
   catalogue = await migratorClient();
   admin = new pg.Client({ connectionString: superuserUrl() });

@@ -14,7 +14,7 @@ let a: TestOrg;
 let b: TestOrg;
 
 beforeAll(async () => {
-  pool = appPool(4);
+  pool = appPool('tries the stage B tables as the runtime role', 4);
   migrator = await migratorClient();
   a = await createOrg(migrator, 'Stage B one');
   b = await createOrg(migrator, 'Stage B two');

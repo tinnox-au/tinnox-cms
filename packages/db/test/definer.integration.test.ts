@@ -28,7 +28,7 @@ let org: TestOrg;
 beforeAll(async () => {
   migrator = await connectMigrator(migratorUrl(), { applicationName: 'tinnox-test-definer' });
   other = await connectMigrator(migratorUrl(), { applicationName: 'tinnox-test-definer-2' });
-  app = appPool(2);
+  app = appPool('tries the definer-owned functions as the runtime role', 2);
   const arrange = await migratorClient();
   try {
     org = await createOrg(arrange, 'Definer');

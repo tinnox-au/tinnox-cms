@@ -3,12 +3,14 @@
  * attempt limits; a revoked or reset credential gets no manifest, no URLs, no media and
  * no report accepted; a player moved to another organisation gets nothing of the first.
  */
+import { whileUnauditedAllowed } from '@tinnox/db/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   arrangeAsDefiner,
   createDisplay,
   createOrg,
   heartbeatBody,
+  migratorUrl,
   newPairing,
   pairPlayer,
   pollPairing,
@@ -82,7 +84,15 @@ describe('pairing codes and device credentials', () => {
     const late = await claim(alice, display.id, pairing.code);
     expect(late.status).toBeGreaterThanOrEqual(400);
     expect(late.status).toBeLessThan(500);
-    const poll = await pollPairing(t, pairing);
+    // The poll marks the session expired and writes no audit row. Undecided, so the audit-debt
+    // guard refuses it everywhere else: D3 names the purges, not this mark. The step 16 report
+    // puts it to Michael; until he decides, only this call lets it pass.
+    const poll = await whileUnauditedAllowed(
+      migratorUrl(),
+      'pairing_session',
+      'undecided (step 16 report): sec.pairing_poll marks a pairing session past its expiry expired and writes no audit row, which D3 does not exempt',
+      () => pollPairing(t, pairing),
+    );
     expect(((await poll.json()) as { status: string }).status).toBe('expired');
     const after = (await (await alice.fetch(`/api/displays/${display.id}`)).json()) as {
       player: unknown;

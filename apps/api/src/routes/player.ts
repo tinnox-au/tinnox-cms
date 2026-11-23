@@ -328,7 +328,23 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
           pollingTokenHash,
           deviceTokenHash: sha256(deviceToken),
         });
-        if (done.outcome !== 'completed') return null;
+        if (done.outcome !== 'completed') {
+          // Every attempt at pairing is audited, whatever its result (D3). A refusal here can
+          // also end the claim: the member who claimed the code has left or had their sessions
+          // ended, or the screen got a player meanwhile. That change commits with this row. A
+          // refusal names no organisation (sec.pairing_complete returns none), so the row has
+          // none, like pairing.create and pairing.lock.
+          await auditUnscoped(tx, {
+            actorType: 'anonymous',
+            actorId: null,
+            action: 'pairing.complete',
+            objectType: 'pairing_session',
+            objectId: id,
+            result: 'denied',
+            detail: { reason: done.outcome },
+          });
+          return null;
+        }
         await enterOrg(done.orgId);
         const { rows } = await tx.query<{
           id: string;

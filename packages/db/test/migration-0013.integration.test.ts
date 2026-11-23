@@ -239,7 +239,7 @@ beforeAll(async () => {
   await runMigrations({ connectionString: migratorUrl(), directory: scratch });
 
   migrator = await migratorClient();
-  pool = appPool(4);
+  pool = appPool('tries the upgraded schema as the runtime role', 4);
   db = poolAsTx(pool);
   legacyA = await legacyOrg('Legacy A', 2);
   legacyB = await legacyOrg('Legacy B', 1);

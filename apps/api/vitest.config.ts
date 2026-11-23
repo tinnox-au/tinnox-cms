@@ -19,6 +19,10 @@ export default defineConfig({
     environment: 'node',
     include: ['test/**/*.integration.test.ts'],
     globalSetup: ['./test/global-setup.ts'],
+    // As the repository's integration project: installs the audit-debt guard when it is missing
+    // and fails a test with the guard's message when it refused a commit (adoption plan
+    // section 2.1 C). The global setup above only migrates, so this is what installs it here.
+    setupFiles: ['../../scripts/vitest-integration-file-setup.ts'],
     fileParallelism: false,
     testTimeout: 30_000,
     hookTimeout: 60_000,

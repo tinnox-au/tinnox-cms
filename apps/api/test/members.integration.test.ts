@@ -61,15 +61,17 @@ interface ErrorBody {
 
 /** The outcome sec.session_create gives a new sign-in of the member, authenticated at `authTime`. */
 async function signInOutcome(t: TestApp, member: TestOrg, authTime: Date): Promise<string> {
-  const created = await withoutOrg(t.pool, (tx) =>
-    sessionCreate(tx, {
-      idHash: sha256(randomBytes(32).toString('base64url')),
-      oidcSub: member.oidcSub,
-      csrfToken: randomBytes(32).toString('base64url'),
-      ttlSeconds: 3600,
-      idToken: null,
-      authTime,
-    }),
+  const created = await withoutOrg(
+    t.testSql('a sign-in without the provider, to read its outcome'),
+    (tx) =>
+      sessionCreate(tx, {
+        idHash: sha256(randomBytes(32).toString('base64url')),
+        oidcSub: member.oidcSub,
+        csrfToken: randomBytes(32).toString('base64url'),
+        ttlSeconds: 3600,
+        idToken: null,
+        authTime,
+      }),
   );
   return created.outcome;
 }

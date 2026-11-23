@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { parseEnv } from 'node:util';
 import pg from 'pg';
 import type { Operator, PairedPlayer, TestApp } from '@tinnox/api/test-support';
+import { unjudgedSql } from '@tinnox/db/testing';
 
 export * from '@tinnox/api/test-support';
 
@@ -25,9 +26,22 @@ function need(name: string): string {
   return value;
 }
 
-/** One connection as the runtime role, with no organisation context unless a test sets one. */
-export async function appClient(): Promise<pg.Client> {
-  const client = new pg.Client({ connectionString: need('TEST_DATABASE_URL') });
+/** Connection string of the integration-test database for role tinnox_migrator. */
+export function migratorUrl(): string {
+  return need('TEST_DATABASE_MIGRATOR_URL');
+}
+
+/**
+ * One connection as the runtime role, with no organisation context unless a test sets one. For
+ * SQL the test writes itself, and `why` says what it is: the connection's name tells the
+ * audit-debt guard of the test database that this is not product code, so a write here owes no
+ * audit row. Never a route's or a job's own call.
+ */
+export async function appClient(why: string): Promise<pg.Client> {
+  const client = new pg.Client({
+    connectionString: need('TEST_DATABASE_URL'),
+    application_name: unjudgedSql(why),
+  });
   await client.connect();
   return client;
 }

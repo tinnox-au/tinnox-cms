@@ -81,6 +81,41 @@ file's first click or key failed with "Frame was detached".
 `npm run test:integration` also runs `packages/*/test/*.integration.test.ts` and
 `apps/api/test/*.integration.test.ts`. It rebuilds the database `tinnox_test` first.
 
+### The audit-debt guard
+
+The integration database carries a test-only guard (`packages/db/src/audit-debt-guard.ts`;
+poteto adoption plan section 2.1 C, decision D3). No migration creates it and it refuses any
+database whose name does not end in `_test`. A transaction of the runtime role `tinnox_app` that
+changes a table whose changes must be audited, and commits no `audit_event` row, fails at
+`COMMIT` with SQLSTATE `23U01` and a message that names the tables. So every route, and every run
+of the media pipeline or the alert check, that an integration test touches is checked for its
+audit row, whatever the test asserts. The global setup installs the guard after the migrations;
+`scripts/vitest-integration-file-setup.ts` puts it back before each file (a migration test
+rebuilds the schema, and the catalogue test removes the guard so that it reads only what the
+migrations made) and fails a test with the guard's message when a commit was refused while it
+ran, also when the route answered 500 or product code caught the error.
+
+- **Exempt, by D3**: the tables `heartbeat_log`, `display_delivery` and `login_state`; the columns
+  `session.last_seen_at` and `pairing_session.failed_attempts`; writes made inside the three
+  purge functions. The lists, with their reasons, are at the top of the guard's file.
+- **Not judged**: `tinnox_migrator` and the superuser, which is how test helpers arrange data.
+  A test that must write as `tinnox_app` itself (to try row-level security, a grant, a `sec.*`
+  function, or to arrange what only that role can) uses a connection named by
+  `unjudgedSql(why)`, and says what its SQL is: `appPool(why)` in `packages/db/test/support.ts`,
+  `appClient(why)` in `integration/support.ts`, and `t.testSql(why)` of the API harness. A
+  route's, job's or helper's own call never moves there to get past the guard. `t.pool` is the
+  application's own pool and is judged; reading on it is fine.
+- **One path is unaudited by decision**: the sign-out fallback (`sessionRevokeUnaudited`, the
+  CX-01 residual). Its test says so with `whileUnauditedAllowed(...)`, which lets one table
+  through for the length of one call.
+- **Two writes wait for Michael's decision** (step 16 report), and the guard refuses both: the
+  alert check closing an offline episode without an e-mail (`docs/portal-v2/stage-c-alerts.md`
+  section 9 row 7 says silently, D3 audits every change to tenant state), and a pairing session
+  past its expiry being marked expired by the next poll. Only the product tests that make them
+  let them pass, with `whileUnauditedAllowed` and a reason that starts "undecided".
+
+The browser suite's database (`tinnox_e2e_test`) does not get the guard.
+
 Before either suite: `npm run setup`, `npm run infra:up`, and for E2E also
 `npm run db:migrate` and `npm run db:seed -- --second-org`. For E2E the API (4000), the
 portal (5173) and the player (5174) must **not** be running: Playwright starts them.

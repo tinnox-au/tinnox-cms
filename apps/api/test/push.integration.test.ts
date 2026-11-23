@@ -588,7 +588,7 @@ describe('assign, then push', () => {
       ] as const;
       const total = MANIFEST_BATCH_SIZE * 2 + 5;
       expect(total).toBeLessThanOrEqual(ABSOLUTE.maxPushDisplays * 2);
-      await withOrg(t.pool, org.orgId, (tx) =>
+      await withOrg(t.testSql('adds screens in bulk, more than one push batch'), org.orgId, (tx) =>
         tx.query(
           `INSERT INTO display (org_id, site_id, name, canvas_width, canvas_height, assigned_playlist_id)
            SELECT app_org_id(), $1, 'Batch ' || g, 640, 360,
@@ -1321,32 +1321,37 @@ describe('assign, then push', () => {
     ): Promise<{ waited: boolean; results: PushResult[] }> {
       const started: { push?: Promise<Response> } = {};
       let waited = false;
-      await withOrg(t.pool, orgA.orgId, async (tx) => {
-        await edit(tx);
-        const pushing = push(alice, [displayId]);
-        started.push = pushing;
-        let settled = false;
-        void pushing.then(
-          () => {
-            settled = true;
-          },
-          () => {
-            settled = true;
-          },
-        );
-        const deadline = Date.now() + 5000;
-        while (!settled && Date.now() < deadline) {
-          const { rows } = await t.pool.query<{ n: number }>(
-            'SELECT count(*)::int AS n FROM pg_locks WHERE NOT granted',
+      // The edit is the test's own SQL, not a route's, so it runs on the test's pool.
+      await withOrg(
+        t.testSql('the concurrent edit the test makes under a push'),
+        orgA.orgId,
+        async (tx) => {
+          await edit(tx);
+          const pushing = push(alice, [displayId]);
+          started.push = pushing;
+          let settled = false;
+          void pushing.then(
+            () => {
+              settled = true;
+            },
+            () => {
+              settled = true;
+            },
           );
-          if ((rows[0]?.n ?? 0) > 0) {
-            waited = true;
-            break;
+          const deadline = Date.now() + 5000;
+          while (!settled && Date.now() < deadline) {
+            const { rows } = await t.pool.query<{ n: number }>(
+              'SELECT count(*)::int AS n FROM pg_locks WHERE NOT granted',
+            );
+            if ((rows[0]?.n ?? 0) > 0) {
+              waited = true;
+              break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 20));
           }
-          await new Promise((resolve) => setTimeout(resolve, 20));
-        }
-        // Returning commits the edit and lets the push go on.
-      });
+          // Returning commits the edit and lets the push go on.
+        },
+      );
       if (started.push === undefined) throw new Error('the push was not started');
       const response = await started.push;
       expect(response.status, await response.clone().text()).toBe(200);

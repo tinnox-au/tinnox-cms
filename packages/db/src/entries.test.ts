@@ -55,7 +55,7 @@ describe('the entries of @tinnox/db (AG-1.10)', () => {
     // The walk follows the re-exports of index.ts, so it has really read the package.
     expect(fromRoot).toContain(join(SRC, 'tx.ts'));
     expect(fromRoot).toContain(join(SRC, 'sec.ts'));
-    for (const file of ['migrate.ts', 'definer.ts', 'testing.ts']) {
+    for (const file of ['migrate.ts', 'definer.ts', 'testing.ts', 'audit-debt-guard.ts']) {
       expect(
         fromRoot.has(join(SRC, file)),
         `src/${file} is reachable from src/index.ts: the API would load what only an offline tool or a test may use. Import it from its own entry instead`,
@@ -78,7 +78,16 @@ describe('the entries of @tinnox/db (AG-1.10)', () => {
         'runMigrations',
       ]),
     );
-    expect(Object.keys(testing)).toEqual(['inTx']);
+    expect(Object.keys(testing).sort()).toEqual([
+      'AUDIT_DEBT_SQLSTATE',
+      'ensureAuditDebtGuard',
+      'inTx',
+      'installAuditDebtGuard',
+      'removeAuditDebtGuard',
+      'unjudgedSql',
+      'watchAuditDebt',
+      'whileUnauditedAllowed',
+    ]);
     expect(Object.keys(root)).toEqual(
       expect.arrayContaining(['createPool', 'ping', 'withOrg', 'sql', 'deviceByRegistrationId']),
     );

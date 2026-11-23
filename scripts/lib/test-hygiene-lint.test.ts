@@ -106,6 +106,7 @@ describe('skipped and focused tests (U-15)', { timeout: 30_000 }, () => {
     'apps/portal/src/session/fixture.test-support.tsx',
     'apps/portal/src/componentTests.setup.ts',
     'scripts/vitest-integration-setup.ts',
+    'scripts/vitest-integration-file-setup.ts',
     'packages/delivery/test/fixture.ts',
   ])('flags a skip in the test-support or setup file %s', async (path) => {
     const messages = await flagged(path, "it.skip('a', () => {});");

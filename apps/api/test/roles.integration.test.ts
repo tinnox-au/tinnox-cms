@@ -363,7 +363,11 @@ describe('roles enforced by the API', () => {
       const screens = await newScreens();
       const [m, editor] = await member('editor');
       const response = await pushWith(editor, screens, () =>
-        withOrg(t.ctx.pool, org.orgId, (tx) => sessionRevokeMembership(tx, m.membershipId)),
+        withOrg(
+          t.testSql('the test’s own sign-out of the member, racing a request in flight'),
+          org.orgId,
+          (tx) => sessionRevokeMembership(tx, m.membershipId),
+        ),
       );
       expect(response.status).toBe(401);
       expect((await errorOf(response)).code).toBe('unauthenticated');
@@ -388,7 +392,11 @@ describe('roles enforced by the API', () => {
       const uploading = uploadBytes(editor, await pngBytes());
       await held.reached;
       try {
-        await withOrg(t.ctx.pool, org.orgId, (tx) => sessionRevokeMembership(tx, m.membershipId));
+        await withOrg(
+          t.testSql('the test’s own sign-out of the member, racing a request in flight'),
+          org.orgId,
+          (tx) => sessionRevokeMembership(tx, m.membershipId),
+        );
       } finally {
         held.release();
       }

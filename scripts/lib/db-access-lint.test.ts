@@ -616,6 +616,7 @@ describe('the entries of @tinnox/db (AG-1.10)', { timeout: 30_000 }, () => {
     'tests/e2e/support/database.ts',
     'scripts/lib/fixture.test.ts',
     'scripts/vitest-integration-setup.ts',
+    'scripts/vitest-integration-file-setup.ts',
   ])('lets the test file %s import the testing entry', async (path) => {
     expect(await flagged(path, importOf('@tinnox/db/testing'), IMPORTS)).toEqual([]);
   });

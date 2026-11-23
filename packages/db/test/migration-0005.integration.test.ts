@@ -345,7 +345,7 @@ beforeAll(async () => {
 
   failed = await attemptBrokenUpgrade(before);
   upgrade = await runMigrations({ connectionString: migratorUrl(), directory: MIGRATIONS });
-  pool = appPool(2);
+  pool = appPool('tries the upgraded schema as the runtime role', 2);
 });
 
 afterAll(async () => {

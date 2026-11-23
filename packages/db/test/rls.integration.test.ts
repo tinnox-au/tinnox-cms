@@ -86,7 +86,7 @@ let a: TestOrg;
 let b: TestOrg;
 
 beforeAll(async () => {
-  pool = appPool();
+  pool = appPool('tries row-level security and grants as the runtime role');
   migrator = await migratorClient();
   a = await createOrg(migrator, 'Org A');
   b = await createOrg(migrator, 'Org B');
@@ -224,7 +224,7 @@ describe('the runtime role itself', () => {
         await plain.end();
       }
       // ...but the API's pool sets its own values when it connects, and they win.
-      const fresh = appPool(1);
+      const fresh = appPool('tries row-level security and grants as the runtime role', 1);
       try {
         const { rows } = await fresh.query<Record<string, string>>(
           `SELECT current_setting('statement_timeout') AS statement,
@@ -278,7 +278,7 @@ describe('createPool serves tinnox_app only (AG-1.2)', () => {
   ];
 
   it('hands out connections that log in and act as tinnox_app', async () => {
-    const fresh = appPool(3);
+    const fresh = appPool('tries row-level security and grants as the runtime role', 3);
     const clients = await Promise.all([fresh.connect(), fresh.connect(), fresh.connect()]);
     try {
       for (const client of clients) {
@@ -1012,7 +1012,7 @@ describe('with organisation A as context', () => {
 
 describe('transaction-scoped context on pooled connections', () => {
   it('does not leak to the next user of the same connection', async () => {
-    const single = appPool(1);
+    const single = appPool('tries row-level security and grants as the runtime role', 1);
     try {
       const pidInside = await withOrg(single, a.orgId, async (tx) => {
         expect(await count(tx as never, 'media')).toBe(1);
@@ -1034,7 +1034,7 @@ describe('transaction-scoped context on pooled connections', () => {
   });
 
   it('rolls back and clears the context when the work throws', async () => {
-    const single = appPool(1);
+    const single = appPool('tries row-level security and grants as the runtime role', 1);
     try {
       const name = `rollback-${randomUUID()}`;
       await expect(
@@ -1053,7 +1053,7 @@ describe('transaction-scoped context on pooled connections', () => {
   });
 
   it('replaces a connection that was lost in the middle of a transaction', async () => {
-    const single = appPool(1);
+    const single = appPool('tries row-level security and grants as the runtime role', 1);
     try {
       let lost: number | undefined;
       await expect(
@@ -1076,7 +1076,7 @@ describe('transaction-scoped context on pooled connections', () => {
   });
 
   it('enters an organisation part-way through a transaction, and only for that transaction', async () => {
-    const single = appPool(1);
+    const single = appPool('tries row-level security and grants as the runtime role', 1);
     try {
       await withResolvedOrg(single, async (tx, enterOrg) => {
         expect(await count(tx as never, 'media')).toBe(0);

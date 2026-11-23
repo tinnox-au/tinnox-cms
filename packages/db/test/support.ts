@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { createPool, violatedConstraint, type Pool } from '../src/index.ts';
+import { unjudgedSql } from '../src/testing.ts';
 
 // The helper that opens a real transaction for the wrappers and audit writers that take a `Tx`
 // (D2). It lives in the package's testing entry, so tests outside this package use the same one.
@@ -19,11 +20,17 @@ function need(name: string): string {
   return value;
 }
 
-/** Pool connected as the runtime role tinnox_app to the integration-test database. */
-export function appPool(max = 4): Pool {
+/**
+ * Pool connected as the runtime role tinnox_app to the integration-test database, for the SQL
+ * these tests write themselves: they try what the role may and may not do (row-level security,
+ * grants, constraints, the sec.* functions), so most of their writes carry no audit row. The
+ * name tells the audit-debt guard that this is not product code (../src/audit-debt-guard.ts),
+ * and `why` says what the SQL is.
+ */
+export function appPool(why: string, max = 4): Pool {
   return createPool({
     connectionString: need('TEST_DATABASE_URL'),
-    applicationName: 'tinnox-test-app',
+    applicationName: unjudgedSql(why),
     max,
   });
 }

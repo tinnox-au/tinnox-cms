@@ -208,6 +208,7 @@ const TEST_FILES = [
   'tests/**/*.ts',
   'apps/portal/src/componentTests.setup.ts',
   'scripts/vitest-integration-setup.ts',
+  'scripts/vitest-integration-file-setup.ts',
 ];
 
 // OTH-13: the integration project and the Playwright suite run against real services
@@ -220,6 +221,7 @@ const REAL_SERVICE_TEST_FILES = [
   'packages/db/test/**/*.ts',
   'tests/**/*.ts',
   'scripts/vitest-integration-setup.ts',
+  'scripts/vitest-integration-file-setup.ts',
 ];
 // Adoption plan section 3.5: no non-null assertion outside tests. Stated here rather than as
 // @typescript-eslint/no-non-null-assertion, whose fixed message names no alternative (section 3.4).

@@ -688,6 +688,7 @@ describe('credential names (AG-1.9, AG-1.17, D4, D5)', () => {
     'scripts/provision-member.ts',
     'scripts/setup-dev.mjs',
     'scripts/vitest-integration-setup.ts',
+    'scripts/vitest-integration-file-setup.ts',
     'scripts/lib/fixture.test.ts',
   ])('allows it in %s', async (path) => {
     expect(await flagged(path, "requireEnv('DATABASE_MIGRATOR_URL');")).toEqual([]);

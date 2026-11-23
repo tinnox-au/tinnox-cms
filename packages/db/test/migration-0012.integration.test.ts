@@ -174,7 +174,7 @@ beforeAll(async () => {
   await runMigrations({ connectionString: migratorUrl(), directory: scratch });
 
   migrator = await migratorClient();
-  pool = appPool(2);
+  pool = appPool('tries the upgraded schema as the runtime role', 2);
   db = poolAsTx(pool);
   a = await createOrg(migrator, 'Upgrade A', { role: 'operator' });
   b = await createOrg(migrator, 'Upgrade B', { role: 'operator' });

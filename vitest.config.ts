@@ -55,6 +55,9 @@ export default defineConfig({
           ],
           exclude: ['**/node_modules/**'],
           globalSetup: ['./scripts/vitest-integration-setup.ts'],
+          // Keeps the audit-debt guard installed for every file and fails a test with the
+          // guard's message when it refused a commit (adoption plan section 2.1 C).
+          setupFiles: ['./scripts/vitest-integration-file-setup.ts'],
           fileParallelism: false,
           testTimeout: 30_000,
           hookTimeout: 60_000,

@@ -57,7 +57,7 @@ let a: TestOrg;
 let b: TestOrg;
 
 beforeAll(async () => {
-  pool = appPool(8);
+  pool = appPool('calls the sec.* functions directly, as the runtime role', 8);
   db = poolAsTx(pool);
   migrator = await migratorClient();
   a = await createOrg(migrator, 'Sec A');

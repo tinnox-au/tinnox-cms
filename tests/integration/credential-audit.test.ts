@@ -9,10 +9,13 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { IdentityProvider } from '@tinnox/api/test-support';
+import { whileUnauditedAllowed } from '@tinnox/db/testing';
 import {
+  addMember,
   auditEvents,
   createDisplay,
   createOrg,
+  migratorUrl,
   newPairing,
   pollPairing,
   signIn,
@@ -143,6 +146,46 @@ describe('credential changes and their audit events', () => {
     expect(await actions('pairing.complete')).toBe(1);
   });
 
+  it('audits a refused completion together with the claim it ends, or commits neither (D3)', async () => {
+    const display = await createDisplay(alice, org);
+    const claimer = await addMember(org, 'editor');
+    const pairing = await newPairing(t);
+    const claim = await (
+      await signIn(t, claimer)
+    ).fetch(`/api/displays/${display.id}/claim`, { method: 'POST', json: { code: pairing.code } });
+    expect(claim.status).toBe(200);
+    // The claimer's sessions are ended after the claim, so it can no longer complete.
+    const cutOff = await alice.fetch(`/api/members/${claimer.membershipId}/sign-out`, {
+      method: 'POST',
+    });
+    expect(cutOff.status).toBe(200);
+    const stillClaimed = (): Promise<number> =>
+      countAsDefiner(
+        "SELECT count(*) AS n FROM public.pairing_session WHERE id = $1 AND status = 'claimed'",
+        [pairing.pairingId],
+      );
+
+    await whileAuditFails('pairing.complete', async () => {
+      expect((await pollPairing(t, pairing)).status).toBe(500);
+      expect(await stillClaimed()).toBe(1);
+    });
+    expect(await unscopedAudit('pairing.complete', pairing.pairingId)).toEqual([]);
+
+    const refused = await pollPairing(t, pairing);
+    expect(refused.status).toBe(200);
+    expect(await refused.json()).toEqual({ status: 'consumed' });
+    expect(await stillClaimed()).toBe(0);
+    // No organisation and no member: sec.pairing_complete names neither for a refusal.
+    expect(await unscopedAudit('pairing.complete', pairing.pairingId)).toEqual([
+      {
+        actor_type: 'anonymous',
+        result: 'denied',
+        object_type: 'pairing_session',
+        detail: { reason: 'not_claimable' },
+      },
+    ]);
+  });
+
   it('creates no pairing session when its audit event cannot be written (round 3, SCU-01)', async () => {
     const sessions = (): Promise<number> =>
       countAsDefiner('SELECT count(*) AS n FROM public.pairing_session', []);
@@ -205,8 +248,16 @@ describe('credential changes and their audit events', () => {
   it('ends the session at sign-out even when the audit event cannot be written', async () => {
     const leaving = await signIn(t, org);
     await whileAuditFails('auth.logout', async () => {
-      // The failure is reported, but ending a session is the safe direction.
-      expect((await leaving.fetch('/api/auth/logout', { method: 'POST' })).status).toBe(500);
+      // The failure is reported, but ending a session is the safe direction. That fallback
+      // commits with no audit row by decision (CX-01), so the audit-debt guard is told to let
+      // it pass, for this one call.
+      const signOut = await whileUnauditedAllowed(
+        migratorUrl(),
+        'session',
+        'the accepted CX-01 residual: a sign-out whose audit row cannot be written still ends the session, through sessionRevokeUnaudited (adoption plan section 2.1 A)',
+        () => leaving.fetch('/api/auth/logout', { method: 'POST' }),
+      );
+      expect(signOut.status).toBe(500);
       expect((await leaving.fetch('/api/displays')).status).toBe(401);
     });
     expect(await actions('auth.logout')).toBe(0);

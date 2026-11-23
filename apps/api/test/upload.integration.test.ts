@@ -62,7 +62,7 @@ describe('upload limits and validation results', () => {
     // The timeout test below measures when a job is given up. That depends on how many
     // jobs are ahead of it in the one queue of the database, so rows left in
     // "processing" by a file that ran just before this one are cleared first.
-    await settleStrayMediaJobs(t.pool);
+    await settleStrayMediaJobs(t.testSql('fails media jobs left in processing, test housekeeping'));
   });
   afterAll(async () => {
     await t.close();
@@ -476,7 +476,7 @@ describe('upload limits and validation results', () => {
   it('never sweeps the files of a pending job, however long the queue is (round 3, SCX-02)', async () => {
     /** Adds rows waiting for validation, older than any upload of this test. */
     const queue = (count: number): Promise<void> =>
-      withOrg(t.pool, org.orgId, async (tx) => {
+      withOrg(t.testSql('adds media rows waiting for validation'), org.orgId, async (tx) => {
         await tx.query(
           `INSERT INTO media (org_id, kind, status, original_name, created_at)
            SELECT app_org_id(), 'image', 'processing', 'queued', now() - interval '1 hour'
@@ -509,7 +509,9 @@ describe('upload limits and validation results', () => {
       );
     } finally {
       // Fail the queued rows (and the upload), then let the sweep clear the old files.
-      await settleStrayMediaJobs(t.pool);
+      await settleStrayMediaJobs(
+        t.testSql('fails media jobs left in processing, test housekeeping'),
+      );
       await t.ctx.media.sweep();
     }
     expect(await listDir(inbox)).toEqual([]);

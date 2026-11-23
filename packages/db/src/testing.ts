@@ -4,6 +4,18 @@
 import type { Pool } from './pool.ts';
 import { withoutOrg, type Tx } from './tx.ts';
 
+// The audit-debt guard of the integration test database (adoption plan section 2.1 C, D3).
+export {
+  AUDIT_DEBT_SQLSTATE,
+  ensureAuditDebtGuard,
+  installAuditDebtGuard,
+  removeAuditDebtGuard,
+  unjudgedSql,
+  watchAuditDebt,
+  whileUnauditedAllowed,
+  type AuditDebtWatch,
+} from './audit-debt-guard.ts';
+
 /**
  * Runs `fn` in a transaction of its own with no organisation, as a route does before the
  * organisation is known. For the sec.* wrappers that change data and the audit writers: they

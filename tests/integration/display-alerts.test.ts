@@ -9,6 +9,7 @@
 import { randomBytes } from 'node:crypto';
 import { localWallClock, type AlertRecipientDto } from '@tinnox/contracts';
 import { alertRecipientByTokenHash, poolAsTx, sha256 } from '@tinnox/db';
+import { whileUnauditedAllowed } from '@tinnox/db/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   addAlertAddress,
@@ -22,6 +23,7 @@ import {
   createOrg,
   heartbeatBody,
   lastConfirmationToken,
+  migratorUrl,
   pairPlayer,
   PORTAL_ORIGIN,
   sendHeartbeat,
@@ -81,8 +83,22 @@ describe('e-mail alerts for screens', () => {
   async function check(): Promise<void> {
     expect((await checkAlerts(t)).failed).toBe(0);
   }
+  /**
+   * The check where it closes an episode without an e-mail, which writes no audit row. Undecided,
+   * so the audit-debt guard refuses it everywhere else: docs/portal-v2/stage-c-alerts.md section 9
+   * row 7 closes the episode silently by design, and D3 audits every successful change to tenant
+   * state. The step 16 report puts it to Michael; until he decides, only these calls let it pass.
+   */
+  async function checkClosingSilently(): Promise<void> {
+    await whileUnauditedAllowed(
+      migratorUrl(),
+      'display_alert',
+      'undecided (step 16 report): the alert check closes an episode without an e-mail and writes no audit row (stage-c-alerts.md section 9 row 7), which D3 does not exempt',
+      check,
+    );
+  }
   const openEpisodes = async (displayId: string) => {
-    const client = await appClient();
+    const client = await appClient('reads the open episodes of a screen, as the runtime role');
     try {
       await client.query('BEGIN');
       await client.query("SELECT set_config('app.org_id', $1, true)", [org.orgId]);
@@ -154,7 +170,7 @@ describe('e-mail alerts for screens', () => {
       await check();
       expect(mailFor('Alert repaired')).toHaveLength(1);
       await pairPlayer(t, owner, screen.id);
-      await check();
+      await checkClosingSilently();
     });
     expect(mailFor('Alert repaired')).toHaveLength(1);
     expect(await openEpisodes(screen.id)).toBe(0);
@@ -198,7 +214,7 @@ describe('e-mail alerts for screens', () => {
     await later(async () => {
       await check();
       await report(screen.id, screen.player);
-      await check();
+      await checkClosingSilently();
     });
     expect(mailFor('Alert no recovery').map((m) => m.subject)).toEqual([
       'Screen not reporting: Alert no recovery',
@@ -222,7 +238,7 @@ describe('e-mail alerts for screens', () => {
       });
       expect(off.status).toBe(200);
       expect(await off.json()).toMatchObject({ alertOfflineMinutes: null, alertBackOnline: false });
-      await check();
+      await checkClosingSilently();
       await report(screen.id, screen.player);
       await check();
     });
@@ -323,7 +339,9 @@ describe('e-mail alerts for screens', () => {
 
   it('skips while another runner holds the lock, and two runs at once send once', async () => {
     const screen = await reportingScreen('Alert race');
-    const holder = await appClient();
+    const holder = await appClient(
+      'holds the alert check’s advisory lock, as a second runner would',
+    );
     try {
       await holder.query("SELECT pg_advisory_lock(hashtextextended('tinnox.display_alerts', 0))");
       expect(await later(() => checkAlerts(t))).toMatchObject({ skipped: true, offline: 0 });
@@ -397,7 +415,7 @@ describe('e-mail alerts for screens', () => {
       send: async (message: (typeof t.sentMail)[number]) => {
         if (!terminated && made.some((m) => message.subject.endsWith(`: ${m.name}`))) {
           terminated = true;
-          const killer = await appClient();
+          const killer = await appClient('finds and ends the alert run’s lock connection');
           try {
             const { rows } = await killer.query<{ pid: number }>(
               `SELECT l.pid FROM pg_locks l,
@@ -426,7 +444,7 @@ describe('e-mail alerts for screens', () => {
       },
     };
     const countEpisodes = async (orgId: string, displayId: string) => {
-      const client = await appClient();
+      const client = await appClient('reads the open episodes of a screen, as the runtime role');
       try {
         await client.query('BEGIN');
         await client.query("SELECT set_config('app.org_id', $1, true)", [orgId]);
@@ -814,7 +832,9 @@ describe('alert addresses and the member who added them (D22)', () => {
     const pending = await pendingFrom('cut-off-committing@example.com');
     // What the people routes and the incident script do, left open: the member row is locked
     // and its cut-off set, and neither is committed yet.
-    const ending = await appClient();
+    const ending = await appClient(
+      'a member change left open under a confirmation, as the people routes make it (D22)',
+    );
     try {
       await ending.query('BEGIN');
       await ending.query("SELECT set_config('app.org_id', $1, true)", [org.orgId]);
@@ -836,7 +856,9 @@ describe('alert addresses and the member who added them (D22)', () => {
   it('D22: a member change that holds the adder’s row past lock_timeout answers 503 with retry-after, and the link works after it (SEC-3, BEH-3)', async () => {
     const pending = await pendingFrom('adder-row-held@example.com');
     // A sign out everywhere left open past tinnox_app's 5 s lock_timeout, then rolled back.
-    const ending = await appClient();
+    const ending = await appClient(
+      'a member change left open under a confirmation, as the people routes make it (D22)',
+    );
     let held: Response;
     let waitedMs: number;
     try {

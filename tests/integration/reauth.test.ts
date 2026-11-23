@@ -318,8 +318,10 @@ describe('signing in again after the sessions were ended', () => {
       const signingIn = callback(login, cookie);
       await held.reached;
       // "Sign out everywhere" for the member while the sign-in waits.
-      const revoking = withOrg(t.ctx.pool, org.orgId, (tx) =>
-        sessionRevokeMembership(tx, signedIn.membershipId),
+      const revoking = withOrg(
+        t.testSql('the test’s own sign-out of the member, racing a sign-in in flight'),
+        org.orgId,
+        (tx) => sessionRevokeMembership(tx, signedIn.membershipId),
       );
       // With the old order the revocation would now wait for the sign-in's session row lock.
       await Promise.race([revoking, new Promise((resolve) => setTimeout(resolve, 500))]);

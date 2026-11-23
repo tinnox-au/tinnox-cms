@@ -57,7 +57,7 @@ beforeAll(async () => {
   a = await createOrg(migrator, 'Before alerts A');
   b = await createOrg(migrator, 'Before alerts B');
   upgrade = await runMigrations({ connectionString: migratorUrl(), directory: MIGRATIONS });
-  pool = appPool(2);
+  pool = appPool('tries the upgraded schema as the runtime role', 2);
 });
 
 afterAll(async () => {

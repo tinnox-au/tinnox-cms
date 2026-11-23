@@ -31,7 +31,7 @@ let a: TestOrg;
 let b: TestOrg;
 
 beforeAll(async () => {
-  pool = appPool(6);
+  pool = appPool('tries the portal v2 tables and functions as the runtime role', 6);
   migrator = await migratorClient();
   a = await createOrg(migrator, 'Stage A one');
   b = await createOrg(migrator, 'Stage A two');
