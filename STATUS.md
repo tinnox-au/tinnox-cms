@@ -256,6 +256,9 @@ from: CMS-28
 ### CMS-31
 from: CMS-30
 
+**Notes**
+- 24 Nov: Steps: 23 cross-organisation conformance test and the reworded 403 rule; 23a response contracts; 24 unknown commit outcome; 25 classifyDbError and the constraint registry; 26 SQLSTATE lint; 27 settle and a retry helper; 28 403 constructors.
+
 ### CMS-32
 from: CMS-30
 
