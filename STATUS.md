@@ -26,7 +26,7 @@ None.
 | Id | Card | Agreed | PR | Since |
 |---|---|---|---|---|
 | CMS-3 | Apps that use outside data (weather and similar); needs the P2-06 threat review first | proposed | - | 17 Nov |
-| CMS-4 | Real-hardware check: scan the QR app with a phone and run the player on a low-power device | proposed | - | 17 Nov |
+| CMS-4 | Real-hardware check on Raspberry Pi 5 (8GB) under Linux: the browser player in Chromium kiosk mode on a monitor | proposed | - | 17 Nov |
 | CMS-6 | Screen-reader listening pass (VoiceOver or NVDA) on the portal before customers rely on it; start with the schedule editor | proposed | - | 17 Nov |
 | CMS-14 | Emergency messages and takeover (stage C): override what chosen screens show, then return them to their content | proposed | - | 19 Nov |
 | CMS-16 | Playback report (stage C): what each screen played and when, from player reports | proposed | - | 19 Nov |
@@ -97,6 +97,28 @@ Merged 17 Nov; CI green (lint, types, unit, component, integration 314, secret s
 
 **Evidence**
 merged to main; CI green; full e2e suite (132 tests) passed on the merged tree
+
+### CMS-4
+
+**Scope**
+- Only hardware test for now: Pi 5 8GB, official PSU, Active Cooler, 64GB microSD, Pi OS 64-bit, PC monitor.
+- Stands in for the CM5 player (DEC-20): same chip; no eMMC, temperature rating or LED controller.
+- The phone QR scan from the old title is out of scope.
+
+**Not in the code yet (by hand for the test)**
+- No Linux player package: no boot autostart, crash restart or screen-blank control. Set up Chromium kiosk by hand.
+- Player and API are loopback-only, http only on localhost: open http://localhost:5174 on the Pi via an SSH tunnel (4000, 5174).
+- Video is H.264 only, software-decoded on the Pi 5.
+
+**Checks**
+- Pair; image, PDF and H.264 video play full screen in order.
+- Smoothness at 768x448, 1376x774, 1920x1080, 1080p30 and 1080p60: dropped frames, CPU, temperature; 1 h then 24 h.
+- Portrait 1080x1920 and a strip canvas with a content rectangle.
+- Publish while playing: switches at an item boundary.
+- Network unplugged: plays from cache; portal shows stale, then recovers.
+- Power cut: resumes from cache without re-pairing; time to playback; clock with no RTC battery.
+- Storage persist answer; an update too big is refused, old content kept.
+- Record pass, fail or not run, with photos and OS, Chromium and build versions.
 
 ### CMS-5
 
