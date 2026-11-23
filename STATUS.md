@@ -3,7 +3,7 @@ contract: status/v2
 repo: tinnox-au/tinnox-cms
 initiative: TINNOX CMS
 key: CMS
-next_id: 35
+next_id: 36
 phase: Not written yet: one sentence on what this project is and where it stands
 gate: -
 seeded: 17 Nov 2026 by status init
@@ -40,6 +40,7 @@ None.
 | CMS-32 | Poteto pyramid refactor, group D: verification (steps 29 to 37 of the adoption plan); Michael starts it | proposed | - | 24 Nov |
 | CMS-33 | Poteto pyramid refactor, group E: frontend (steps 38 to 44a of the adoption plan); Michael starts it | proposed | - | 24 Nov |
 | CMS-34 | Poteto pyramid refactor, group F: prose (steps 45 to 48 of the adoption plan); Michael starts it | proposed | - | 24 Nov |
+| CMS-35 | Provider review for alert e-mail: name the reviewed SMTP host; production sends no alert e-mail until then (poteto D23) | proposed | - | 24 Nov |
 
 ## To do
 
@@ -263,3 +264,6 @@ from: CMS-30
 
 ### CMS-34
 from: CMS-30
+
+### CMS-35
+from: CMS-27
