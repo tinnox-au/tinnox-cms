@@ -292,3 +292,4 @@ from: CMS-30
 
 **Notes**
 - 24 Nov: Until decided, four tests in tests/integration/display-alerts.test.ts and pairing-and-credentials.test.ts pass these writes through whileUnauditedAllowed, marked undecided. Auditing the alert close needs a new audit action and portal wording.
+- 24 Nov: Also for Michael: step 16 added an audit row for a refused pairing completion (pairing.complete, denied), which closes the residual in threat-model T3. Say if you would rather not have it.
