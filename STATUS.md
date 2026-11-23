@@ -289,3 +289,6 @@ from: CMS-27
 
 ### CMS-36
 from: CMS-30
+
+**Notes**
+- 24 Nov: Until decided, four tests in tests/integration/display-alerts.test.ts and pairing-and-credentials.test.ts pass these writes through whileUnauditedAllowed, marked undecided. Auditing the alert close needs a new audit action and portal wording.
