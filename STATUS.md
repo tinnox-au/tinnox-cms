@@ -43,13 +43,13 @@ None.
 
 ## In progress
 
-| Id | Card | Agreed | PR | Since |
-|---|---|---|---|---|
-| CMS-28 | Poteto pyramid refactor, rest of group A: steps 3, 4, 6, 6a, 11, 12 and 12a to 12c of the adoption plan | Michael 22 Nov | - | 22 Nov |
+None.
 
 ## In review
 
-None.
+| Id | Card | Agreed | PR | Since |
+|---|---|---|---|---|
+| CMS-28 | Poteto pyramid refactor, rest of group A: steps 3, 4, 6, 6a, 11, 12 and 12a to 12c of the adoption plan | Michael 22 Nov | #37 | 23 Nov |
 
 ## Done, last 14 days
 
