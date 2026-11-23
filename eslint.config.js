@@ -898,13 +898,11 @@ export const LEGACY_TRANSACTION_FILES = [
   // withOrgDecisionAllowed with auditScoped in the callback.
   'apps/api/src/routes/alert-recipients.ts',
   'apps/api/src/routes/apps.ts',
-  'apps/api/src/routes/audit.ts',
   'apps/api/src/routes/displays.ts',
   'apps/api/src/routes/folders.ts',
   'apps/api/src/routes/layouts.ts',
   'apps/api/src/routes/media.ts',
   'apps/api/src/routes/members.ts',
-  'apps/api/src/routes/overview.ts',
   'apps/api/src/routes/playlists.ts',
   'apps/api/src/routes/push.ts',
   'apps/api/src/routes/schedules.ts',

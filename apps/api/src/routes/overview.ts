@@ -10,7 +10,7 @@ import {
   type DeliverySummary,
   type OverviewResponse,
 } from '@tinnox/contracts';
-import { withOrg } from '@tinnox/db';
+import { readOrg } from '@tinnox/db';
 import type { FastifyInstance } from 'fastify';
 import { operatorOf } from '../auth/session.ts';
 import type { AppContext } from '../context.ts';
@@ -24,7 +24,7 @@ export function registerOverviewRoutes(app: FastifyInstance, ctx: AppContext): v
 
   app.get(ROUTES.overview, async (request): Promise<OverviewResponse> => {
     const session = operatorOf(request);
-    return withOrg(pool, session.orgId, async (tx) => {
+    return readOrg(pool, session.orgId, async (tx) => {
       // The same builder as the status routes, so the counters and the list agree.
       const statuses = await loadStatusViews(tx, ctx, null);
       const bySummary = Object.fromEntries(
