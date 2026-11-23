@@ -431,30 +431,47 @@ describe('provision-member fulfil', () => {
     });
     const quinn = account('quinn@example.com');
     // The other run commits on its own connection between this run's definer read and its insert.
+    // This run only waits at its insert: the other run's transaction is opened here, on the
+    // test's own path, as a second process would, never inside this run's transaction (U-3).
     const other = new pg.Pool({ connectionString: process.env['TEST_DATABASE_MIGRATOR_URL'] });
+    let atInsert: () => void = () => undefined;
+    let goOn: () => void = () => undefined;
+    const reachedInsert = new Promise<void>((resolve) => {
+      atInsert = resolve;
+    });
+    const otherRunDone = new Promise<void>((resolve) => {
+      goOn = resolve;
+    });
     let raced = false;
     const racing = intercepted(pool, async (text) => {
       if (raced || !/INSERT INTO membership/.test(text)) return;
       raced = true;
-      await withOrg(other, elsewhere.orgId, (tx) =>
-        tx.query(
-          "INSERT INTO membership (org_id, oidc_sub, role) VALUES (app_org_id(), $1, 'viewer')",
-          [quinn.subject],
-        ),
-      );
+      atInsert();
+      await otherRunDone;
     });
     const before = await members(org.orgId);
     try {
-      expect(
-        await refusal(() =>
-          fulfil(racing, directory({ quinn }), {
-            inviteId: id,
-            username: 'quinn',
-            confirmedWith: 'T-4',
-            executedBy: STAFF,
-          }),
-        ),
-      ).toMatch(/already has a membership, removed or not/);
+      const outcome = refusal(() =>
+        fulfil(racing, directory({ quinn }), {
+          inviteId: id,
+          username: 'quinn',
+          confirmedWith: 'T-4',
+          executedBy: STAFF,
+        }),
+      );
+      // A run that ends before its insert settles first, and fails the assertions below.
+      await Promise.race([reachedInsert, outcome]);
+      try {
+        await withOrg(other, elsewhere.orgId, (tx) =>
+          tx.query(
+            "INSERT INTO membership (org_id, oidc_sub, role) VALUES (app_org_id(), $1, 'viewer')",
+            [quinn.subject],
+          ),
+        );
+      } finally {
+        goOn();
+      }
+      expect(await outcome).toMatch(/already has a membership, removed or not/);
     } finally {
       await other.end();
     }

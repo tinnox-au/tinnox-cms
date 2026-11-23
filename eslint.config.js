@@ -5,6 +5,18 @@ import reactHooks from 'eslint-plugin-react-hooks';
 import globals from 'globals';
 import tseslint from 'typescript-eslint';
 
+// D16: the repository's own rules (scripts/eslint-rules/) are TypeScript, which Node runs by
+// stripping the types: by default from 22.18, the floor of `engines` in package.json. `engines`
+// is advice only, so this check is what holds the floor. It comes before the plugin is loaded,
+// and the plugin is loaded with import(), because a static import is resolved before any
+// statement of this file runs and would fail first, with an error that names no remedy.
+if (!process.features.typescript) {
+  throw new Error(
+    `eslint.config.js loads the lint rules in scripts/eslint-rules/*.ts, and this Node (${process.version}) does not run TypeScript files: type stripping is on by default from Node 22.18 and off here. Use the Node that .nvmrc names (nvm use; package.json engines says >=22.18.0), take --no-experimental-strip-types out of NODE_OPTIONS, and point an editor's ESLint extension at that Node (docs/dev-handoff.md).`,
+  );
+}
+const { default: tinnox } = await import('./scripts/eslint-rules/index.ts');
+
 // A later config block replaces an earlier block's options for the same rule, so a file group
 // that needs selectors from two lists composes one array from the named lists below.
 // The *-lint.test.ts files in scripts/lib run each list against fixture text (the step 10 bans:
@@ -1222,6 +1234,17 @@ export default tseslint.config(
     files: both(BROWSER_FILES, REAL_SERVICE_TEST_FILES),
     rules: {
       'no-restricted-properties': ['error', ...BROWSER_RESTRICTED_PROPERTIES, ...NO_MODULE_MOCK],
+    },
+  },
+  {
+    // U-3: no transaction inside another's callback, or inside a function that takes a
+    // transaction handle (scripts/eslint-rules/no-nested-transaction.ts). Every code file, tests
+    // included: run() in packages/db/src/tx.ts refuses the same thing at run time. A rule of its
+    // own, so no other block replaces its options.
+    files: [CODE_FILES],
+    plugins: { tinnox },
+    rules: {
+      'tinnox/no-nested-transaction': 'error',
     },
   },
   {

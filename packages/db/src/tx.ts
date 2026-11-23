@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import pg from 'pg';
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from './pool.ts';
 
@@ -14,10 +15,51 @@ export interface Tx {
   ): Promise<QueryResult<R>>;
 }
 
-function wrap(client: PoolClient): Tx {
+/** One transaction of run(): `open` from BEGIN until its callback returns or throws. */
+interface Transaction {
+  open: boolean;
+}
+
+/**
+ * The transaction whose callback is running on this asynchronous path, if any (U-3). The store
+ * is entered around the callback only, and work the callback started keeps it after the
+ * callback has ended, so `open` is what says whether the transaction is still there.
+ */
+const current = new AsyncLocalStorage<Transaction>();
+
+/**
+ * U-3: a second transaction takes another pooled connection, so it commits or rolls back on its
+ * own (an audit row could commit while its change rolls back), it does not see the outer
+ * transaction's rows, and the outer holds a connection while it waits for the inner. Checked
+ * before a connection is taken. tinnox/no-nested-transaction reports the cases lint can read
+ * (scripts/eslint-rules/no-nested-transaction.ts).
+ */
+function refuseNested(opener: string): void {
+  if (current.getStore()?.open === true) {
+    throw new Error(
+      `${opener} was called while a transaction is open on the same asynchronous path (inside the callback of withOrg, withoutOrg or withResolvedOrg, or in a helper it called). This opens a second transaction on another connection that commits independently. Pass the outer tx to the helper.`,
+    );
+  }
+}
+
+function wrap(client: PoolClient, transaction: Transaction): Tx {
   return {
-    query: <R extends QueryResultRow = QueryResultRow>(text: string, values?: readonly unknown[]) =>
-      client.query<R>(text, values === undefined ? undefined : [...values]),
+    query: <R extends QueryResultRow = QueryResultRow>(
+      text: string,
+      values?: readonly unknown[],
+    ) => {
+      // U-2: the connection of an ended transaction is on its way back to the pool, or already
+      // serves another request. A statement sent now would run with no transaction and no
+      // organisation, or inside whatever transaction the next user of the connection opened.
+      if (!transaction.open) {
+        return Promise.reject<QueryResult<R>>(
+          new Error(
+            'a transaction handle was used after its transaction ended: the callback given to withOrg, withoutOrg or withResolvedOrg had already returned or thrown, so the statement was not sent. Await every query inside the callback, and do not keep tx, or pass it to work that outlives the callback.',
+          ),
+        );
+      }
+      return client.query<R>(text, values === undefined ? undefined : [...values]);
+    },
   };
 }
 
@@ -54,11 +96,14 @@ function commitRefused(error: unknown): boolean {
 }
 
 async function run<T>(
+  opener: string,
   pool: Pool,
   begin: (client: PoolClient) => Promise<void>,
   fn: (tx: Tx) => Promise<T>,
 ): Promise<T> {
+  refuseNested(opener);
   const client = await pool.connect();
+  const transaction: Transaction = { open: true };
   let broken: Error | undefined;
   // A connection that is lost while checked out emits 'error'; the pool listens only while a
   // connection is idle, and an 'error' nobody listens to would end the process. The queries
@@ -70,7 +115,14 @@ async function run<T>(
   try {
     await client.query('BEGIN');
     await begin(client);
-    const result = await fn(wrap(client));
+    let result: T;
+    try {
+      result = await current.run(transaction, () => fn(wrap(client, transaction)));
+    } finally {
+      // The handle closes before COMMIT or ROLLBACK is sent (U-2), and work the callback left
+      // running no longer counts as inside this transaction (U-3).
+      transaction.open = false;
+    }
     try {
       await client.query('COMMIT');
     } catch (error) {
@@ -111,6 +163,7 @@ export async function withOrg<T>(
     throw new Error('withOrg requires a lower-case UUID organisation id');
   }
   return run(
+    'withOrg',
     pool,
     async (client) => {
       await client.query("SELECT set_config('app.org_id', $1, true)", [orgId]);
@@ -124,7 +177,7 @@ export async function withOrg<T>(
  * rows here. Use only for sec.* calls that happen before the organisation is known.
  */
 export async function withoutOrg<T>(pool: Pool, fn: (tx: Tx) => Promise<T>): Promise<T> {
-  return run(pool, async () => undefined, fn);
+  return run('withoutOrg', pool, async () => undefined, fn);
 }
 
 /**
@@ -141,6 +194,7 @@ export async function withResolvedOrg<T>(
   fn: (tx: Tx, enterOrg: (orgId: string) => Promise<void>) => Promise<T>,
 ): Promise<T> {
   return run(
+    'withResolvedOrg',
     pool,
     async () => undefined,
     (tx) =>
@@ -161,10 +215,19 @@ export interface Queryable {
   ): Promise<QueryResult<R>>;
 }
 
-/** Adapts a pool for single-statement sec.* calls (each statement is its own transaction). */
+/**
+ * Adapts a pool for single-statement sec.* calls (each statement is its own transaction). So a
+ * statement sent while a transaction is open on the same asynchronous path is refused, like
+ * any other second transaction (U-3).
+ */
 export function poolAsTx(pool: Pool): Tx {
   return {
-    query: <R extends QueryResultRow = QueryResultRow>(text: string, values?: readonly unknown[]) =>
-      pool.query<R>(text, values === undefined ? undefined : [...values]),
+    query: async <R extends QueryResultRow = QueryResultRow>(
+      text: string,
+      values?: readonly unknown[],
+    ) => {
+      refuseNested('poolAsTx(pool).query');
+      return pool.query<R>(text, values === undefined ? undefined : [...values]);
+    },
   };
 }

@@ -5,7 +5,7 @@
   "description": "TINNOX CMS prototype M0: browser-first digital signage content management (internal engineering prototype)",
   "type": "module",
   "engines": {
-    "node": ">=22.13.0",
+    "node": ">=22.18.0",
     "npm": ">=10"
   },
   "workspaces": [
@@ -38,7 +38,7 @@
     "check:docs": "tsx scripts/check-docs.ts",
     "check:migrations": "tsx scripts/check-migrations.ts",
     "check:test-results": "tsx scripts/check-test-results.ts",
-    "scan:secrets": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/scan-secrets.mjs",
+    "scan:secrets": "node --disable-warning=ExperimentalWarning scripts/scan-secrets.mjs",
     "reset": "node scripts/reset-dev.mjs",
     "backup:verify": "bash scripts/backup-restore-check.sh",
     "verify:oidc": "node scripts/verify-oidc-login.mjs"
@@ -49,6 +49,7 @@
     "@tinnox/db": "*",
     "@tinnox/domain": "*",
     "@types/node": "22.20.5",
+    "@typescript-eslint/utils": "8.73.0",
     "@vitest/browser-playwright": "5.1.0",
     "concurrently": "10.0.7",
     "eslint": "10.15.0",

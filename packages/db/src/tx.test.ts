@@ -6,18 +6,30 @@ import pg from 'pg';
 import { describe, expect, it } from 'vitest';
 import {
   CommitOutcomeUnknownError,
+  poolAsTx,
   withOrg,
   withoutOrg,
   withResolvedOrg,
   type Pool,
+  type Tx,
 } from './index.ts';
 
 const ORG = '00000000-0000-4000-8000-000000000001';
 
-/** A pool with one connection that records its statements and how it was released. */
-function fakePool(failing: readonly string[] = [], failure?: (text: string) => Error) {
+/**
+ * A pool with one connection that records its statements and how it was released, how often a
+ * connection was taken, and the statements sent to the pool itself.
+ */
+function fakePool(
+  failing: readonly string[] = [],
+  failure?: (text: string) => Error,
+  /** COMMIT is answered only once this resolves. */
+  commitWaitsFor: Promise<void> = Promise.resolve(),
+) {
   const statements: string[] = [];
   const released: (Error | undefined)[] = [];
+  const taken: number[] = [];
+  const onPool: string[] = [];
   const listeners = new Set<(error: Error) => void>();
   const client = {
     on: (_event: 'error', listener: (error: Error) => void) => listeners.add(listener),
@@ -25,20 +37,32 @@ function fakePool(failing: readonly string[] = [], failure?: (text: string) => E
       listeners.delete(listener),
     query: (text: string) => {
       statements.push(text);
-      return failing.includes(text)
-        ? Promise.reject(failure?.(text) ?? new Error(`${text} failed`))
+      if (failing.includes(text)) {
+        return Promise.reject(failure?.(text) ?? new Error(`${text} failed`));
+      }
+      return text === 'COMMIT'
+        ? commitWaitsFor.then(() => ({ rows: [] }))
         : Promise.resolve({ rows: [] });
     },
     release: (error?: Error) => {
       released.push(error);
     },
   };
-  const pool = { connect: () => Promise.resolve(client) } as unknown as Pool;
+  const pool = {
+    connect: () => {
+      taken.push(statements.length);
+      return Promise.resolve(client);
+    },
+    query: (text: string) => {
+      onPool.push(text);
+      return Promise.resolve({ rows: [] });
+    },
+  } as unknown as Pool;
   /** What the pg client does when the server closes the connection. */
   const lose = (): void => {
     for (const listener of listeners) listener(new Error('Connection terminated unexpectedly'));
   };
-  return { pool, statements, released, listeners, lose };
+  return { pool, statements, released, listeners, lose, taken, onPool };
 }
 
 describe('pooled connection after a transaction', () => {
@@ -168,5 +192,211 @@ describe('a COMMIT that does not confirm (review round 3, SCX-03)', () => {
     expect(error).not.toBeInstanceOf(CommitOutcomeUnknownError);
     expect((error as Error).message).toBe('boom');
     expect(statements).toEqual(['BEGIN', 'ROLLBACK']);
+  });
+});
+
+const HANDLE_CLOSED =
+  'a transaction handle was used after its transaction ended: the callback given to withOrg, withoutOrg or withResolvedOrg had already returned or thrown, so the statement was not sent. Await every query inside the callback, and do not keep tx, or pass it to work that outlives the callback.';
+
+describe('a transaction handle after its transaction ended (U-2)', () => {
+  it('refuses a statement on a handle kept after the commit, and sends nothing', async () => {
+    for (const run of [
+      (pool: Pool, keep: (tx: Tx) => void) =>
+        withOrg(pool, ORG, async (tx) => {
+          keep(tx);
+        }),
+      (pool: Pool, keep: (tx: Tx) => void) =>
+        withoutOrg(pool, async (tx) => {
+          keep(tx);
+        }),
+      (pool: Pool, keep: (tx: Tx) => void) =>
+        withResolvedOrg(pool, async (tx) => {
+          keep(tx);
+        }),
+    ]) {
+      const { pool, statements } = fakePool();
+      const kept: Tx[] = [];
+      await run(pool, (tx) => kept.push(tx));
+      const sent = [...statements];
+      await expect(kept[0]?.query('SELECT 1')).rejects.toThrow(HANDLE_CLOSED);
+      expect(statements).toEqual(sent);
+    }
+  });
+
+  it('refuses it after a rollback too', async () => {
+    const { pool, statements } = fakePool();
+    const kept: Tx[] = [];
+    await expect(
+      withoutOrg(pool, async (tx) => {
+        kept.push(tx);
+        throw new Error('boom');
+      }),
+    ).rejects.toThrow('boom');
+    await expect(kept[0]?.query('SELECT 1')).rejects.toThrow(HANDLE_CLOSED);
+    expect(statements).toEqual(['BEGIN', 'ROLLBACK']);
+  });
+
+  it('refuses a statement from work the callback started and did not await, even before COMMIT has answered', async () => {
+    let answerCommit: () => void = () => undefined;
+    const answered = new Promise<void>((resolve) => {
+      answerCommit = resolve;
+    });
+    const { pool, statements } = fakePool([], undefined, answered);
+    let started: (work: Promise<unknown>) => void = () => undefined;
+    const late = new Promise<unknown>((resolve) => {
+      started = resolve;
+    });
+    const transaction = withOrg(pool, ORG, async (tx) => {
+      // Not awaited: the first statement is sent inside the transaction, the second after the
+      // callback has returned (a timer away), while COMMIT is still waiting for its answer.
+      started(
+        tx
+          .query('FIRST')
+          .then(() => new Promise((resolve) => setTimeout(resolve, 0)))
+          .then(() => tx.query('SECOND')),
+      );
+    });
+    await expect(late).rejects.toThrow(HANDLE_CLOSED);
+    expect(statements.slice(-2)).toEqual(['FIRST', 'COMMIT']);
+    answerCommit();
+    await transaction;
+    expect(statements).not.toContain('SECOND');
+  });
+
+  it('refuses enterOrg after the transaction ended', async () => {
+    const { pool, statements } = fakePool();
+    const kept: ((orgId: string) => Promise<void>)[] = [];
+    await withResolvedOrg(pool, async (_tx, enterOrg) => {
+      kept.push(enterOrg);
+    });
+    await expect(kept[0]?.(ORG)).rejects.toThrow(HANDLE_CLOSED);
+    expect(statements).toEqual(['BEGIN', 'COMMIT']);
+  });
+
+  it('gives each transaction its own handle: a new one works while an old one stays closed', async () => {
+    const { pool, statements } = fakePool();
+    const kept: Tx[] = [];
+    await withoutOrg(pool, async (tx) => {
+      kept.push(tx);
+    });
+    await withoutOrg(pool, async (tx) => {
+      await tx.query('SELECT 2');
+      await expect(kept[0]?.query('SELECT 1')).rejects.toThrow(HANDLE_CLOSED);
+    });
+    expect(statements).toEqual(['BEGIN', 'COMMIT', 'BEGIN', 'SELECT 2', 'COMMIT']);
+  });
+});
+
+/** The section 3.4 sentence, after the name of the function that was refused. */
+const nested = (opener: string): string =>
+  `${opener} was called while a transaction is open on the same asynchronous path (inside the callback of withOrg, withoutOrg or withResolvedOrg, or in a helper it called). This opens a second transaction on another connection that commits independently. Pass the outer tx to the helper.`;
+
+// Every nesting below goes through a function defined outside the callback: lint reports the
+// form it can read (tinnox/no-nested-transaction), and these cases are the rest, which only
+// run() sees.
+describe('a transaction inside another (U-3)', () => {
+  const inItsOwnTransaction = (pool: Pool, text: string): Promise<unknown> =>
+    withoutOrg(pool, (tx) => tx.query(text));
+  const onThePool = (pool: Pool, text: string): Promise<unknown> => poolAsTx(pool).query(text);
+  const openers = [
+    ['withOrg', (pool: Pool, fn: () => Promise<unknown>) => withOrg(pool, ORG, fn)],
+    ['withoutOrg', (pool: Pool, fn: () => Promise<unknown>) => withoutOrg(pool, fn)],
+    ['withResolvedOrg', (pool: Pool, fn: () => Promise<unknown>) => withResolvedOrg(pool, fn)],
+  ] as const;
+
+  it('refuses every opener inside every other, before a second connection is taken, and rolls the outer back', async () => {
+    for (const [, outer] of openers) {
+      for (const [name, inner] of openers) {
+        const { pool, statements, released, taken } = fakePool();
+        await expect(
+          outer(pool, () => inner(pool, () => Promise.resolve('inner'))),
+        ).rejects.toThrow(nested(name));
+        expect(taken).toHaveLength(1);
+        expect(statements.at(-1)).toBe('ROLLBACK');
+        expect(statements).not.toContain('COMMIT');
+        expect(released).toEqual([undefined]);
+      }
+    }
+  });
+
+  it('refuses it in a helper the callback calls, where no lint rule can see it', async () => {
+    const { pool, taken } = fakePool();
+    const helper = async (): Promise<void> => {
+      await Promise.resolve();
+      await withOrg(pool, ORG, () => Promise.resolve());
+    };
+    await expect(withOrg(pool, ORG, () => helper())).rejects.toThrow(nested('withOrg'));
+    expect(taken).toHaveLength(1);
+  });
+
+  it('refuses a statement on the pool through poolAsTx, which is a transaction of its own', async () => {
+    const { pool, onPool } = fakePool();
+    await expect(
+      withOrg(pool, ORG, () => onThePool(pool, 'SELECT sec.something()')),
+    ).rejects.toThrow(nested('poolAsTx(pool).query'));
+    expect(onPool).toEqual([]);
+    // Outside a transaction it is sent as before.
+    await onThePool(pool, 'SELECT sec.something()');
+    expect(onPool).toEqual(['SELECT sec.something()']);
+  });
+
+  it('allows one transaction after another, and transactions side by side', async () => {
+    const { pool, statements } = fakePool();
+    await withOrg(pool, ORG, () => Promise.resolve());
+    await withoutOrg(pool, () => Promise.resolve());
+    await Promise.all([
+      withOrg(pool, ORG, () => Promise.resolve()),
+      withResolvedOrg(pool, () => Promise.resolve()),
+    ]);
+    expect(statements.filter((text) => text === 'COMMIT')).toHaveLength(4);
+  });
+
+  it('allows a second transaction after the first rolled back, as a recorded refusal needs (DEC-35)', async () => {
+    const { pool, statements } = fakePool();
+    try {
+      await withOrg(pool, ORG, () => Promise.reject(new Error('refused')));
+    } catch {
+      await withOrg(pool, ORG, (tx) => tx.query('INSERT audit'));
+    }
+    const SET_ORG = "SELECT set_config('app.org_id', $1, true)";
+    expect(statements).toEqual([
+      'BEGIN',
+      SET_ORG,
+      'ROLLBACK',
+      'BEGIN',
+      SET_ORG,
+      'INSERT audit',
+      'COMMIT',
+    ]);
+  });
+
+  it('does not count work that outlives the callback: once the outer has ended, it may open its own', async () => {
+    const { pool, statements } = fakePool();
+    let later: Promise<unknown> = Promise.resolve();
+    let release: () => void = () => undefined;
+    const ended = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await withOrg(pool, ORG, async () => {
+      // Started inside the callback, so it carries the callback's context; it runs after.
+      later = ended.then(() => inItsOwnTransaction(pool, 'LATER'));
+    });
+    release();
+    await later;
+    expect(statements.at(-2)).toBe('LATER');
+  });
+
+  it('leaves the path usable after a refusal the callback caught', async () => {
+    const { pool, statements } = fakePool();
+    await withOrg(pool, ORG, async (tx) => {
+      await expect(inItsOwnTransaction(pool, 'INNER')).rejects.toThrow(nested('withoutOrg'));
+      await tx.query('STILL OPEN');
+    });
+    expect(statements).toEqual([
+      'BEGIN',
+      "SELECT set_config('app.org_id', $1, true)",
+      'STILL OPEN',
+      'COMMIT',
+    ]);
   });
 });
