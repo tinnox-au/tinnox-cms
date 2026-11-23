@@ -1,24 +1,27 @@
 /**
- * Which handle each sec.* wrapper takes, and the two functions that write outside a transaction
- * by name: `auditStandalone` (D2) and `sessionRevokeUnaudited` (the CX-01 residual). The type
- * cases are checked by `npm run typecheck`, which reads this file: an unused @ts-expect-error is
- * an error there.
+ * Which handle each sec.* wrapper takes, which of them name an organisation (step 18), and the
+ * two functions that write outside a transaction by name: `auditStandalone` (D2) and
+ * `sessionRevokeUnaudited` (the CX-01 residual). The type cases are checked by
+ * `npm run typecheck`, which reads this file: an unused @ts-expect-error is an error there.
  */
 import type { AuditAction } from '@tinnox/contracts';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
   auditScoped,
   auditStandalone,
+  poolAsTx,
   sessionRevokeUnaudited,
   withoutOrg,
+  type AnyScope,
   type AuditInput,
-  type Autocommit,
+  type OrgId,
+  type OrgTx,
   type Pool,
+  type PreOrgTx,
   type StandaloneAuditEvent,
-  type Tx,
 } from './index.ts';
-import type * as members from './members.ts';
-import type * as sec from './sec.ts';
+import * as members from './members.ts';
+import * as sec from './sec.ts';
 
 interface Sent {
   readonly text: string;
@@ -57,6 +60,17 @@ const refusal = {
   result: 'denied',
   detail: { reason: 'unknown_or_expired_state' },
 } as const satisfies StandaloneAuditEvent;
+
+/** A scoped event, for the type cases that only need one. */
+const refusalInOrg = {
+  actorType: 'operator',
+  actorId: 'a-member-id',
+  action: 'security.csrf_rejected',
+  objectType: null,
+  objectId: null,
+  result: 'denied',
+  detail: { reason: 'bad_token', method: 'POST', route: null },
+} as const satisfies AuditInput;
 
 // The refusal names the function that was called and what to call on the outer tx instead
 // (plan section 3.4): neither function takes a tx, so "pass the outer tx" would not help.
@@ -161,7 +175,7 @@ describe('AuditInput (AG-3.3, AG-3.4, D19)', () => {
 
   it('refuses an unknown action, an undeclared detail field, another object kind, a wrong actor and a missing field, at compile time', () => {
     // Never called: these lines are for the type checker.
-    const cases = async (tx: Tx): Promise<void> => {
+    const cases = async (tx: OrgTx): Promise<void> => {
       const event = {
         actorType: 'operator',
         actorId: 'a-member-id',
@@ -190,7 +204,7 @@ describe('AuditInput (AG-3.3, AG-3.4, D19)', () => {
 
   it('needs the id of an operator or player actor and of a named object, and refuses an id the system or nobody would have (AG-3.3)', () => {
     // Never called: these lines are for the type checker.
-    const cases = async (tx: Tx): Promise<void> => {
+    const cases = async (tx: OrgTx): Promise<void> => {
       const event = {
         actorType: 'operator',
         actorId: 'a-member-id',
@@ -279,28 +293,34 @@ type Taking<M, H> = {
 }[keyof M];
 type Wrappers = typeof sec & typeof members;
 
-describe('the handle each wrapper takes (D2, CX-01)', () => {
-  it('a wrapper that changes data, or locks until commit, and both audit writers take a Tx', () => {
-    expectTypeOf<Taking<Wrappers, Tx>>().toEqualTypeOf<
+describe('the handle each wrapper takes (D2, CX-01, AG-2.1, AG-2.2)', () => {
+  // A new wrapper lands in one of the three lists below, by what it needs.
+  it('what needs the organisation takes an OrgTx: the scoped audit writer, the claim, the cancel, the member revocation and the member SQL', () => {
+    expectTypeOf<Taking<Wrappers, OrgTx>>().toEqualTypeOf<
       | 'auditScoped'
-      | 'auditUnscoped'
-      | 'sessionCreate'
-      | 'sessionRevoke'
       | 'sessionRevokeMembership'
-      | 'pairingCreate'
-      | 'pairingPoll'
       | 'pairingClaim'
       | 'pairingCancelClaims'
-      | 'pairingComplete'
       | 'lockOrgMembership'
       | 'membershipForCheck'
     >();
   });
 
-  // A new wrapper lands in one of these two lists. It belongs in this one only when it reads,
-  // or when its one statement is complete by itself and nothing is audited with it (D2, D3).
-  it('lookups, the login state and the purges take either handle', () => {
-    expectTypeOf<Taking<Wrappers, Autocommit>>().toEqualTypeOf<
+  it('what changes data before the organisation is known, and the unscoped audit writer, take a PreOrgTx', () => {
+    expectTypeOf<Taking<Wrappers, PreOrgTx>>().toEqualTypeOf<
+      | 'auditUnscoped'
+      | 'sessionCreate'
+      | 'sessionRevoke'
+      | 'pairingCreate'
+      | 'pairingPoll'
+      | 'pairingComplete'
+    >();
+  });
+
+  // It belongs in this one only when it reads, or when its one statement is complete by itself
+  // and nothing is audited with it (D2, D3).
+  it('lookups, the login state and the purges take any handle', () => {
+    expectTypeOf<Taking<Wrappers, AnyScope>>().toEqualTypeOf<
       | 'membershipByOidcSub'
       | 'loginStatePut'
       | 'loginStateTake'
@@ -320,5 +340,88 @@ describe('the handle each wrapper takes (D2, CX-01)', () => {
     expectTypeOf<Taking<Wrappers, Pool>>().toEqualTypeOf<
       'auditStandalone' | 'sessionRevokeUnaudited'
     >();
+  });
+
+  it('a wrapper refuses the handle of the other scope', () => {
+    // Never called: these lines are for the type checker.
+    const cases = async (org: OrgTx, pre: PreOrgTx): Promise<void> => {
+      const claim = {
+        code: 'ABCD2345',
+        displayId: 'a-display-id',
+        membershipId: 'a-member-id',
+        maxFailures: 5,
+        windowSeconds: 600,
+      };
+      await sec.pairingClaim(org, claim);
+      // @ts-expect-error a PreOrgTx is not accepted where an OrgTx is needed: no organisation yet
+      await sec.pairingClaim(pre, claim);
+      // @ts-expect-error nor by the scoped audit writer, whose row takes the organisation of the tx
+      await auditScoped(pre, refusalInOrg);
+      // @ts-expect-error nor by the member revocation
+      await sec.sessionRevokeMembership(pre, 'a-member-id');
+      // @ts-expect-error nor by the membership lock
+      await members.lockOrgMembership(pre);
+
+      await sec.auditUnscoped(pre, refusal);
+      // @ts-expect-error an event with no organisation is not written where one is set
+      await sec.auditUnscoped(org, refusal);
+
+      // A lookup takes either.
+      await sec.deviceByTokenHash(org, Buffer.alloc(32));
+      await sec.deviceByTokenHash(pre, Buffer.alloc(32));
+    };
+    expect(cases).toBeTypeOf('function');
+  });
+
+  it('the handle of poolAsTx serves a lookup, and no wrapper that changes data (D2)', () => {
+    // Never called: these lines are for the type checker.
+    const cases = async (pool: Pool): Promise<void> => {
+      const autocommit = poolAsTx(pool);
+      await sec.deviceByTokenHash(autocommit, Buffer.alloc(32));
+      // @ts-expect-error a change before the organisation is known takes a PreOrgTx
+      await sec.sessionRevoke(autocommit, Buffer.alloc(32));
+      // @ts-expect-error and one that needs the organisation takes an OrgTx
+      await sec.sessionRevokeMembership(autocommit, 'a-member-id');
+    };
+    expect(cases).toBeTypeOf('function');
+  });
+});
+
+// AG-2.3 (adoption plan step 18, D25): the lookups that resolve a verified credential, a job or
+// a confirmation link name the organisation as an OrgId, and they are the runtime entry's only
+// source of one.
+describe('the organisation a lookup names is an OrgId (AG-2.3)', () => {
+  type Resolved<F> = F extends (...args: never[]) => Promise<infer R> ? NonNullable<R> : never;
+
+  it('the session, device, pairing, job, alert and confirmation lookups return one', () => {
+    expectTypeOf<Resolved<typeof sec.sessionByIdHash>['orgId']>().toEqualTypeOf<OrgId>();
+    expectTypeOf<Resolved<typeof sec.sessionRevoke>['orgId']>().toEqualTypeOf<OrgId>();
+    expectTypeOf<
+      Extract<Resolved<typeof sec.sessionCreate>, { outcome: 'created' | 'reauth' }>['orgId']
+    >().toEqualTypeOf<OrgId>();
+    expectTypeOf<Resolved<typeof sec.deviceByTokenHash>['orgId']>().toEqualTypeOf<OrgId>();
+    expectTypeOf<Resolved<typeof sec.deviceByRegistrationId>['orgId']>().toEqualTypeOf<OrgId>();
+    expectTypeOf<
+      Extract<Resolved<typeof sec.pairingComplete>, { outcome: 'completed' }>['orgId']
+    >().toEqualTypeOf<OrgId>();
+    expectTypeOf<
+      Resolved<typeof sec.mediaProcessingJobs>[number]['orgId']
+    >().toEqualTypeOf<OrgId>();
+    expectTypeOf<Resolved<typeof sec.displayAlertOrgs>>().toEqualTypeOf<OrgId[]>();
+    expectTypeOf<Resolved<typeof sec.alertRecipientByTokenHash>['orgId']>().toEqualTypeOf<OrgId>();
+  });
+
+  it('a lookup by a subject the caller names proves no credential, and returns a plain string', () => {
+    expectTypeOf<Resolved<typeof sec.membershipByOidcSub>['orgId']>().toEqualTypeOf<string>();
+  });
+
+  it('the value is the org_id the function returned', async () => {
+    const ORG = '00000000-0000-4000-8000-000000000001';
+    const { pool } = recordingPool([{ registration_id: 'r', org_id: ORG, display_id: 'd' }]);
+    expect(await sec.deviceByTokenHash(poolAsTx(pool), Buffer.alloc(32))).toEqual({
+      registrationId: 'r',
+      orgId: ORG,
+      displayId: 'd',
+    });
   });
 });

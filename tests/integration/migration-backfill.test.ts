@@ -29,6 +29,7 @@ import {
   type ManifestV1,
 } from '@tinnox/contracts';
 import { resetTestDatabase, runMigrations } from '@tinnox/db/migrate';
+import { testOrgId } from '@tinnox/db/testing';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -73,7 +74,7 @@ const SHA256 = 'c0'.repeat(32);
 
 /** Inserts one organisation using only what exists at migration 0004. */
 async function createLegacyOrg(migrator: pg.Client, name: string): Promise<LegacyOrg> {
-  const orgId = randomUUID();
+  const orgId = testOrgId(randomUUID());
   const siteId = randomUUID();
   const membershipId = randomUUID();
   const oidcSub = `legacy-sub-${randomUUID()}`;

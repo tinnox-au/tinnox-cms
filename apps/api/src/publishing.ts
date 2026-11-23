@@ -34,7 +34,7 @@ import {
   isMediaItem,
   isPushPending,
 } from '@tinnox/contracts';
-import { auditScoped, sql, type Tx } from '@tinnox/db';
+import { auditScoped, sql, type OrgTx } from '@tinnox/db';
 import {
   buildManifest,
   decidePushState,
@@ -223,7 +223,7 @@ export function idempotencyKeyOf(request: FastifyRequest, action: string): strin
  * Serialises every attempt to publish to one display under one Idempotency-Key
  * until the transaction ends, so exactly one of them creates the publication.
  */
-export async function lockPublishKey(tx: Tx, displayId: string, key: string): Promise<void> {
+export async function lockPublishKey(tx: OrgTx, displayId: string, key: string): Promise<void> {
   await tx.query(
     "SELECT pg_advisory_xact_lock(hashtextextended('tinnox.publish:' || $1 || ':' || $2, 0))",
     [displayId.toLowerCase(), key],
@@ -232,7 +232,7 @@ export async function lockPublishKey(tx: Tx, displayId: string, key: string): Pr
 
 /** The publication already made for this display under this key, if any. */
 export async function findPublicationByKey(
-  tx: Tx,
+  tx: OrgTx,
   displayId: string,
   key: string,
 ): Promise<PublicationRow | null> {
@@ -252,7 +252,7 @@ export async function findPublicationByKey(
  * up rows that merely reference the display (heartbeats, registrations).
  */
 export async function lockDisplayForPublish(
-  tx: Tx,
+  tx: OrgTx,
   displayId: string,
 ): Promise<DisplayPlanRow | null> {
   const { rows } = await tx.query<DisplayPlanRow>(
@@ -269,7 +269,7 @@ export async function lockDisplayForPublish(
  * deleted until the transaction ends.
  */
 export async function loadPlaylistDrafts(
-  tx: Tx,
+  tx: OrgTx,
   playlistIds: readonly string[],
   lock: boolean,
 ): Promise<Map<string, PlaylistDraft>> {
@@ -336,7 +336,7 @@ export async function loadPlaylistDrafts(
  * Without `lock` (the push plan) the one statement is one snapshot.
  */
 export async function loadScheduleDrafts(
-  tx: Tx,
+  tx: OrgTx,
   scheduleIds: readonly string[],
   lock: boolean,
 ): Promise<Map<string, ScheduleDraft>> {
@@ -409,7 +409,7 @@ export async function loadScheduleDrafts(
  * the second statement alone is one snapshot.
  */
 export async function loadLayoutDrafts(
-  tx: Tx,
+  tx: OrgTx,
   layoutIds: readonly string[],
   lock: boolean,
 ): Promise<Map<string, LayoutDraft>> {
@@ -478,7 +478,7 @@ interface MediaRecordRow {
  * `lock`, the rows cannot be deleted until the transaction ends.
  */
 export async function loadMediaRecords(
-  tx: Tx,
+  tx: OrgTx,
   ids: readonly string[],
   lock: boolean,
 ): Promise<Map<string, MediaRecord>> {
@@ -530,7 +530,7 @@ export function itemRefs(items: readonly DraftItem[]): { mediaIds: string[]; app
  * deleted until the transaction ends.
  */
 export async function loadAppRecords(
-  tx: Tx,
+  tx: OrgTx,
   ids: readonly string[],
   lock: boolean,
 ): Promise<Map<string, AppRecord>> {
@@ -582,7 +582,7 @@ export function planDraft(
  * The manifest (up to 1 MiB each) is fetched only for `manifestFor`.
  */
 async function loadCurrentPublications(
-  tx: Tx,
+  tx: OrgTx,
   displayIds: readonly string[],
   manifestFor: readonly string[],
 ): Promise<Map<string, LoadedPublication>> {
@@ -631,7 +631,7 @@ async function loadCurrentPublications(
  *   outlives its comparison, so memory does not grow with displays times items.
  */
 export async function assessDisplays(
-  tx: Tx,
+  tx: OrgTx,
   ctx: AppContext,
   displays: readonly DisplayPlanRow[],
   options: { readonly lock: boolean; readonly keepDraft: boolean },
@@ -782,7 +782,7 @@ export async function assessDisplays(
  * The push plan of the organisation: one assessment per display, in the order
  * of the display list. At most `ABSOLUTE.maxListItems` displays are assessed.
  */
-export async function loadPushPlan(tx: Tx, ctx: AppContext): Promise<DisplayAssessment[]> {
+export async function loadPushPlan(tx: OrgTx, ctx: AppContext): Promise<DisplayAssessment[]> {
   const { rows } = await tx.query<DisplayPlanRow>(
     `SELECT ${DISPLAY_PLAN_COLUMNS} FROM display d
      WHERE d.org_id = app_org_id()
@@ -823,7 +823,7 @@ export interface NewPublication {
  * The caller holds the publish key lock and the display (see above).
  */
 export async function createPublication(
-  tx: Tx,
+  tx: OrgTx,
   ctx: AppContext,
   input: NewPublication,
 ): Promise<PublicationRow> {
@@ -904,7 +904,7 @@ export async function createPublication(
  * was refused for a display. Commits with the caller's transaction.
  */
 export async function auditRejectedPublication(
-  tx: Tx,
+  tx: OrgTx,
   input: {
     readonly membershipId: string;
     readonly playlistId: string;

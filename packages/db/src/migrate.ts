@@ -2,20 +2,33 @@
 // use (the migration runner and the test reset, the development seed, provisioning, and tests).
 // It is not part of the runtime entry (./index.ts), and lint refuses it in the API's source
 // (AG-1.10; the db entries of eslint.config.js).
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import pg from 'pg';
 import { errorField } from './error-field.ts';
+import { mintOrgId } from './org-id.ts';
 import type { Pool } from './pool.ts';
 import {
   SchemaInvariantError,
   assertSchemaInvariants,
   schemaProblemsInTransaction,
 } from './schema-invariants.ts';
+import type { OrgId } from './tx.ts';
 
 // The definer switch belongs to this entry too: it needs the MigratorPool (D25).
-export { asDefiner } from './definer.ts';
+export { asDefiner, type DefinerTx } from './definer.ts';
+
+/**
+ * The id of an organisation that is being created: a fresh one for provisioning's org-create,
+ * or the fixed one the development seed gives its synthetic organisations. For those two only
+ * (D25): lint refuses the name in every other script (NEW_ORG_ID_FILES in eslint.config.js),
+ * and this entry in the API. An organisation that already exists is never named this way: its
+ * id comes from a lookup of '@tinnox/db', or from a row asDefiner read.
+ */
+export function newOrgId(id: string = randomUUID()): OrgId {
+  return mintOrgId(id);
+}
 
 const MIGRATOR_ROLE = 'tinnox_migrator';
 

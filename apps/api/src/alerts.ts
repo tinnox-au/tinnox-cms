@@ -15,7 +15,7 @@ import {
   poolAsTx,
   withOrg,
   type Pool,
-  type Tx,
+  type OrgTx,
 } from '@tinnox/db';
 import { offlineDue } from '@tinnox/domain';
 import type { MailMessage, Mailer } from './mail.ts';
@@ -169,7 +169,7 @@ export function mailErrorCode(error: unknown): { errorCode: string | null } {
 }
 
 /** Decides and claims the transitions of the organisation of `tx`; returns the e-mails to send. */
-async function claimTransitions(tx: Tx, deps: DisplayAlertDeps): Promise<OrgOutcome> {
+async function claimTransitions(tx: OrgTx, deps: DisplayAlertDeps): Promise<OrgOutcome> {
   const org = await tx.query<{ name: string }>(
     'SELECT name FROM organization WHERE id = app_org_id()',
   );

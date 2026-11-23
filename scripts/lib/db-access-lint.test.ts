@@ -107,7 +107,7 @@ const TESTS = [
 ] as const;
 
 const OFF_TRANSACTION =
-  /^Do not call query\(\) on .+: only a transaction handle takes a statement \(the tx that the callback of withOrg, withoutOrg or withResolvedOrg receives\)\. .* Use withOrg\(pool, session\.orgId, \(tx\) => tx\.query\(\.\.\.\)\), a typed sec\.\* wrapper from @tinnox\/db .*, or ping\(pool\) for a liveness probe\.$/;
+  /^Do not call query\(\) on .+: only an OrgTx takes a statement \(the tx that the callback of withOrg receives, or that enterOrg returns inside withResolvedOrg\)\. .* Use withOrg\(pool, session\.orgId, \(tx\) => tx\.query\(\.\.\.\)\), a typed sec\.\* wrapper from @tinnox\/db .*, or ping\(pool\) for a liveness probe\. An offline tool that reads across organisations sends the statement on the handle asDefiner gives its work \(@tinnox\/db\/migrate\)\.$/;
 
 // The first case of each describe may be the one that loads eslint.config.js, which a busy CI
 // runner can stretch towards the unit project's 5 s default (GAP-1).
@@ -204,7 +204,7 @@ function allowedStatements(value: unknown): { sql: string; reason: string }[] {
 
 describe('SQL fragments (OTH-12)', { timeout: 30_000 }, () => {
   const INTERPOLATION =
-    /^SQL text may interpolate only an UPPER_CASE module constant or a SqlFragment, and `name` is neither\. Pass a value as a parameter \(\$1, \$2; see Tx in packages\/db\/src\/tx\.ts\)\. .* make a SqlFragment with sql`\.\.\.`, sqlParameter\(position\) or joinSql\(parts, separator\) from @tinnox\/db/;
+    /^SQL text may interpolate only an UPPER_CASE module constant or a SqlFragment, and `name` is neither\. Pass a value as a parameter \(\$1, \$2; see OrgTx in packages\/db\/src\/tx\.ts\)\. .* make a SqlFragment with sql`\.\.\.`, sqlParameter\(position\) or joinSql\(parts, separator\) from @tinnox\/db/;
   const STATEMENT =
     /^The statement given to query\(\) must be text from the source: .*`(text|sql)` is none of these\. Write the statement at the call and pass values as parameters/;
   const CODE = `
@@ -229,10 +229,12 @@ describe('SQL fragments (OTH-12)', { timeout: 30_000 }, () => {
     expect(isOff(await entryFor(path, FRAGMENTS))).toBe(true);
   });
 
-  it('names the two files of packages/db that pass a statement on, and the name it has there', async () => {
+  it('names the three files of packages/db that pass a statement on, and the name it has there', async () => {
     expect(await exported('SQL_PASS_THROUGH')).toEqual({
       'packages/db/src/tx.ts': ['text'],
       'packages/db/src/migrate.ts': ['sql'],
+      // Step 18: the handle asDefiner gives its work sends what the offline tool wrote.
+      'packages/db/src/definer.ts': ['text'],
     });
   });
 
@@ -243,6 +245,9 @@ describe('SQL fragments (OTH-12)', { timeout: 30_000 }, () => {
     ]);
     expect(await flagged('packages/db/src/migrate.ts', forwards, FRAGMENTS)).toEqual([
       expect.stringMatching(/`text` is none of these/),
+    ]);
+    expect(await flagged('packages/db/src/definer.ts', forwards, FRAGMENTS)).toEqual([
+      expect.stringMatching(/`sql` is none of these/),
     ]);
     for (const path of [
       'packages/db/src/sec.ts',
@@ -564,7 +569,7 @@ describe('casts to SqlFragment (OTH-12)', { timeout: 30_000 }, () => {
     expect(await flagged(path, rest, SYNTAX)).toEqual([
       expect.stringMatching(/^Do not assert a value is not null/),
       expect.stringMatching(/^Do not switch the database role here/),
-      expect.stringMatching(/^Do not cast to Tx/),
+      expect.stringMatching(/^Do not cast to a transaction handle/),
     ]);
   });
 });
@@ -658,6 +663,84 @@ describe('the unscoped helpers (AG-2.2)', { timeout: 30_000 }, () => {
       expect(
         /\b(withoutOrg|poolAsTx)\b/.test(imports),
         `${file} no longer imports withoutOrg or poolAsTx: remove it from UNSCOPED_HELPER_FILES in eslint.config.js`,
+      ).toBe(true);
+    }
+  });
+});
+
+// D25 (adoption plan step 18): newOrgId turns any string into an OrgId, for an organisation that
+// is being created. Two offline tools create one; every other script is refused the name.
+describe('newOrgId (D25)', { timeout: 30_000 }, () => {
+  const NEW_ORG_ID =
+    /newOrgId names an organisation that is being created: only org-create in scripts\/lib\/provision\.ts and the seed call it \(D25\)\. For an organisation that exists, read the org_id of its member or invite inside asDefiner\(pool, tx, \(definer\) => definer\.query\(\.\.\.\)\) from @tinnox\/db\/migrate.* is added to NEW_ORG_ID_FILES in eslint\.config\.js with its reason\.$/;
+  const CODE = "import { asDefiner, connectMigrator, newOrgId } from '@tinnox/db/migrate';";
+  const MAKERS = ['scripts/lib/provision.ts', 'scripts/seed.ts'];
+
+  it.each([
+    'scripts/provision-member.ts',
+    'scripts/migrate.ts',
+    'scripts/audit.ts',
+    'scripts/lib/idp.ts',
+    'scripts/lib/fixture.ts',
+    'scripts/fixture.ts',
+    'scripts/fixture.mjs',
+  ])('is refused in %s, which keeps the rest of the entry', async (path) => {
+    const messages = await flagged(path, CODE, IMPORTS);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatch(/^'newOrgId' import from '@tinnox\/db\/migrate' is restricted/);
+    expect(messages[0]).toMatch(NEW_ORG_ID);
+  });
+
+  it('is refused under another name, as a re-export and as a namespace', async () => {
+    const path = 'scripts/lib/fixture.ts';
+    for (const code of [
+      "import { newOrgId as org } from '@tinnox/db/migrate';",
+      "export { newOrgId } from '@tinnox/db/migrate';",
+      "import * as migrate from '@tinnox/db/migrate';",
+    ]) {
+      expect(await flagged(path, code, IMPORTS), code).toEqual([expect.stringMatching(NEW_ORG_ID)]);
+    }
+  });
+
+  it.each([...MAKERS, 'tests/integration/fixture.test.ts', 'scripts/lib/fixture.test.ts'])(
+    'may be imported in %s',
+    async (path) => {
+      expect(await flagged(path, CODE, IMPORTS)).toEqual([]);
+    },
+  );
+
+  it('keeps the other import rules of the two tools: the seed still gets no unscoped helper', async () => {
+    const code = `${CODE} import { poolAsTx, withOrg } from '@tinnox/db'; import pg from 'pg';`;
+    expect(await flagged('scripts/seed.ts', code, IMPORTS)).toEqual([
+      expect.stringMatching(/withoutOrg and poolAsTx run without an organisation/),
+      expect.stringMatching(/^'pg' import is restricted/),
+    ]);
+    expect(await flagged('scripts/lib/provision.ts', code, IMPORTS)).toEqual([
+      expect.stringMatching(/^'pg' import is restricted/),
+    ]);
+  });
+
+  it('the API cannot import the entry it comes from at all', async () => {
+    const messages = await flagged('apps/api/src/routes/fixture.ts', CODE, IMPORTS);
+    expect(messages).toEqual([
+      expect.stringMatching(
+        /^'@tinnox\/db\/migrate' import is restricted .* for the offline tools/,
+      ),
+    ]);
+  });
+
+  it('lists two files, each with its reason, and none that no longer imports it', async () => {
+    const list = await exported('NEW_ORG_ID_FILES');
+    expect(Object.keys(list).sort()).toEqual(MAKERS);
+    for (const [file, reason] of Object.entries(list)) {
+      expect(typeof reason === 'string' && reason.length >= 60, `${file} needs its reason`).toBe(
+        true,
+      );
+      const imports =
+        /import\s*\{([^}]*)\}\s*from\s*'@tinnox\/db\/migrate';/.exec(source(file))?.[1] ?? '';
+      expect(
+        /\bnewOrgId\b/.test(imports),
+        `${file} no longer imports newOrgId: remove it from NEW_ORG_ID_FILES in eslint.config.js`,
       ).toBe(true);
     }
   });

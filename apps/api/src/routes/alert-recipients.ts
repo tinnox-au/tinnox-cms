@@ -201,10 +201,10 @@ export function registerAlertConfirmRoute(app: FastifyInstance, ctx: AppContext)
       const tokenHash = sha256(token);
       // A member change that holds the adder's member row past lock_timeout answers 503, as
       // every write does; nothing was confirmed or audited (SEC-3, BEH-3).
-      const confirmed = await withResolvedOrg(ctx.pool, async (tx, enterOrg) => {
-        const found = await alertRecipientByTokenHash(tx, tokenHash);
+      const confirmed = await withResolvedOrg(ctx.pool, async (pre, enterOrg) => {
+        const found = await alertRecipientByTokenHash(pre, tokenHash);
         if (found === null) return false;
-        await enterOrg(found.orgId);
+        const tx = await enterOrg(found.orgId);
         // The recipient row, then the adder's member row: a member change never locks a
         // recipient row, so the order has no cycle. FOR SHARE waits for a removal or a cut-off
         // that is committing, and the UPDATE, a later statement, then reads it and refuses

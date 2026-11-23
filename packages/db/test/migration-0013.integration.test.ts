@@ -38,6 +38,7 @@ import {
   withOrg,
   withoutOrg,
   type Autocommit,
+  type OrgId,
   type Pool,
   type SessionCreateResult,
 } from '../src/index.ts';
@@ -57,6 +58,7 @@ import {
   pgViolation,
   stillWaiting,
   twoTransactions,
+  withNoOrgSet,
   type TestOrg,
 } from './support.ts';
 
@@ -122,7 +124,7 @@ async function asMigratorIn<T>(orgId: string, work: (client: pg.Client) => Promi
 }
 
 /** One statement as tinnox_app inside `withOrg`. */
-const asApp = (orgId: string, text: string, values: readonly unknown[] = []) =>
+const asApp = (orgId: OrgId, text: string, values: readonly unknown[] = []) =>
   withOrg(clients().pool, orgId, (tx) => tx.query(text, values));
 
 /** One statement as the owner of the sec.* functions (BYPASSRLS). */
@@ -836,8 +838,14 @@ describe('sessions and the cut-off', () => {
         withOrg(clients().pool, other.orgId, (tx) => sessionRevokeMembership(tx, colleague.id)),
       ),
     ).toBe(PG.insufficientPrivilege);
+    // sessionRevokeMembership takes an OrgTx, so it cannot be called with no organisation any
+    // more. The function's own refusal is still what is tested: the same statement, sent raw.
     expect(
-      await pgCode(withoutOrg(clients().pool, (tx) => sessionRevokeMembership(tx, colleague.id))),
+      await pgCode(
+        withoutOrg(clients().pool, (tx) =>
+          withNoOrgSet(tx).query('SELECT sec.session_revoke_membership($1) AS n', [colleague.id]),
+        ),
+      ),
     ).toBe(PG.insufficientPrivilege);
     expect(await sessionByIdHash(db, theirs.idHash, 1800)).not.toBeNull();
     expect(await memberColumn(colleague.id, 'sessions_valid_after')).toBeNull();
@@ -993,7 +1001,7 @@ describe('member_invite', () => {
   const values = (i: Invite) => [i.id, i.role, i.name, i.email, i.invitedBy, i.expiresIn, i.status];
   const insertAsMigrator = (orgId: string, i: Invite) =>
     asMigratorIn(orgId, (client) => client.query(INSERT_INVITE, values(i)));
-  const insertAsApp = (orgId: string, i: Invite) => asApp(orgId, INSERT_INVITE, values(i));
+  const insertAsApp = (orgId: OrgId, i: Invite) => asApp(orgId, INSERT_INVITE, values(i));
   const updateAsMigrator = (orgId: string, sql: string, params: readonly unknown[]) =>
     asMigratorIn(orgId, (client) => client.query(sql, [...params]));
   const guard = { code: PG.restrict, constraint: 'member_invite_guard' };
@@ -1164,9 +1172,14 @@ describe('the shared member SQL (packages/db/src/members.ts)', () => {
   it('lockOrgMembership takes the lock the trigger takes, and refuses without an organisation', async () => {
     const org = await createOrg(clients().migrator, 'Membership lock');
     const second = await addMember(org.orgId, 'owner');
-    await expect(withoutOrg(clients().pool, (tx) => lockOrgMembership(tx))).rejects.toThrow(
-      /organisation context/,
-    );
+    // lockOrgMembership takes an OrgTx, so the handle of withoutOrg no longer compiles. Its own
+    // check is for a transaction whose organisation was cleared in SQL.
+    await expect(
+      withOrg(clients().pool, org.orgId, async (tx) => {
+        await tx.query("SELECT set_config('app.org_id', '', true)");
+        await lockOrgMembership(tx);
+      }),
+    ).rejects.toThrow(/organisation context/);
 
     let release = (): void => undefined;
     const held = new Promise<void>((resolve) => {
@@ -1196,7 +1209,7 @@ describe('the shared member SQL (packages/db/src/members.ts)', () => {
     const { idHash } = await signIn(member.oidcSub);
     const session = await sessionByIdHash(db, idHash, 1800);
     if (session === null) throw new Error('no session');
-    const check = (orgId: string) =>
+    const check = (orgId: OrgId) =>
       withOrg(clients().pool, orgId, (tx) => membershipForCheck(tx, member.id, session.createdAt));
 
     expect(await check(org.orgId)).toEqual({ role: 'editor', removedAt: null, cutOff: false });

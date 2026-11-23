@@ -5,6 +5,7 @@
  */
 import { Readable } from 'node:stream';
 import type { MediaMimeType } from '@tinnox/contracts';
+import type { OrgId } from '@tinnox/db';
 import {
   contentRangeHeader,
   keyBelongsToOrg,
@@ -24,7 +25,8 @@ const EXTENSIONS: Readonly<Record<MediaMimeType, string>> = {
 
 export interface ServeObjectInput {
   readonly storage: ObjectStorage;
-  readonly orgId: string;
+  /** The tenant check below is only as good as this id, so it must come from a lookup (AG-2.9). */
+  readonly orgId: OrgId;
   readonly storageKey: string;
   readonly mimeType: MediaMimeType;
   readonly sha256: string;

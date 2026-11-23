@@ -1,4 +1,4 @@
-import { withOrg, type Pool, type Tx } from '@tinnox/db';
+import { withOrg, type OrgId, type OrgTx, type Pool } from '@tinnox/db';
 import type { HttpError } from './errors.ts';
 
 export function iso(value: unknown): string {
@@ -31,8 +31,8 @@ export const refuse = (error: HttpError): Decision<never> => ({ ok: false, error
  */
 export async function withOrgDecision<T>(
   pool: Pool,
-  orgId: string,
-  fn: (tx: Tx) => Promise<Decision<T>>,
+  orgId: OrgId,
+  fn: (tx: OrgTx) => Promise<Decision<T>>,
 ): Promise<T> {
   const decision = await withOrg(pool, orgId, fn);
   if (!decision.ok) throw decision.error;

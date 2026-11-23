@@ -37,7 +37,7 @@ import {
   violatedConstraint,
   withOrg,
   type SqlFragment,
-  type Tx,
+  type OrgTx,
 } from '@tinnox/db';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { recordPermissionDenied, type DenialReason } from '../auth/permission-audit.ts';
@@ -185,7 +185,7 @@ async function answerRefusal(
  * agrees: membership_removed_final).
  */
 async function lockTarget(
-  tx: Tx,
+  tx: OrgTx,
   session: OperatorSession,
   role: Role,
   id: string,
@@ -218,7 +218,7 @@ async function lockTarget(
  * nobody chose to cancel these invites. One invite.cancel row per invite.
  */
 async function cancelInvitesOf(
-  tx: Tx,
+  tx: OrgTx,
   session: OperatorSession,
   inviterId: string,
   keep: readonly Role[],

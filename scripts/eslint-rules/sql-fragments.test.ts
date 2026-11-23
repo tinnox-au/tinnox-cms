@@ -32,13 +32,13 @@ const untyped = new RuleTester({ languageOptions: { parser: tseslint.parser } })
 const HOW =
   'make a SqlFragment with sql`...`, sqlParameter(position) or joinSql(parts, separator) from @tinnox/db (packages/db/src/sql.ts).';
 const interpolation = (text: string): string =>
-  `SQL text may interpolate only an UPPER_CASE module constant or a SqlFragment, and \`${text}\` is neither. Pass a value as a parameter ($1, $2; see Tx in packages/db/src/tx.ts). For fixed text chosen at run time ${HOW}`;
+  `SQL text may interpolate only an UPPER_CASE module constant or a SqlFragment, and \`${text}\` is neither. Pass a value as a parameter ($1, $2; see OrgTx in packages/db/src/tx.ts). For fixed text chosen at run time ${HOW}`;
 const statement = (text: string): string =>
-  `The statement given to query() must be text from the source: a string literal, a template, an UPPER_CASE module constant or a SqlFragment, and \`${text}\` is none of these. Write the statement at the call and pass values as parameters ($1, $2; see Tx in packages/db/src/tx.ts); for fixed text chosen at run time ${HOW}`;
+  `The statement given to query() must be text from the source: a string literal, a template, an UPPER_CASE module constant or a SqlFragment, and \`${text}\` is none of these. Write the statement at the call and pass values as parameters ($1, $2; see OrgTx in packages/db/src/tx.ts); for fixed text chosen at run time ${HOW}`;
 
 const HEAD = `
-  import { joinSql, sql, sqlParameter, type SqlFragment, type Tx } from '@tinnox/db';
-  declare const tx: Tx;
+  import { joinSql, sql, sqlParameter, type OrgTx, type SqlFragment } from '@tinnox/db';
+  declare const tx: OrgTx;
   declare const lock: boolean;
   declare const input: string;
   const COLUMNS = 'id, name';

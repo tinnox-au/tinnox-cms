@@ -1,8 +1,10 @@
 // The '@tinnox/db/testing' entry: what only tests may use. Lint refuses the entry in every file
 // that is not a test (the db entries of eslint.config.js), so nothing here can reach the API, the
 // alert job or an offline tool.
+import { mintOrgId } from './org-id.ts';
 import type { Pool } from './pool.ts';
-import { withoutOrg, type Tx } from './tx.ts';
+import { statementsOf } from './pre-org.ts';
+import { withoutOrg, type Autocommit, type OrgId, type PreOrgTx } from './tx.ts';
 
 // The audit-debt guard of the integration test database (adoption plan section 2.1 C, D3).
 export {
@@ -25,9 +27,27 @@ export { auditRowsSince, auditScanMark, type StoredAuditRow } from './audit-rows
 
 /**
  * Runs `fn` in a transaction of its own with no organisation, as a route does before the
- * organisation is known. For the sec.* wrappers that change data and the audit writers: they
- * take a `Tx`, and the handle `poolAsTx` gives is not one (D2).
+ * organisation is known. For the sec.* wrappers that change data there and the unscoped audit
+ * writer: they take a `PreOrgTx`, and the handle `poolAsTx` gives is not one (D2).
  */
-export function inTx<T>(pool: Pool, fn: (tx: Tx) => Promise<T>): Promise<T> {
+export function inTx<T>(pool: Pool, fn: (tx: PreOrgTx) => Promise<T>): Promise<T> {
   return withoutOrg(pool, fn);
+}
+
+/**
+ * The id of an organisation a test made, or made up: tests insert their own organisations and
+ * then run as them with `withOrg`. The one way a test gets an `OrgId` from a string; lint
+ * refuses a cast in tests too.
+ */
+export function testOrgId(id: string): OrgId {
+  return mintOrgId(id);
+}
+
+/**
+ * Sends statements of the test's own on a transaction with no organisation, which a `PreOrgTx`
+ * does not allow by itself. For the tests of row-level security: that a tenant table shows no
+ * row and takes no write there.
+ */
+export function withNoOrgSet(tx: PreOrgTx): Autocommit {
+  return statementsOf(tx);
 }

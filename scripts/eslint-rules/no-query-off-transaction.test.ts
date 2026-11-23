@@ -13,7 +13,7 @@ RuleTester.describe = describe;
 RuleTester.it = it;
 
 // Not on disk, so the project service type-checks it alone with the repository's compiler flags;
-// its import of @tinnox/db resolves to the real packages/db, whose Tx the rule looks for. At the
+// its import of @tinnox/db resolves to the real packages/db, whose OrgTx the rule looks for. At the
 // repository root, where the nearest tsconfig.json is the small one of the root: a path inside a
 // workspace would make the service load that whole workspace first (the rule itself does not
 // read the path; scripts/lib/db-access-lint.test.ts holds which files get it).
@@ -30,12 +30,14 @@ const typed = new RuleTester({
 const untyped = new RuleTester({ languageOptions: { parser: tseslint.parser } });
 
 const message = (receiver: string): string =>
-  `Do not call query() on ${receiver}: only a transaction handle takes a statement (the tx that the callback of withOrg, withoutOrg or withResolvedOrg receives). On the pool, a pooled client or the handle of poolAsTx the statement runs outside any transaction and with no organisation. Use withOrg(pool, session.orgId, (tx) => tx.query(...)), a typed sec.* wrapper from @tinnox/db (add it to packages/db/src/sec.ts if it is missing), or ping(pool) for a liveness probe.`;
+  `Do not call query() on ${receiver}: only an OrgTx takes a statement (the tx that the callback of withOrg receives, or that enterOrg returns inside withResolvedOrg). On the pool, a pooled client or the handle of poolAsTx the statement runs outside any transaction and with no organisation. Use withOrg(pool, session.orgId, (tx) => tx.query(...)), a typed sec.* wrapper from @tinnox/db (add it to packages/db/src/sec.ts if it is missing), or ping(pool) for a liveness probe. An offline tool that reads across organisations sends the statement on the handle asDefiner gives its work (@tinnox/db/migrate).`;
 
 const HEAD = `
-  import { poolAsTx, withOrg, withoutOrg, type Autocommit, type Pool, type Tx } from '@tinnox/db';
+  import { poolAsTx, withOrg, withResolvedOrg, type Autocommit, type OrgId, type OrgTx, type Pool } from '@tinnox/db';
+  import { asDefiner, type DefinerTx, type MigratorPool } from '@tinnox/db/migrate';
   declare const pool: Pool;
-  declare const orgId: string;
+  declare const migrator: MigratorPool;
+  declare const orgId: OrgId;
 `;
 const typedCase = (code: string) => ({ code: `${HEAD}${code}`, filename: FIXTURE });
 
@@ -59,24 +61,38 @@ describe('with type information', { timeout: 30_000 }, () => {
         name: 'the tx a transaction gives its callback',
         ...typedCase(`
           export const rows = await withOrg(pool, orgId, (tx) => tx.query('SELECT 1'));
-          export const more = await withoutOrg(pool, async (tx) => (await tx.query('SELECT 2')).rows);
+          export const more = await withResolvedOrg(pool, async (_pre, enterOrg) => {
+            const entered = await enterOrg(orgId);
+            return (await entered.query('SELECT 2')).rows;
+          });
+        `),
+      },
+      {
+        name: 'the handle asDefiner gives its work, whatever it is called (D25)',
+        ...typedCase(`
+          export const all = await withResolvedOrg(migrator, (pre) =>
+            asDefiner(migrator, pre, (definer) => definer.query('SELECT org_id FROM public.membership')),
+          );
+          export async function count(asTheDefiner: DefinerTx): Promise<number> {
+            return (await asTheDefiner.query('SELECT 1 FROM public.organization')).rows.length;
+          }
         `),
       },
       {
         name: 'a helper that takes the transaction, whatever it calls the parameter',
         ...typedCase(`
-          export async function rename(handle: Tx, id: string): Promise<void> {
+          export async function rename(handle: OrgTx, id: string): Promise<void> {
             await handle.query('UPDATE folder SET name = $2 WHERE id = $1', [id, 'a']);
           }
         `),
       },
       {
-        name: 'a subtype, a read-only view and a generic parameter bounded by Tx are still a Tx',
+        name: 'a subtype, a read-only view and a generic parameter bounded by OrgTx are still an OrgTx',
         ...typedCase(`
-          interface Scoped extends Tx { readonly orgId: string }
+          interface Scoped extends OrgTx { readonly orgId: string }
           export async function a(tx: Scoped): Promise<void> { await tx.query('SELECT 1'); }
-          export async function b(tx: Readonly<Tx>): Promise<void> { await tx.query('SELECT 1'); }
-          export async function c<T extends Tx>(tx: T): Promise<void> { await tx.query('SELECT 1'); }
+          export async function b(tx: Readonly<OrgTx>): Promise<void> { await tx.query('SELECT 1'); }
+          export async function c<T extends OrgTx>(tx: T): Promise<void> { await tx.query('SELECT 1'); }
         `),
       },
       {
@@ -130,7 +146,7 @@ describe('with type information', { timeout: 30_000 }, () => {
       {
         name: 'a value that may be a pool, and one whose type says nothing',
         ...typedCase(`
-          declare const either: Tx | Pool;
+          declare const either: OrgTx | Pool;
           declare const anything: any;
           await either.query('SELECT 1');
           await anything.query('SELECT 1');

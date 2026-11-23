@@ -12,7 +12,7 @@ import {
   STAGE_B_CONSTRAINTS,
   withOrg,
   type Pool,
-  type Tx,
+  type OrgTx,
 } from '../src/index.ts';
 import {
   appPool,
@@ -50,24 +50,24 @@ const violationAsA = (sql: string, values: readonly unknown[] = []) =>
 
 const unique = (label: string) => `${label} ${randomUUID().slice(0, 8)}`;
 
-async function insertId(tx: Tx, sql: string, values: readonly unknown[]): Promise<string> {
+async function insertId(tx: OrgTx, sql: string, values: readonly unknown[]): Promise<string> {
   const { rows } = await tx.query<{ id: string }>(`${sql} RETURNING id`, values);
   const id = rows[0]?.id;
   if (id === undefined) throw new Error('insert returned no row');
   return id;
 }
 
-const newPlaylist = (tx: Tx) =>
+const newPlaylist = (tx: OrgTx) =>
   insertId(tx, 'INSERT INTO playlist (org_id, name) VALUES (app_org_id(), $1)', [
     unique('Playlist'),
   ]);
-const newSchedule = (tx: Tx, defaultPlaylistId: string) =>
+const newSchedule = (tx: OrgTx, defaultPlaylistId: string) =>
   insertId(
     tx,
     'INSERT INTO schedule (org_id, name, default_playlist_id) VALUES (app_org_id(), $1, $2)',
     [unique('Schedule'), defaultPlaylistId],
   );
-const newDisplay = (tx: Tx) =>
+const newDisplay = (tx: OrgTx) =>
   insertId(
     tx,
     `INSERT INTO display (org_id, site_id, name, canvas_width, canvas_height)
@@ -517,7 +517,7 @@ describe('deleting a schedule', () => {
 describe('version 4 publications', () => {
   const rule = { days: EVERY_DAY, start: '09:00', end: '17:00' };
 
-  const insertPublication = (tx: Tx, id: string, manifest: Record<string, unknown>) =>
+  const insertPublication = (tx: OrgTx, id: string, manifest: Record<string, unknown>) =>
     tx.query(
       'INSERT INTO publication (id, org_id, display_id, playlist_id, manifest, idempotency_key, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7)',
       [

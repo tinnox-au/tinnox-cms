@@ -279,13 +279,16 @@ const NO_MIGRATOR_POOL_CAST = [
   },
 ];
 
-// D2, CX-01 (adoption plan section 2.1 A): a Tx says the handle came from withOrg, withoutOrg or
-// withResolvedOrg, so everything written on it commits or rolls back together. The audit writers
-// and the sec.* wrappers that change data rely on that alone, so nothing may make one by a cast:
-// in every file, tests included, and in packages/db too, where run() builds it without one.
-// Matched like MigratorPool above, with the same three forms left to review (a value typed `any`,
-// an alias of the type, `as never`).
-const TX = ":matches([typeName.name='Tx'], [typeName.right.name='Tx'])";
+// D2, CX-01 (adoption plan section 2.1 A), AG-2.1 (step 18): a transaction handle says it came
+// from withOrg, withoutOrg or withResolvedOrg, so everything written on it commits or rolls back
+// together, and which of the two it is says whether an organisation is set: an OrgTx takes a
+// tenant statement, a PreOrgTx only the sec.* wrappers. The audit writers and those wrappers
+// rely on that alone, so nothing may make one by a cast: in every file, tests included, and in
+// packages/db too, where run() and asDefiner build them without one. Tx is either of the two, and
+// DefinerTx the handle asDefiner gives its work. Matched like MigratorPool above, with the same
+// three forms left to review (a value typed `any`, an alias of the type, `as never`).
+const HANDLE = '/^(Tx|OrgTx|PreOrgTx|DefinerTx)$/';
+const TX = `:matches([typeName.name=${HANDLE}], [typeName.right.name=${HANDLE}])`;
 const NO_TX_CAST = [
   {
     selector: [
@@ -293,7 +296,7 @@ const NO_TX_CAST = [
       `:matches(TSAsExpression, TSTypeAssertion) > .typeAnnotation TSTypeReference${TX}`,
     ].join(', '),
     message:
-      'Do not cast to Tx: the type says the handle is inside a transaction, so an audit row written on it commits with the change it records. Use the tx that the callback of withOrg, withoutOrg or withResolvedOrg (from @tinnox/db) receives; a test opens one the same way (inTx from @tinnox/db/testing). A refusal with no change to pair with is written with auditStandalone(pool, event).',
+      'Do not cast to a transaction handle (Tx, OrgTx, PreOrgTx, DefinerTx): the type says the handle is inside a transaction, so an audit row written on it commits with the change it records, and whether an organisation is set, so a tenant statement runs under row-level security. Use the tx that the callback of withOrg receives or that enterOrg returns (an OrgTx), or the one the callback of withoutOrg or withResolvedOrg receives (a PreOrgTx, for the sec.* wrappers before the organisation is known), all from @tinnox/db; a test opens one the same way (inTx from @tinnox/db/testing). A refusal with no change to pair with is written with auditStandalone(pool, event).',
   },
 ];
 // OTH-12: a SqlFragment says the text was written in the source (sql`...`, sqlParameter, joinSql
@@ -311,8 +314,50 @@ const NO_SQL_FRAGMENT_CAST = [
       'Do not cast to SqlFragment: the type says the text was written in the source, so it may be put into a statement. Make one with sql`...`, sqlParameter(position) or joinSql(parts, separator) from @tinnox/db, and pass every value as a parameter ($1, $2).',
   },
 ];
-// The three types only packages/db may make.
-const NO_BRAND_CAST = [...NO_MIGRATOR_POOL_CAST, ...NO_TX_CAST, ...NO_SQL_FRAGMENT_CAST];
+// AG-2.3 (adoption plan step 18, D25): an OrgId says the database named the organisation (for a
+// verified session, a device credential, a completed pairing, a media job, a confirmation link
+// or the alert check's list), and withOrg and enterOrg take nothing else. So a string from a path, a query, a body or a header never becomes one, and
+// nothing but packages/db/src/org-id.ts (its own block below) may say that a value is one. In
+// every file, tests included: a test names its organisation with testOrgId from
+// '@tinnox/db/testing', and scripts are in scope like the rest (D25). Reported:
+//   - a cast, matched like MigratorPool above (`as OrgId`, `as unknown as OrgId`, `<OrgId>id`,
+//     `as OrgId | null`, `as Promise<OrgId>`);
+//   - a type predicate or an assertion signature (`value is OrgId`, `asserts value is OrgId`),
+//     which says the same thing as a cast, for every caller;
+//   - the type arguments of a call (`tx.query<{ org_id: OrgId }>(...)`, `z.custom<OrgId>()`,
+//     `app.get<{ Params: { id: OrgId } }>(...)`): pg, zod and Fastify take such an argument on
+//     trust, so it is a cast by another name. expectTypeOf and its matchers (vitest) are let
+//     through: they only compare types.
+// Not seen, and left to review: the three forms the MigratorPool rule leaves (a value typed
+// `any`, which the no-unsafe-* rules of typescript-eslint report where it is used; an alias of
+// the type; `as never`); a cast to a named type that contains an OrgId (`body as SessionLookup`);
+// a named row type given to query (`type Row = { org_id: OrgId }`, then `query<Row>`); and a
+// generic helper whose `as T` is inferred (`const id: OrgId = brand(value)`). A selector cannot
+// follow a named type to its declaration, and refusing OrgId in every interface would refuse the
+// fields that rightly carry one (ServeObjectInput.orgId). AGENTS.md section 2 lists them for review. A
+// cast to `import('@tinnox/db').OrgId` is refused by consistent-type-imports instead.
+const ORG_ID = ":matches([typeName.name='OrgId'], [typeName.right.name='OrgId'])";
+const TYPE_ONLY_CALL =
+  ":matches([callee.name='expectTypeOf'], [callee.property.name=/^to(EqualTypeOf|MatchTypeOf|MatchObjectType|Extend)$/])";
+const NO_ORG_ID_FORGERY = [
+  {
+    selector: [
+      `:matches(TSAsExpression, TSTypeAssertion) > TSTypeReference.typeAnnotation${ORG_ID}`,
+      `:matches(TSAsExpression, TSTypeAssertion) > .typeAnnotation TSTypeReference${ORG_ID}`,
+      `TSTypePredicate TSTypeReference${ORG_ID}`,
+      `CallExpression:not(${TYPE_ONLY_CALL}) > TSTypeParameterInstantiation TSTypeReference${ORG_ID}`,
+    ].join(', '),
+    message:
+      'Do not make an OrgId here (AG-2.3): not by a cast, a type predicate, or a type argument of a call such as the row type of query(). The type says the database named the organisation. In the API it comes from operatorOf(request).orgId, the device credential (deviceByTokenHash) or another lookup of packages/db/src/sec.ts, never from the request; a lookup that is missing is added there. An offline tool that creates an organisation calls newOrgId(), and one that looks a member or an invite up reads its org_id through asDefiner (both from @tinnox/db/migrate). A test names its organisation with testOrgId(id) from @tinnox/db/testing.',
+  },
+];
+// The types only packages/db may make.
+const NO_BRAND_CAST = [
+  ...NO_MIGRATOR_POOL_CAST,
+  ...NO_TX_CAST,
+  ...NO_SQL_FRAGMENT_CAST,
+  ...NO_ORG_ID_FORGERY,
+];
 
 // Adoption plan section 3.2: the API reads the time from one injected clock, so tests can set it.
 // main.ts and alerts-once.ts create that clock and are outside this rule. `new Date(value)` is a
@@ -359,15 +404,16 @@ const stringMatching = (regex) =>
 
 // AG-2.2 (adoption plan sections 2.4 and 3.2): a sec.* function is called through its typed
 // wrapper in packages/db/src/sec.ts and nowhere else, so each is named once, with the handle it
-// needs (an Autocommit for a lookup, a Tx for a change) and what it returns. Matched in string
-// and template text of product code and scripts; packages/db/src/sec.ts has its own block below.
+// needs (any handle for a lookup, a PreOrgTx or an OrgTx for a change) and what it returns.
+// Matched in string and template text of product code and scripts; packages/db/src/sec.ts has
+// its own block below.
 // Tests are outside: they call the functions raw to test them. Not seen: a name put together at
 // run time ('sec.' + name).
 const NO_RAW_SEC = [
   {
     selector: stringMatching('/\\bsec\\.[a-z_]+\\s*\\(/'),
     message:
-      'Call sec.* through a typed wrapper in packages/db/src/sec.ts (exported from @tinnox/db); add the wrapper if it is missing. It names the function once, types what it returns and says which handle it takes: an Autocommit (poolAsTx(pool) or a tx) for a lookup, a Tx for a call that changes data.',
+      'Call sec.* through a typed wrapper in packages/db/src/sec.ts (exported from @tinnox/db); add the wrapper if it is missing. It names the function once, types what it returns (an organisation as an OrgId) and says which handle it takes: any handle for a lookup (poolAsTx(pool) or a tx), a PreOrgTx for a change before the organisation is known, an OrgTx for one that needs the organisation.',
   },
 ];
 
@@ -441,9 +487,13 @@ const NO_MIGRATOR_URL = [
 // the request. Reports a read of an organisation-id key off a request part (request.body.orgId,
 // request.headers['x-org-id'], const { orgId } = request.params), a request schema written in
 // the API with such a key (the contracts test in packages/contracts covers the shared schemas),
-// and a route's Body, Params, Querystring or Headers type with one. A value copied out of the
-// request first (const input = request.body; input.orgId) is not seen: the OrgId type of
-// adoption plan step 18 closes that.
+// and a route's Body, Params, Querystring or Headers type with one. It reads names only, so a
+// value copied out of the request first (const input = request.body; input.orgId), a cast, a
+// destructured handler parameter and an API-local schema built with .extend or .merge are not
+// seen (LINT-6). The OrgId type holds those (adoption plan step 18): whatever the value is
+// called and however it left the request, it is a string, and withOrg takes an OrgId
+// (apps/api/src/org-from-request.test.ts). This selector stays as the earlier and plainer
+// message for the direct forms.
 const ORG_KEY = '/^(x-)?org(ani[sz]ation)?[-_]?id$/i';
 const REQUEST_PART = '/^(body|params|query|headers|cookies)$/';
 const NO_ORG_FROM_REQUEST = [
@@ -623,9 +673,11 @@ function dbEntryPatterns(dir) {
 // read nothing and nobody notices. They are for sec.* calls only, and only these files may import
 // them, each with its reason. Three of the reasons are not "before the organisation is known",
 // which is what the rule in AGENTS.md says: the list records what each file really does. A file
-// leaves the list when its use is gone (adoption plan section 2.4: an unscoped handle ends with
-// no public query). Test files are outside the rule. Not seen: the names taken from a dynamic
-// import (`const { withoutOrg } = await import('@tinnox/db')`).
+// leaves the list when its use is gone. Since step 18 the handle of withoutOrg is a PreOrgTx,
+// which has no query, so what such a file can do with it is call a sec.* wrapper; the handle of
+// poolAsTx still has one, which tinnox/no-query-off-transaction refuses in these files. Test
+// files are outside the rule. Not seen: the names taken from a dynamic import
+// (`const { withoutOrg } = await import('@tinnox/db')`).
 export const UNSCOPED_HELPER_FILES = {
   'apps/api/src/auth/session.ts':
     'before the organisation is known: poolAsTx for sessionByIdHash, which resolves the session cookie to its member and organisation',
@@ -643,6 +695,18 @@ export const UNSCOPED_HELPER_FILES = {
     'the provisioning exception of AGENTS.md section 1: withoutOrg for `pending`, which expires and lists the invites of every organisation as tinnox_definer (asDefiner from @tinnox/db/migrate)',
 };
 const UNSCOPED_HELPERS = ['withoutOrg', 'poolAsTx'];
+
+// D25: newOrgId (the '@tinnox/db/migrate' entry) names an organisation that is being created,
+// so it turns any string into an OrgId. Only these offline tools may import it, each with its
+// reason; a tool that works on an organisation that exists reads its org_id through asDefiner.
+// The API cannot import the entry at all (DB_ENTRIES), and test files, which this leaves alone,
+// have testOrgId. Not seen: the name taken from a dynamic import.
+export const NEW_ORG_ID_FILES = {
+  'scripts/lib/provision.ts':
+    'org-create makes a new customer organisation, and gives it a fresh id before its first row is written',
+  'scripts/seed.ts':
+    'the development seed creates its two synthetic organisations under fixed ids, so documentation, tests and repeated runs agree',
+};
 
 // The workspaces whose product code can hold a database handle: the rows of IMPORT_LAYERS that
 // name `db`, without tests (the API and the offline tools). The query rules below cover their
@@ -696,6 +760,8 @@ export const SQL_PASS_THROUGH = {
   'packages/db/src/tx.ts': ['text'],
   // The runner sends each migration file as it is; `npm run check:migrations` reads the files.
   'packages/db/src/migrate.ts': ['sql'],
+  // The handle asDefiner gives its work sends the statement the offline tool wrote.
+  'packages/db/src/definer.ts': ['text'],
 };
 
 // Every file ESLint parses as code. A glob without an extension would make ESLint lint JSON,
@@ -993,6 +1059,20 @@ const IMPORT_FACETS = [
     ],
   },
   {
+    // D25: newOrgId, outside the two offline tools that create an organisation.
+    only: ['scripts'],
+    files: [CODE_FILES],
+    ignores: [...TEST_FILES, ...Object.keys(NEW_ORG_ID_FILES)],
+    patterns: [
+      {
+        regex: '^@tinnox/db/migrate$',
+        importNames: ['newOrgId'],
+        message:
+          'newOrgId names an organisation that is being created: only org-create in scripts/lib/provision.ts and the seed call it (D25). For an organisation that exists, read the org_id of its member or invite inside asDefiner(pool, tx, (definer) => definer.query(...)) from @tinnox/db/migrate: the row comes back with org_id as an OrgId, which enterOrg takes. A new tool that really creates organisations is added to NEW_ORG_ID_FILES in eslint.config.js with its reason.',
+      },
+    ],
+  },
+  {
     // process.env read through an import (see NO_PROCESS_ENV).
     except: ['tests'],
     files: ENV_FILES,
@@ -1175,6 +1255,8 @@ const DB_ONE_PLACES = {
   'packages/db/src/definer.ts': NO_ROLE_SWITCH,
   // OTH-12: sql, sqlParameter and joinSql make the SqlFragment.
   'packages/db/src/sql.ts': NO_SQL_FRAGMENT_CAST,
+  // AG-2.3: mintOrgId and the rows asDefiner reads make the OrgId.
+  'packages/db/src/org-id.ts': NO_ORG_ID_FORGERY,
 };
 
 export default tseslint.config(

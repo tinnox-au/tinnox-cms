@@ -42,7 +42,7 @@ await withOrg(pool, orgId, async (tx) => {
 });
 `;
 const IN_HELPER = `
-export async function record(tx: Tx, pool: Pool): Promise<void> {
+export async function record(tx: OrgTx, pool: Pool): Promise<void> {
   await withoutOrg(pool, (inner) => inner.query('SELECT 1'));
 }
 `;
@@ -52,7 +52,7 @@ await withoutOrg(pool, (tx) => tx.query('SELECT 2'));
 `;
 
 const MESSAGE =
-  /^with(out)?Org\(\) is called inside .*, where a transaction is already open\. This opens a second transaction on another connection that commits independently\. Pass the outer tx to the helper: give it a `tx: Tx` parameter/;
+  /^with(out)?Org\(\) is called inside .*, where a transaction is already open\. This opens a second transaction on another connection that commits independently\. Pass the outer tx to the helper: give it a `tx: OrgTx` parameter/;
 
 // The first case loads eslint.config.js, which a busy CI runner can stretch towards the unit
 // project's 5 s default (GAP-1).

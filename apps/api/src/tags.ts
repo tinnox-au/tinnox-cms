@@ -4,7 +4,7 @@
  * (decision D6); the tag routes themselves are in routes/tags.ts.
  */
 import type { TagScope } from '@tinnox/contracts';
-import { sql, STAGE_A_CONSTRAINTS, violatedConstraint, type Tx } from '@tinnox/db';
+import { sql, STAGE_A_CONSTRAINTS, violatedConstraint, type OrgTx } from '@tinnox/db';
 import { bigintToNumber } from './db-helpers.ts';
 import { notFound, pgErrorCode } from './errors.ts';
 
@@ -38,7 +38,7 @@ export function isUnknownTag(error: unknown): boolean {
  * same as an id that was never issued.
  */
 export async function replaceTags(
-  tx: Tx,
+  tx: OrgTx,
   scope: TagScope,
   targetId: string,
   tagIds: readonly string[],

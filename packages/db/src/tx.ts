@@ -1,15 +1,29 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import pg from 'pg';
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from './pool.ts';
+import { keepStatements } from './pre-org.ts';
 import { rememberPool } from './tx-pool.ts';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
+declare const organisation: unique symbol;
+/**
+ * The id of an organisation that the database named: the verified session's member, the device
+ * credential, or one of the other lookups of ./sec.ts. `withOrg` and `enterOrg` take nothing
+ * else, so a string from a path, a query, a body or a header does not type-check as the
+ * organisation a query runs for (AG-2.3). Only ./org-id.ts makes one, and lint refuses a cast
+ * to it everywhere else (NO_ORG_ID_FORGERY in eslint.config.js). The offline tools have two
+ * more sources, both in the '@tinnox/db/migrate' entry: `newOrgId` for an organisation that is
+ * being created, and what `asDefiner` reads (D25). Tests make one with `testOrgId` from
+ * '@tinnox/db/testing'.
+ */
+export type OrgId = string & { readonly [organisation]: true };
+
 /**
  * A handle that runs one statement at a time, each committing on its own: what `poolAsTx`
  * returns. A function that only reads before the organisation is known, or whose one statement
- * is complete by itself (the login state, the purges), takes this, and so also accepts a `Tx`.
- * Always pass values as parameters; never build SQL from input.
+ * is complete by itself (the login state, the purges), takes this, and so also accepts an
+ * `OrgTx`. Always pass values as parameters; never build SQL from input.
  */
 export interface Autocommit {
   query<R extends QueryResultRow = QueryResultRow>(
@@ -18,19 +32,42 @@ export interface Autocommit {
   ): Promise<QueryResult<R>>;
 }
 
-/** Marks a handle made by run(). Not exported, so no other module can build a `Tx`. */
+/**
+ * Marks a handle made by run(), with what it knows of the organisation. Not exported, so no
+ * other module can build a transaction handle.
+ */
 const inTransaction: unique symbol = Symbol('inTransaction');
 
 /**
- * The only handle request code gets on the database inside a transaction: the callback of
- * `withOrg`, `withoutOrg` or `withResolvedOrg` receives it. A pool, and the handle `poolAsTx`
- * returns, are not a `Tx`. So a function that takes a `Tx` (the audit writers, and every sec.*
- * wrapper that changes data) cannot be given a handle that commits each statement on its own,
- * and the audit row commits or rolls back with the change it records (CX-01, D2).
+ * A transaction with the organisation set: the callback of `withOrg` receives it, and so does
+ * the caller of `enterOrg`. Row-level security limits every statement on it to that
+ * organisation. This is the only handle request code can send a statement of its own on, so a
+ * tenant query cannot run where no organisation is set (AG-2.1). The scoped audit writer and
+ * the sec.* wrappers that need the organisation take it.
  */
-export interface Tx extends Autocommit {
-  readonly [inTransaction]: true;
+export interface OrgTx extends Autocommit {
+  readonly [inTransaction]: 'org';
 }
+
+/**
+ * A transaction before the organisation is known: the callback of `withoutOrg` and of
+ * `withResolvedOrg` receives it. It has no `query`: tenant tables show no rows here, so the
+ * only thing to do with it is to hand it to a sec.* wrapper of ./sec.ts that takes one (they
+ * resolve a credential to its organisation, or record what has none), and then to `enterOrg`
+ * (AG-2.2).
+ */
+export interface PreOrgTx {
+  readonly [inTransaction]: 'pre';
+}
+
+/**
+ * Any handle inside a transaction, whichever of the two it is. A pool, and the handle
+ * `poolAsTx` returns, are neither. So a function that takes an `OrgTx` or a `PreOrgTx` (the
+ * audit writers, and every sec.* wrapper that changes data) cannot be given a handle that
+ * commits each statement on its own, and the audit row commits or rolls back with the change
+ * it records (CX-01, D2). Code that sends a statement names the one it needs: `tx: OrgTx`.
+ */
+export type Tx = OrgTx | PreOrgTx;
 
 /** One transaction of run(): `open` from BEGIN until its callback returns or throws. */
 interface Transaction {
@@ -59,9 +96,9 @@ function refuseNested(opener: string, instead = 'Pass the outer tx to the helper
   }
 }
 
-function wrap(client: PoolClient, transaction: Transaction): Tx {
+/** The statements of one transaction: what a handle of run() sends, until the transaction ends. */
+function statementsOn(client: PoolClient, transaction: Transaction): Autocommit {
   return {
-    [inTransaction]: true,
     query: <R extends QueryResultRow = QueryResultRow>(
       text: string,
       values?: readonly unknown[],
@@ -79,6 +116,35 @@ function wrap(client: PoolClient, transaction: Transaction): Tx {
       return client.query<R>(text, values === undefined ? undefined : [...values]);
     },
   };
+}
+
+/** The handle of a transaction whose organisation is set. `pool` is for asDefiner (./definer.ts). */
+function orgHandle(statements: Autocommit, pool: Pool): OrgTx {
+  const tx: OrgTx = {
+    [inTransaction]: 'org',
+    query: <R extends QueryResultRow = QueryResultRow>(text: string, values?: readonly unknown[]) =>
+      statements.query<R>(text, values),
+  };
+  keepStatements(tx, statements);
+  rememberPool(tx, pool);
+  return tx;
+}
+
+/**
+ * The handle of a transaction with no organisation yet. Its statements are kept where only this
+ * package finds them (./pre-org.ts), so the object itself has no `query` to call.
+ */
+function preOrgHandle(statements: Autocommit, pool: Pool): PreOrgTx {
+  const tx: PreOrgTx = { [inTransaction]: 'pre' };
+  keepStatements(tx, statements);
+  rememberPool(tx, pool);
+  return tx;
+}
+
+function requireOrgId(caller: string, orgId: OrgId): void {
+  if (typeof orgId !== 'string' || !UUID_PATTERN.test(orgId)) {
+    throw new Error(`${caller} requires a lower-case UUID organisation id`);
+  }
 }
 
 /**
@@ -117,7 +183,7 @@ async function run<T>(
   opener: string,
   pool: Pool,
   begin: (client: PoolClient) => Promise<void>,
-  fn: (tx: Tx) => Promise<T>,
+  fn: (statements: Autocommit) => Promise<T>,
 ): Promise<T> {
   refuseNested(opener);
   const client = await pool.connect();
@@ -135,10 +201,8 @@ async function run<T>(
     await begin(client);
     let result: T;
     try {
-      const tx = wrap(client, transaction);
-      // For asDefiner (./definer.ts), which must know the handle came from the migrator's pool.
-      rememberPool(tx, pool);
-      result = await current.run(transaction, () => fn(tx));
+      const statements = statementsOn(client, transaction);
+      result = await current.run(transaction, () => fn(statements));
     } finally {
       // The handle closes before COMMIT or ROLLBACK is sent (U-2), and work the callback left
       // running no longer counts as inside this transaction (U-3).
@@ -171,64 +235,70 @@ async function run<T>(
  *   BEGIN; SELECT set_config('app.org_id', $1, true); ...fn...; COMMIT
  *
  * Row-level security then limits every statement in `fn` to `orgId`.
- * `orgId` must come from a verified session or device credential, never from
+ * `orgId` is an `OrgId`: it comes from a verified session or device credential, never from
  * request input. The setting is transaction-local, so it cannot leak to the
  * next user of the pooled connection. Rolls back when `fn` throws.
  */
 export async function withOrg<T>(
   pool: Pool,
-  orgId: string,
-  fn: (tx: Tx) => Promise<T>,
+  orgId: OrgId,
+  fn: (tx: OrgTx) => Promise<T>,
 ): Promise<T> {
-  if (typeof orgId !== 'string' || !UUID_PATTERN.test(orgId)) {
-    throw new Error('withOrg requires a lower-case UUID organisation id');
-  }
+  requireOrgId('withOrg', orgId);
   return run(
     'withOrg',
     pool,
     async (client) => {
       await client.query("SELECT set_config('app.org_id', $1, true)", [orgId]);
     },
-    fn,
+    (statements) => fn(orgHandle(statements, pool)),
   );
 }
 
 /**
  * Runs `fn` in one transaction with NO tenant context. Tenant tables show no
- * rows here. Use only for sec.* calls that happen before the organisation is known.
+ * rows here, and the handle takes no statement of the caller's own. Use only for sec.* calls
+ * that happen before the organisation is known.
  */
-export async function withoutOrg<T>(pool: Pool, fn: (tx: Tx) => Promise<T>): Promise<T> {
-  return run('withoutOrg', pool, async () => undefined, fn);
+export async function withoutOrg<T>(pool: Pool, fn: (tx: PreOrgTx) => Promise<T>): Promise<T> {
+  return run(
+    'withoutOrg',
+    pool,
+    async () => undefined,
+    (statements) => fn(preOrgHandle(statements, pool)),
+  );
 }
 
 /**
  * Runs `fn` in one transaction whose organisation is not known when it starts:
  * pairing completion, sign-in and sign-out, where a sec.* call resolves a
  * credential to its organisation. `fn` calls `enterOrg` with that organisation
- * to set the tenant context for the rest of the transaction, so the credential
- * change and its audit event commit or roll back together. The same rule as
- * `withOrg` applies: the id must come from a verified credential, never from
- * request input.
+ * to set the tenant context for the rest of the transaction, and runs its tenant
+ * statements on the `OrgTx` that `enterOrg` returns, so the credential change and
+ * its audit event commit or roll back together. The same rule as `withOrg`
+ * applies: the id is an `OrgId`, from a verified credential, never from request
+ * input. Call `enterOrg` once: nothing stops a second call, which would move the
+ * transaction, and the handle the first call returned with it, to another
+ * organisation.
  */
 export async function withResolvedOrg<T>(
   pool: Pool,
-  fn: (tx: Tx, enterOrg: (orgId: string) => Promise<void>) => Promise<T>,
+  fn: (tx: PreOrgTx, enterOrg: (orgId: OrgId) => Promise<OrgTx>) => Promise<T>,
 ): Promise<T> {
   return run(
     'withResolvedOrg',
     pool,
     async () => undefined,
-    (tx) =>
-      fn(tx, async (orgId) => {
-        if (typeof orgId !== 'string' || !UUID_PATTERN.test(orgId)) {
-          throw new Error('enterOrg requires a lower-case UUID organisation id');
-        }
-        await tx.query("SELECT set_config('app.org_id', $1, true)", [orgId]);
+    (statements) =>
+      fn(preOrgHandle(statements, pool), async (orgId) => {
+        requireOrgId('enterOrg', orgId);
+        await statements.query("SELECT set_config('app.org_id', $1, true)", [orgId]);
+        return orgHandle(statements, pool);
       }),
   );
 }
 
-/** Minimal query interface satisfied by Pool, PoolClient and Tx. */
+/** Minimal query interface satisfied by Pool, PoolClient and OrgTx. */
 export interface Queryable {
   query<R extends QueryResultRow = QueryResultRow>(
     text: string,

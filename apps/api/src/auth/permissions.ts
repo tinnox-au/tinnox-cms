@@ -23,7 +23,7 @@ import {
   type Role,
   type TagScope,
 } from '@tinnox/contracts';
-import { lockOrgMembership, membershipForCheck, withOrg, type Tx } from '@tinnox/db';
+import { lockOrgMembership, membershipForCheck, withOrg, type OrgTx } from '@tinnox/db';
 import { permissionsOf } from '@tinnox/domain';
 import type { FastifyReply, FastifyRequest, RouteOptions } from 'fastify';
 import type { AppContext } from '../context.ts';
@@ -432,7 +432,7 @@ export function permissionGuard(
  * ended): 401. Role lacks the keys: 403 (reason `role_changed`).
  */
 export async function assertStillAllowed(
-  tx: Tx,
+  tx: OrgTx,
   session: OperatorSession,
   required: Requirement,
 ): Promise<Role> {
@@ -505,7 +505,7 @@ async function settle(
 export async function withOrgAllowed<T>(
   ctx: AppContext,
   request: FastifyRequest,
-  fn: (tx: Tx, role: Role) => Promise<T>,
+  fn: (tx: OrgTx, role: Role) => Promise<T>,
   options?: { readonly required?: Requirement; readonly lockMembership?: boolean },
 ): Promise<T> {
   const session = operatorOf(request);
@@ -525,7 +525,7 @@ export async function withOrgAllowed<T>(
 export async function withOrgDecisionAllowed<T>(
   ctx: AppContext,
   request: FastifyRequest,
-  fn: (tx: Tx, role: Role) => Promise<Decision<T>>,
+  fn: (tx: OrgTx, role: Role) => Promise<Decision<T>>,
   options?: { readonly required?: Requirement; readonly lockMembership?: boolean },
 ): Promise<T> {
   const decision = await withOrgAllowed(ctx, request, fn, options);

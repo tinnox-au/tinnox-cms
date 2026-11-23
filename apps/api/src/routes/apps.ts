@@ -14,7 +14,7 @@ import {
   type AppDto,
   type AppListResponse,
 } from '@tinnox/contracts';
-import { auditScoped, withOrg, type Tx } from '@tinnox/db';
+import { auditScoped, withOrg, type OrgTx } from '@tinnox/db';
 import type { FastifyInstance } from 'fastify';
 import { APP_COLUMNS, toAppDto, type AppRow } from '../app-rows.ts';
 import { withOrgAllowed } from '../auth/permissions.ts';
@@ -22,7 +22,7 @@ import { operatorOf } from '../auth/session.ts';
 import type { AppContext } from '../context.ts';
 import { HttpError, notFound, parseInput, pgErrorCode } from '../errors.ts';
 
-async function loadApp(tx: Tx, id: string): Promise<AppDto | null> {
+async function loadApp(tx: OrgTx, id: string): Promise<AppDto | null> {
   const { rows } = await tx.query<AppRow>(
     `SELECT ${APP_COLUMNS} FROM app a WHERE a.id = $1 AND a.org_id = app_org_id()`,
     [id],

@@ -13,7 +13,7 @@ import {
   withOrg,
   type Pool,
   type PoolClient,
-  type Tx,
+  type OrgTx,
 } from '../src/index.ts';
 import {
   appPool,
@@ -47,33 +47,33 @@ const asA = (sql: string, values: readonly unknown[] = []) =>
 
 const unique = (label: string) => `${label} ${randomUUID().slice(0, 8)}`;
 
-async function insertId(tx: Tx, sql: string, values: readonly unknown[]): Promise<string> {
+async function insertId(tx: OrgTx, sql: string, values: readonly unknown[]): Promise<string> {
   const { rows } = await tx.query<{ id: string }>(`${sql} RETURNING id`, values);
   const id = rows[0]?.id;
   if (id === undefined) throw new Error('insert returned no row');
   return id;
 }
 
-const newPlaylist = (tx: Tx, name = unique('Playlist')) =>
+const newPlaylist = (tx: OrgTx, name = unique('Playlist')) =>
   insertId(tx, 'INSERT INTO playlist (org_id, name) VALUES (app_org_id(), $1)', [name]);
-const newDisplay = (tx: Tx, siteId: string, assignedPlaylistId: string | null = null) =>
+const newDisplay = (tx: OrgTx, siteId: string, assignedPlaylistId: string | null = null) =>
   insertId(
     tx,
     `INSERT INTO display (org_id, site_id, name, canvas_width, canvas_height, assigned_playlist_id)
      VALUES (app_org_id(), $1, $2, 640, 360, $3)`,
     [siteId, unique('Display'), assignedPlaylistId],
   );
-const newMedia = (tx: Tx, kind: 'image' | 'video' = 'image') =>
+const newMedia = (tx: OrgTx, kind: 'image' | 'video' = 'image') =>
   insertId(tx, 'INSERT INTO media (org_id, kind, original_name) VALUES (app_org_id(), $1, $2)', [
     kind,
     kind === 'image' ? 'photo.png' : 'clip.mp4',
   ]);
-const newTag = (tx: Tx, scope: 'media' | 'display', name = unique('Tag')) =>
+const newTag = (tx: OrgTx, scope: 'media' | 'display', name = unique('Tag')) =>
   insertId(tx, 'INSERT INTO tag (org_id, scope, name) VALUES (app_org_id(), $1, $2)', [
     scope,
     name,
   ]);
-const newFolder = (tx: Tx, name = unique('Folder')) =>
+const newFolder = (tx: OrgTx, name = unique('Folder')) =>
   insertId(tx, 'INSERT INTO folder (org_id, name) VALUES (app_org_id(), $1)', [name]);
 
 describe('tags', () => {
@@ -656,7 +656,7 @@ describe('indexes for the stage A lookups', () => {
 });
 
 describe('audit category', () => {
-  const insertAudit = (tx: Tx, action: string) =>
+  const insertAudit = (tx: OrgTx, action: string) =>
     tx.query<{ category: string }>(
       `INSERT INTO audit_event (org_id, actor_type, action, result)
        VALUES (app_org_id(), 'system', $1, 'success') RETURNING category`,

@@ -12,7 +12,7 @@ import {
   STAGE_B_CONSTRAINTS,
   withOrg,
   type Pool,
-  type Tx,
+  type OrgTx,
 } from '../src/index.ts';
 import {
   appPool,
@@ -50,7 +50,7 @@ const violationAsA = (sql: string, values: readonly unknown[] = []) =>
 
 const unique = (label: string) => `${label} ${randomUUID().slice(0, 8)}`;
 
-async function insertId(tx: Tx, sql: string, values: readonly unknown[]): Promise<string> {
+async function insertId(tx: OrgTx, sql: string, values: readonly unknown[]): Promise<string> {
   const { rows } = await tx.query<{ id: string }>(`${sql} RETURNING id`, values);
   const id = rows[0]?.id;
   if (id === undefined) throw new Error('insert returned no row');
@@ -79,12 +79,12 @@ const zoneValues = (zone: ZoneValues): unknown[] => [
 ];
 const insertZone = (zone: ZoneValues = {}) => asA(INSERT_ZONE, zoneValues(zone));
 
-const newPlaylist = (tx: Tx) =>
+const newPlaylist = (tx: OrgTx) =>
   insertId(tx, 'INSERT INTO playlist (org_id, name) VALUES (app_org_id(), $1)', [
     unique('Playlist'),
   ]);
 /** A layout with one zone per playlist in position order, stacked as rows a quarter high. */
-async function newLayout(tx: Tx, playlistIds: readonly string[] = []): Promise<string> {
+async function newLayout(tx: OrgTx, playlistIds: readonly string[] = []): Promise<string> {
   const id = await insertId(tx, 'INSERT INTO layout (org_id, name) VALUES (app_org_id(), $1)', [
     unique('Layout'),
   ]);
@@ -93,7 +93,7 @@ async function newLayout(tx: Tx, playlistIds: readonly string[] = []): Promise<s
   }
   return id;
 }
-const newDisplay = (tx: Tx) =>
+const newDisplay = (tx: OrgTx) =>
   insertId(
     tx,
     `INSERT INTO display (org_id, site_id, name, canvas_width, canvas_height)
@@ -446,7 +446,7 @@ describe('deleting a layout', () => {
 });
 
 describe('version 5 publications', () => {
-  const insertPublication = (tx: Tx, id: string, manifest: Record<string, unknown>) =>
+  const insertPublication = (tx: OrgTx, id: string, manifest: Record<string, unknown>) =>
     tx.query(
       'INSERT INTO publication (id, org_id, display_id, playlist_id, manifest, idempotency_key, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7)',
       [

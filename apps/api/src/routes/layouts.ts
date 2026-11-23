@@ -14,7 +14,7 @@ import {
   type LayoutInput,
   type LayoutListResponse,
 } from '@tinnox/contracts';
-import { auditScoped, withOrg, type Tx } from '@tinnox/db';
+import { auditScoped, withOrg, type OrgTx } from '@tinnox/db';
 import type { FastifyInstance } from 'fastify';
 import { withOrgAllowed } from '../auth/permissions.ts';
 import { operatorOf, type OperatorSession } from '../auth/session.ts';
@@ -43,7 +43,7 @@ interface LayoutZoneRow {
  * layout written through the API always has two to four zones and a zone's playlist cannot
  * be deleted; a layout without zones (direct SQL only) is left out.
  */
-async function loadLayouts(tx: Tx, id: string | null): Promise<LayoutDto[]> {
+async function loadLayouts(tx: OrgTx, id: string | null): Promise<LayoutDto[]> {
   const { rows } = await tx.query<LayoutZoneRow>(
     `WITH l AS (
        SELECT l.id, l.name, l.description, l.created_at, l.updated_at,
@@ -94,7 +94,7 @@ async function loadLayouts(tx: Tx, id: string | null): Promise<LayoutDto[]> {
  * Returns null when the layout to replace does not exist.
  */
 async function saveLayout(
-  tx: Tx,
+  tx: OrgTx,
   session: OperatorSession,
   id: string | null,
   input: LayoutInput,

@@ -7,7 +7,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { withOrg, type Pool, type Tx } from '../src/index.ts';
+import { withOrg, type Pool, type OrgTx } from '../src/index.ts';
 import { appPool, createOrg, migratorClient, PG, pgCode, type TestOrg } from './support.ts';
 
 let pool: Pool;
@@ -50,7 +50,7 @@ const insertApp = (
     ],
   );
 
-const newApp = async (tx: Tx): Promise<string> => {
+const newApp = async (tx: OrgTx): Promise<string> => {
   const { rows } = await tx.query<{ id: string }>(
     "INSERT INTO app (org_id, type, name, settings) VALUES (app_org_id(), 'text', 'Item app', $1) RETURNING id",
     [JSON.stringify(textSettings)],
@@ -194,7 +194,7 @@ describe('version 3 publications', () => {
     },
   };
 
-  const insertPublication = (tx: Tx, id: string, assets: unknown[]) =>
+  const insertPublication = (tx: OrgTx, id: string, assets: unknown[]) =>
     tx.query(
       'INSERT INTO publication (id, org_id, display_id, playlist_id, manifest, idempotency_key, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7)',
       [

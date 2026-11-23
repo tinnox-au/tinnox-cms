@@ -76,9 +76,9 @@ export default createRule<Options, 'interpolation' | 'statement'>({
     defaultOptions: [{}],
     messages: {
       interpolation:
-        'SQL text may interpolate only an UPPER_CASE module constant or a SqlFragment, and `{{text}}` is neither. Pass a value as a parameter ($1, $2; see Tx in packages/db/src/tx.ts). For fixed text chosen at run time make a SqlFragment with sql`...`, sqlParameter(position) or joinSql(parts, separator) from @tinnox/db (packages/db/src/sql.ts).',
+        'SQL text may interpolate only an UPPER_CASE module constant or a SqlFragment, and `{{text}}` is neither. Pass a value as a parameter ($1, $2; see OrgTx in packages/db/src/tx.ts). For fixed text chosen at run time make a SqlFragment with sql`...`, sqlParameter(position) or joinSql(parts, separator) from @tinnox/db (packages/db/src/sql.ts).',
       statement:
-        'The statement given to query() must be text from the source: a string literal, a template, an UPPER_CASE module constant or a SqlFragment, and `{{text}}` is none of these. Write the statement at the call and pass values as parameters ($1, $2; see Tx in packages/db/src/tx.ts); for fixed text chosen at run time make a SqlFragment with sql`...`, sqlParameter(position) or joinSql(parts, separator) from @tinnox/db (packages/db/src/sql.ts).',
+        'The statement given to query() must be text from the source: a string literal, a template, an UPPER_CASE module constant or a SqlFragment, and `{{text}}` is none of these. Write the statement at the call and pass values as parameters ($1, $2; see OrgTx in packages/db/src/tx.ts); for fixed text chosen at run time make a SqlFragment with sql`...`, sqlParameter(position) or joinSql(parts, separator) from @tinnox/db (packages/db/src/sql.ts).',
     },
   },
   defaultOptions: [{}],

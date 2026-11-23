@@ -3,12 +3,14 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
-import { createPool, violatedConstraint, type Pool } from '../src/index.ts';
-import { unjudgedSql } from '../src/testing.ts';
+import { createPool, violatedConstraint, type OrgId, type Pool } from '../src/index.ts';
+import { testOrgId, unjudgedSql } from '../src/testing.ts';
 
-// The helper that opens a real transaction for the wrappers and audit writers that take a `Tx`
-// (D2). It lives in the package's testing entry, so tests outside this package use the same one.
-export { inTx } from '../src/testing.ts';
+// The helper that opens a real transaction for the wrappers and the audit writer that take a
+// `PreOrgTx` (D2), the one that names a test's organisation, and the one that lets a test send
+// its own statements where no organisation is set. They live in the package's testing entry, so
+// tests outside this package use the same ones.
+export { inTx, testOrgId, withNoOrgSet } from '../src/testing.ts';
 
 const envFile = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '.env');
 if (existsSync(envFile)) process.loadEnvFile(envFile);
@@ -51,7 +53,7 @@ export async function migratorClient(): Promise<pg.Client> {
 }
 
 export interface TestOrg {
-  orgId: string;
+  orgId: OrgId;
   siteId: string;
   membershipId: string;
   oidcSub: string;
@@ -97,7 +99,7 @@ export async function createOrg(
   options: { role?: 'owner' | 'admin' | 'editor' | 'viewer' | 'operator' } = {},
 ): Promise<TestOrg> {
   const o: TestOrg = {
-    orgId: randomUUID(),
+    orgId: testOrgId(randomUUID()),
     siteId: randomUUID(),
     membershipId: randomUUID(),
     oidcSub: `test-sub-${randomUUID()}`,

@@ -6,13 +6,14 @@
 // the pool never answers). run() in packages/db/src/tx.ts refuses the same thing at run time on
 // any path; this rule reports the cases that can be read from one file:
 //   - a call inside the callback given to one of the functions of OPENERS, and
-//   - a call inside a function that takes a transaction handle (a parameter typed Tx).
-// A handle that may be absent (`tx?: Tx`, `tx: Tx | undefined`, `Tx | null`) or is wrapped
-// (`Readonly<Tx>`, `NonNullable<Tx>`) is still a handle.
+//   - a call inside a function that takes a transaction handle (a parameter typed OrgTx,
+//     PreOrgTx, Tx, or DefinerTx, the handle asDefiner gives its work).
+// A handle that may be absent (`tx?: OrgTx`, `tx: OrgTx | undefined`, `OrgTx | null`) or is
+// wrapped (`Readonly<OrgTx>`, `NonNullable<OrgTx>`) is still a handle.
 // Not seen, and left to the runtime guard: a helper that opens the transaction itself and is
 // called from a callback (the helper's own file looks innocent), and a handle that reaches the
-// function untyped, inside an object (`{ tx }: { tx: Tx }`), or in a union with another type
-// (`Tx | Pool`, which may be no handle at all).
+// function untyped, inside an object (`{ tx }: { tx: OrgTx }`), or in a union with another type
+// (`OrgTx | Pool`, which may be no handle at all).
 import { AST_NODE_TYPES, type TSESTree } from '@typescript-eslint/utils';
 import { createRule } from './create-rule.ts';
 
@@ -48,8 +49,9 @@ const BY_NAME: ReadonlyMap<string, 'standaloneAudit' | 'unauditedRevoke'> = new 
   ['sessionRevokeUnaudited', 'unauditedRevoke'],
 ]);
 
-// The types of a transaction handle: a function that takes one runs inside a transaction.
-const HANDLE_TYPES: ReadonlySet<string> = new Set(['Tx']);
+// The types of a transaction handle (packages/db/src/tx.ts and definer.ts): a function that
+// takes one runs inside a transaction.
+const HANDLE_TYPES: ReadonlySet<string> = new Set(['OrgTx', 'PreOrgTx', 'Tx', 'DefinerTx']);
 
 type FunctionNode =
   TSESTree.ArrowFunctionExpression | TSESTree.FunctionDeclaration | TSESTree.FunctionExpression;
@@ -65,7 +67,7 @@ function isNullish(node: TSESTree.TypeNode): boolean {
 
 function nameOfType(node: TSESTree.TypeNode | undefined): string | undefined {
   if (node?.type === AST_NODE_TYPES.TSUnionType) {
-    // `Tx | undefined` is `tx?: Tx` written out. With any other member the value may be no
+    // `OrgTx | undefined` is `tx?: OrgTx` written out. With any other member the value may be no
     // handle, and the function may rightly open a transaction then: left to run().
     const named = node.types.filter((member) => !isNullish(member));
     return named.length === 1 ? nameOfType(named[0]) : undefined;
@@ -76,13 +78,13 @@ function nameOfType(node: TSESTree.TypeNode | undefined): string | undefined {
       ? nameOfType(node.typeArguments?.params[0])
       : node.typeName.name;
   }
-  // A namespace import: db.Tx.
+  // A namespace import: db.OrgTx.
   return node.typeName.type === AST_NODE_TYPES.TSQualifiedName
     ? node.typeName.right.name
     : undefined;
 }
 
-/** The handle parameter of `node` as written (`tx: Tx`), if it has one. */
+/** The handle parameter of `node` as written (`tx: OrgTx`), if it has one. */
 function handleParameter(node: FunctionNode): string | undefined {
   for (const written of node.params) {
     // A default value or a parameter property wraps the name.
@@ -110,7 +112,7 @@ export default createRule({
     schema: [],
     messages: {
       nested:
-        '{{opener}}() is called inside {{outer}}, where a transaction is already open. This opens a second transaction on another connection that commits independently. Pass the outer tx to the helper: give it a `tx: Tx` parameter (from @tinnox/db) and run the statements on that; work that must commit on its own goes after the outer call has returned.',
+        '{{opener}}() is called inside {{outer}}, where a transaction is already open. This opens a second transaction on another connection that commits independently. Pass the outer tx to the helper: give it a `tx: OrgTx` parameter (from @tinnox/db) and run the statements on that; work that must commit on its own goes after the outer call has returned.',
       standaloneAudit:
         '{{opener}}() is called inside {{outer}}, where a transaction is already open. This opens a second transaction on another connection that commits independently. Write the event on the outer tx instead: auditUnscoped(tx, event), or auditScoped(tx, event) when the outer transaction is withOrg (both from @tinnox/db). auditStandalone is only for a refusal that no transaction carries: call it after the outer call has returned or thrown.',
       unauditedRevoke:

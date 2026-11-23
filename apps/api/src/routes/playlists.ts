@@ -29,7 +29,13 @@ import {
   type PublishResponse,
   type Transition,
 } from '@tinnox/contracts';
-import { auditScoped, STAGE_A_CONSTRAINTS, violatedConstraint, withOrg, type Tx } from '@tinnox/db';
+import {
+  auditScoped,
+  STAGE_A_CONSTRAINTS,
+  violatedConstraint,
+  withOrg,
+  type OrgTx,
+} from '@tinnox/db';
 import { isAppDraftItem, validatePlaylist } from '@tinnox/domain';
 import type { FastifyInstance } from 'fastify';
 import { APP_COLUMNS, toAppDto, type AppRow } from '../app-rows.ts';
@@ -84,7 +90,7 @@ interface ItemRow {
   fit: FitMode | null;
 }
 
-async function loadPlaylistDto(tx: Tx, id: string): Promise<PlaylistDto | null> {
+async function loadPlaylistDto(tx: OrgTx, id: string): Promise<PlaylistDto | null> {
   const playlist = await tx.query<PlaylistRow & { transition: Transition; shuffle: boolean }>(
     `SELECT id, name, description, transition, shuffle, created_at, updated_at FROM playlist
      WHERE id = $1 AND org_id = app_org_id() AND deleted_at IS NULL`,

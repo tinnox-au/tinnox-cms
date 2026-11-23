@@ -9,7 +9,7 @@ import {
   MediaMimeTypeSchema,
   type MediaDto,
 } from '@tinnox/contracts';
-import type { Tx } from '@tinnox/db';
+import type { OrgTx } from '@tinnox/db';
 import { bigintToNumber, iso } from '../db-helpers.ts';
 
 export interface MediaRow {
@@ -94,7 +94,7 @@ export function toMediaDto(row: MediaRow): MediaDto {
 }
 
 /** Bytes that count against the organisation's quota: everything queued or stored. */
-export async function usedBytes(tx: Tx): Promise<number> {
+export async function usedBytes(tx: OrgTx): Promise<number> {
   const { rows } = await tx.query<{ used: string }>(
     `SELECT coalesce(sum(bytes), 0)::bigint AS used FROM media
      WHERE org_id = app_org_id() AND status IN ('processing', 'ready')`,

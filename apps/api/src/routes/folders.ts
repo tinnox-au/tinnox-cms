@@ -11,7 +11,13 @@ import {
   type FolderDto,
   type FolderListResponse,
 } from '@tinnox/contracts';
-import { auditScoped, STAGE_A_CONSTRAINTS, violatedConstraint, withOrg, type Tx } from '@tinnox/db';
+import {
+  auditScoped,
+  STAGE_A_CONSTRAINTS,
+  violatedConstraint,
+  withOrg,
+  type OrgTx,
+} from '@tinnox/db';
 import type { FastifyInstance } from 'fastify';
 import { withOrgAllowed } from '../auth/permissions.ts';
 import { operatorOf } from '../auth/session.ts';
@@ -34,7 +40,7 @@ function toFolderDto(row: FolderRow): FolderDto {
   return { id: row.id, name: row.name, itemCount: bigintToNumber(row.item_count) };
 }
 
-async function loadFolder(tx: Tx, id: string): Promise<FolderDto | null> {
+async function loadFolder(tx: OrgTx, id: string): Promise<FolderDto | null> {
   const { rows } = await tx.query<FolderRow>(
     `SELECT ${FOLDER_COLUMNS} FROM folder f WHERE f.id = $1 AND f.org_id = app_org_id()`,
     [id],

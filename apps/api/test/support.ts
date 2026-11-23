@@ -36,14 +36,16 @@ import {
 } from '@tinnox/contracts';
 import {
   createPool,
+  mediaProcessingJobs,
   poolAsTx,
   sessionCreate,
   sha256,
   withOrg,
   withoutOrg,
+  type OrgId,
   type Pool,
 } from '@tinnox/db';
-import { unjudgedSql } from '@tinnox/db/testing';
+import { testOrgId, unjudgedSql } from '@tinnox/db/testing';
 import { createDeliveryRegistry } from '@tinnox/delivery';
 import { LocalObjectStorage } from '@tinnox/storage';
 import type { FastifyInstance } from 'fastify';
@@ -281,7 +283,7 @@ export async function startTestApp(
 }
 
 export interface TestOrg {
-  readonly orgId: string;
+  readonly orgId: OrgId;
   readonly siteId: string;
   readonly membershipId: string;
   readonly oidcSub: string;
@@ -297,7 +299,7 @@ export async function createOrg(
   options: { readonly role?: Role; readonly displayName?: string | null } = {},
 ): Promise<TestOrg> {
   const org: TestOrg = {
-    orgId: randomUUID(),
+    orgId: testOrgId(randomUUID()),
     siteId: randomUUID(),
     membershipId: randomUUID(),
     oidcSub: `api-test-${randomUUID()}`,
@@ -384,7 +386,7 @@ export async function signIn(
 ): Promise<Operator> {
   const sessionId = randomBytes(32).toString('base64url');
   const csrfToken = randomBytes(32).toString('base64url');
-  // In a transaction, as the callback route calls it: sessionCreate takes a Tx (D2). On the
+  // In a transaction, as the callback route calls it: sessionCreate takes a PreOrgTx (D2). On the
   // test's own pool: the callback writes auth.login with the session, and this stand-in for it
   // writes no audit row, which the audit-debt guard would refuse on the application's pool.
   const created = await withoutOrg(
@@ -819,13 +821,11 @@ export async function auditEvents(operator: Operator, filter = ''): Promise<Audi
 export async function settleStrayMediaJobs(pool: Pool): Promise<number> {
   let settled = 0;
   for (;;) {
-    const { rows } = await poolAsTx(pool).query<{ media_id: string; org_id: string }>(
-      'SELECT media_id, org_id FROM sec.media_processing_jobs($1)',
-      [5000],
-    );
-    if (rows.length === 0) return settled;
-    const byOrg = new Map<string, string[]>();
-    for (const row of rows) byOrg.set(row.org_id, [...(byOrg.get(row.org_id) ?? []), row.media_id]);
+    // Through the typed wrapper: the organisation it names is what withOrg takes.
+    const jobs = await mediaProcessingJobs(poolAsTx(pool), 5000);
+    if (jobs.length === 0) return settled;
+    const byOrg = new Map<OrgId, string[]>();
+    for (const job of jobs) byOrg.set(job.orgId, [...(byOrg.get(job.orgId) ?? []), job.mediaId]);
     let changed = 0;
     for (const [orgId, mediaIds] of byOrg) {
       changed += await withOrg(pool, orgId, async (tx) => {

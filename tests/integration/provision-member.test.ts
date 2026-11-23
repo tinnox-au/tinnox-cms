@@ -11,8 +11,8 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { inviteReference } from '@tinnox/contracts';
-import { withOrg, withoutOrg } from '@tinnox/db';
-import { connectMigrator, type MigratorPool } from '@tinnox/db/migrate';
+import { withOrg, withoutOrg, type OrgId } from '@tinnox/db';
+import { asDefiner, connectMigrator, type MigratorPool } from '@tinnox/db/migrate';
 import { removeAuditFault, whileAuditFails } from '@tinnox/db/testing';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -166,7 +166,7 @@ interface MemberRow {
   readonly cut_off: Date | null;
 }
 
-async function members(orgId: string): Promise<MemberRow[]> {
+async function members(orgId: OrgId): Promise<MemberRow[]> {
   return withOrg(pool, orgId, async (tx) => {
     const { rows } = await tx.query<MemberRow>(
       `SELECT id, oidc_sub, role, display_name, removed_at IS NOT NULL AS removed, removed_by,
@@ -177,13 +177,13 @@ async function members(orgId: string): Promise<MemberRow[]> {
   });
 }
 
-async function member(orgId: string, membershipId: string): Promise<MemberRow> {
+async function member(orgId: OrgId, membershipId: string): Promise<MemberRow> {
   const row = (await members(orgId)).find((m) => m.id === membershipId);
   if (row === undefined) throw new Error(`no member ${membershipId}`);
   return row;
 }
 
-async function audits(orgId: string, action: string): Promise<unknown[]> {
+async function audits(orgId: OrgId, action: string): Promise<unknown[]> {
   return withOrg(pool, orgId, async (tx) => {
     const { rows } = await tx.query(
       `SELECT actor_type, actor_id, object_type, object_id, result, detail FROM audit_event
@@ -205,14 +205,15 @@ const systemRow = (objectType: string, objectId: string, detail: Record<string, 
 
 /** Organisations with this name, in every organisation (the definer's read). */
 async function organisationsNamed(name: string): Promise<number> {
-  return withoutOrg(pool, async (tx) => {
-    await tx.query('SET LOCAL ROLE tinnox_definer');
-    const { rows } = await tx.query<{ n: number }>(
-      'SELECT count(*)::int AS n FROM organization WHERE name = $1',
-      [name],
-    );
-    return rows[0]?.n ?? -1;
-  });
+  return withoutOrg(pool, (tx) =>
+    asDefiner(pool, tx, async (definer) => {
+      const { rows } = await definer.query<{ n: number }>(
+        'SELECT count(*)::int AS n FROM organization WHERE name = $1',
+        [name],
+      );
+      return rows[0]?.n ?? -1;
+    }),
+  );
 }
 
 /**
@@ -1051,7 +1052,7 @@ describe('provision-member restore-owner', () => {
 interface AuditFailureCase {
   readonly writes: readonly ProvisionAuditAction[];
   /** The organisation whose audit trail the run writes to, once it exists. */
-  orgId(): Promise<string | null>;
+  orgId(): Promise<OrgId | null>;
   run(): Promise<unknown>;
   /** Everything the run would change, sessions and invites included. */
   state(): Promise<unknown>;
@@ -1072,14 +1073,17 @@ const AUDIT_FAILURE_CASES: {
       return {
         writes: ['membership.create'],
         orgId: async () =>
-          withoutOrg(pool, async (tx) => {
-            await tx.query('SET LOCAL ROLE tinnox_definer');
-            const { rows } = await tx.query<{ id: string }>(
-              'SELECT id FROM organization WHERE name = $1',
-              [orgName],
-            );
-            return rows[0]?.id ?? null;
-          }),
+          // The organisation the run made, if it made one: its id read back as the definer
+          // (`org_id` is the column name that asDefiner types as an OrgId).
+          withoutOrg(pool, (tx) =>
+            asDefiner(pool, tx, async (definer) => {
+              const { rows } = await definer.query<{ org_id: string }>(
+                'SELECT id AS org_id FROM organization WHERE name = $1',
+                [orgName],
+              );
+              return rows[0]?.org_id ?? null;
+            }),
+          ),
         run: () =>
           PROVISION_COMMANDS['org-create'].run(pool, directory({ ellis }), {
             orgName,
@@ -1223,7 +1227,7 @@ const AUDIT_FAILURE_CASES: {
 };
 
 /** The actions of the audit rows the organisation holds that provisioning wrote (actor `system`). */
-async function provisioningAudits(orgId: string | null): Promise<string[]> {
+async function provisioningAudits(orgId: OrgId | null): Promise<string[]> {
   if (orgId === null) return [];
   return withOrg(pool, orgId, async (tx) => {
     const { rows } = await tx.query<{ action: string }>(

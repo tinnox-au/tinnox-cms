@@ -26,8 +26,9 @@ import {
   sessionRevokeUnaudited,
   withOrg,
   withoutOrg,
+  withResolvedOrg,
+  type OrgTx,
   type Pool,
-  type Tx,
 } from '../src/index.ts';
 import { readSchemaFacts, schemaInvariantProblems } from '../src/schema-invariants.ts';
 import {
@@ -107,7 +108,7 @@ const ALERT_AUDIT = {
   detail: { recipients: 1 },
 } as const;
 
-const newFolder = (tx: Tx, name: string) =>
+const newFolder = (tx: OrgTx, name: string) =>
   tx.query('INSERT INTO folder (org_id, name) VALUES (app_org_id(), $1)', [name]);
 
 async function folders(name: string): Promise<number> {
@@ -207,8 +208,9 @@ describe('the audit-debt guard refuses a change with no audit row (D3)', () => {
       await newFolder(tx, 'Paid before');
     });
     // sec.audit_unscoped inserts as tinnox_definer; the session is still the runtime role's.
-    await withOrg(judged, org.orgId, async (tx) => {
-      await newFolder(tx, 'Paid unscoped');
+    // The unscoped writer takes the handle from before the organisation is entered.
+    await withResolvedOrg(judged, async (tx, enterOrg) => {
+      await newFolder(await enterOrg(org.orgId), 'Paid unscoped');
       await auditUnscoped(tx, UNSCOPED_AUDIT);
     });
     expect(await folders('Paid after')).toBe(1);

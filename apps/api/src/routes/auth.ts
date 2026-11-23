@@ -211,11 +211,11 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
         identity.idToken !== null && identity.idToken.length <= 8192 ? identity.idToken : null;
       let created: SessionCreateResult;
       try {
-        created = await withResolvedOrg(ctx.pool, async (tx, enterOrg) => {
+        created = await withResolvedOrg(ctx.pool, async (pre, enterOrg) => {
           // The member row is locked first (sec.session_create), the previous session row after
           // it: the order a member change uses (stage-c.md 6.8). The other way round, a removal
           // or sign-out of the member whose old cookie the browser still sends deadlocks.
-          const session = await sessionCreate(tx, {
+          const session = await sessionCreate(pre, {
             idHash: sha256(sessionId),
             oidcSub: identity.sub,
             csrfToken,
@@ -225,10 +225,10 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
           });
           // The rotation commits whatever the outcome.
           if (typeof previous === 'string' && previous.length <= 100) {
-            await sessionRevoke(tx, sha256(previous));
+            await sessionRevoke(pre, sha256(previous));
           }
           if (session.outcome === 'no_membership') {
-            await auditUnscoped(tx, {
+            await auditUnscoped(pre, {
               actorType: 'anonymous',
               actorId: null,
               action: 'auth.login',
@@ -239,7 +239,7 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
             });
             return session;
           }
-          await enterOrg(session.orgId);
+          const tx = await enterOrg(session.orgId);
           if (session.outcome === 'reauth') {
             await auditScoped(tx, {
               actorType: 'operator',
@@ -370,10 +370,10 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
       // One transaction: the revocation and its audit event commit together.
       let revoked;
       try {
-        revoked = await withResolvedOrg(ctx.pool, async (tx, enterOrg) => {
-          const ended = await sessionRevoke(tx, session.idHash);
+        revoked = await withResolvedOrg(ctx.pool, async (pre, enterOrg) => {
+          const ended = await sessionRevoke(pre, session.idHash);
           if (ended === null) return null;
-          await enterOrg(ended.orgId);
+          const tx = await enterOrg(ended.orgId);
           await auditScoped(tx, {
             actorType: 'operator',
             actorId: ended.membershipId,

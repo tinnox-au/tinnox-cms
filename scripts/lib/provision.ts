@@ -18,7 +18,6 @@
  *   touches membership or member_invite, as the API's member changes do.
  * Output goes to the staff terminal only; only pending prints names and e-mail addresses.
  */
-import { randomUUID } from 'node:crypto';
 import { parseArgs, type ParseArgsOptionsConfig } from 'node:util';
 import {
   ABSOLUTE,
@@ -39,9 +38,10 @@ import {
   withOrg,
   withResolvedOrg,
   withoutOrg,
-  type Tx,
+  type OrgId,
+  type OrgTx,
 } from '@tinnox/db';
-import { asDefiner, type MigratorPool } from '@tinnox/db/migrate';
+import { asDefiner, newOrgId, type MigratorPool } from '@tinnox/db/migrate';
 import { ROLE_LABELS, grantableRoles } from '@tinnox/domain';
 import type { IdpAccount, IdpDirectory } from './idp.ts';
 
@@ -450,7 +450,7 @@ type ProvisionAudit = {
   >;
 }[ProvisionAuditAction];
 
-function audit(tx: Tx, event: ProvisionAudit): Promise<void> {
+function audit(tx: OrgTx, event: ProvisionAudit): Promise<void> {
   return auditScoped(tx, { actorType: 'system', actorId: null, result: 'success', ...event });
 }
 
@@ -460,7 +460,7 @@ const UNPRINTABLE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\
 const printable = (value: string): string => value.replace(UNPRINTABLE, '?');
 
 export interface OrgCreateResult extends Result {
-  readonly orgId: string;
+  readonly orgId: OrgId;
   readonly siteId: string;
   /** In the order of --owner. */
   readonly ownerIds: readonly string[];
@@ -475,11 +475,12 @@ export async function orgCreate(
   const subjects: string[] = [];
   for (const owner of args.owners)
     subjects.push((await enabledAccount(idp, owner.username)).subject);
-  const orgId = randomUUID();
+  // The one organisation id that no lookup returns: this command creates the organisation (D25).
+  const orgId = newOrgId();
   return withOrg(pool, orgId, async (tx) => {
     await lockOrgMembership(tx);
-    const taken = await asDefiner(pool, tx, () =>
-      tx.query('SELECT 1 FROM public.membership WHERE oidc_sub = ANY($1::text[])', [subjects]),
+    const taken = await asDefiner(pool, tx, (definer) =>
+      definer.query('SELECT 1 FROM public.membership WHERE oidc_sub = ANY($1::text[])', [subjects]),
     );
     if (taken.rows.length > 0) {
       throw new RefusedError(
@@ -539,7 +540,7 @@ export async function orgCreate(
 export interface PendingInvite {
   readonly id: string;
   readonly reference: string;
-  readonly orgId: string;
+  readonly orgId: OrgId;
   readonly orgName: string;
   readonly role: string;
   readonly name: string;
@@ -569,8 +570,8 @@ export async function pending(
     // The one audit row in the repository that auditScoped does not write (D25): the statement
     // below is named, whole, in RAW_AUDIT_INSERTS of eslint.config.js, so a change to it is a
     // change to that entry, and its row has the shape AuditEventShapes gives invite.cancel.
-    const { expired, rows } = await asDefiner(pool, tx, async () => {
-      const expired = await tx.query(
+    const { expired, rows } = await asDefiner(pool, tx, async (definer) => {
+      const expired = await definer.query(
         `WITH closed AS (
          UPDATE public.member_invite i SET status = 'expired'
          WHERE i.status = 'pending' AND i.expires_at <= now()
@@ -582,7 +583,7 @@ export async function pending(
        FROM closed`,
         [args.executedBy],
       );
-      const { rows } = await tx.query<{
+      const { rows } = await definer.query<{
         id: string;
         org_id: string;
         org_name: string;
@@ -629,7 +630,7 @@ export async function pending(
 
 export interface FulfilResult extends Result {
   readonly membershipId: string;
-  readonly orgId: string;
+  readonly orgId: OrgId;
   readonly role: Role;
   readonly reactivated: boolean;
 }
@@ -650,16 +651,16 @@ export async function fulfil(
   if (accountEmail === '') {
     throw new RefusedError('the identity-provider account has no e-mail address');
   }
-  return withResolvedOrg(pool, async (tx, enterOrg) => {
-    const found = await asDefiner(pool, tx, async () => ({
+  return withResolvedOrg(pool, async (pre, enterOrg) => {
+    const found = await asDefiner(pool, pre, async (definer) => ({
       invite: (
-        await tx.query<{ org_id: string }>(
+        await definer.query<{ org_id: string }>(
           'SELECT org_id FROM public.member_invite WHERE id = $1',
           [args.inviteId],
         )
       ).rows[0],
       orgs: (
-        await tx.query<{ org_id: string }>(
+        await definer.query<{ org_id: string }>(
           'SELECT org_id FROM public.membership WHERE oidc_sub = $1',
           [account.subject],
         )
@@ -673,7 +674,7 @@ export async function fulfil(
         'this account has a membership in another organisation, removed or not; the invite stays pending (tell only TINNOX staff)',
       );
     }
-    await enterOrg(orgId);
+    const tx = await enterOrg(orgId);
     await lockOrgMembership(tx);
 
     const invite = (
@@ -814,15 +815,15 @@ export async function setName(
           sql: sql`SELECT id, org_id FROM public.membership WHERE id = $1`,
           value: args.target.membershipId,
         };
-  return withResolvedOrg(pool, async (tx, enterOrg) => {
+  return withResolvedOrg(pool, async (pre, enterOrg) => {
     const member = await asDefiner(
       pool,
-      tx,
-      async () =>
-        (await tx.query<{ id: string; org_id: string }>(lookup.sql, [lookup.value])).rows[0],
+      pre,
+      async (definer) =>
+        (await definer.query<{ id: string; org_id: string }>(lookup.sql, [lookup.value])).rows[0],
     );
     if (member === undefined) throw new RefusedError('no membership matches');
-    await enterOrg(member.org_id);
+    const tx = await enterOrg(member.org_id);
     await lockOrgMembership(tx);
     const current = (
       await tx.query<{ display_name: string | null }>(
@@ -886,20 +887,20 @@ export async function mfaReset(
   args: MfaResetArgs,
 ): Promise<MfaResetResult> {
   const subject = await subjectOf(idp, args.username);
-  return withResolvedOrg(pool, async (tx, enterOrg) => {
+  return withResolvedOrg(pool, async (pre, enterOrg) => {
     const member = await asDefiner(
       pool,
-      tx,
-      async () =>
+      pre,
+      async (definer) =>
         (
-          await tx.query<{ id: string; org_id: string }>(
+          await definer.query<{ id: string; org_id: string }>(
             'SELECT id, org_id FROM public.membership WHERE oidc_sub = $1 AND removed_at IS NULL',
             [subject],
           )
         ).rows[0],
     );
     if (member === undefined) throw new RefusedError('this account has no active membership');
-    await enterOrg(member.org_id);
+    const tx = await enterOrg(member.org_id);
     await lockOrgMembership(tx);
     const target = await tx.query(
       `SELECT 1 FROM membership WHERE id = $1 AND org_id = app_org_id() AND removed_at IS NULL
@@ -964,20 +965,20 @@ export async function restoreOwner(
     approvedBy: args.approvedBy,
   };
   if (args.mode === 'promote') {
-    return withResolvedOrg(pool, async (tx, enterOrg) => {
+    return withResolvedOrg(pool, async (pre, enterOrg) => {
       const member = await asDefiner(
         pool,
-        tx,
-        async () =>
+        pre,
+        async (definer) =>
           (
-            await tx.query<{ org_id: string }>(
+            await definer.query<{ org_id: string }>(
               'SELECT org_id FROM public.membership WHERE id = $1',
               [args.membershipId],
             )
           ).rows[0],
       );
       if (member === undefined) throw new RefusedError('no membership has this id');
-      await enterOrg(member.org_id);
+      const tx = await enterOrg(member.org_id);
       await lockOrgMembership(tx);
       const target = first(
         (
@@ -1025,16 +1026,20 @@ export async function restoreOwner(
 
   const { successor, replaces } = args;
   const account = await enabledAccount(idp, successor.username);
-  return withResolvedOrg(pool, async (tx, enterOrg) => {
-    const found = await asDefiner(pool, tx, async () => ({
+  return withResolvedOrg(pool, async (pre, enterOrg) => {
+    const found = await asDefiner(pool, pre, async (definer) => ({
       old: (
-        await tx.query<{ org_id: string }>('SELECT org_id FROM public.membership WHERE id = $1', [
-          replaces,
-        ])
+        await definer.query<{ org_id: string }>(
+          'SELECT org_id FROM public.membership WHERE id = $1',
+          [replaces],
+        )
       ).rows[0],
       taken:
-        (await tx.query('SELECT 1 FROM public.membership WHERE oidc_sub = $1', [account.subject]))
-          .rows.length > 0,
+        (
+          await definer.query('SELECT 1 FROM public.membership WHERE oidc_sub = $1', [
+            account.subject,
+          ])
+        ).rows.length > 0,
     }));
     if (found.old === undefined) throw new RefusedError('no membership has the --replaces id');
     if (found.taken) {
@@ -1042,7 +1047,7 @@ export async function restoreOwner(
         'the successor account already has a membership, removed or not (one organisation per person)',
       );
     }
-    await enterOrg(found.old.org_id);
+    const tx = await enterOrg(found.old.org_id);
     await lockOrgMembership(tx);
     const active = (
       await tx.query<{ id: string; role: string }>(

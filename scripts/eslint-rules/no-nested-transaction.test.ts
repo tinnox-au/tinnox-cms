@@ -14,7 +14,7 @@ const tester = new RuleTester({ languageOptions: { parser: tseslint.parser } });
 
 const SECOND =
   'where a transaction is already open. This opens a second transaction on another connection that commits independently.';
-const REMEDY = `${SECOND} Pass the outer tx to the helper: give it a \`tx: Tx\` parameter (from @tinnox/db) and run the statements on that; work that must commit on its own goes after the outer call has returned.`;
+const REMEDY = `${SECOND} Pass the outer tx to the helper: give it a \`tx: OrgTx\` parameter (from @tinnox/db) and run the statements on that; work that must commit on its own goes after the outer call has returned.`;
 // The two functions that take the pool and no tx: the message names what to call on the outer
 // tx, not a parameter the function does not have.
 const AUDIT_REMEDY = `${SECOND} Write the event on the outer tx instead: auditUnscoped(tx, event), or auditScoped(tx, event) when the outer transaction is withOrg (both from @tinnox/db). auditStandalone is only for a refusal that no transaction carries: call it after the outer call has returned or thrown.`;
@@ -212,6 +212,21 @@ tester.run('no-nested-transaction (U-3)', rule, {
         { message: withHandle('withResolvedOrg', 'tx: Tx') },
         { message: withHandle('withOrgAllowed', 'tx: Tx') },
         { message: withHandle('withoutOrg', 'tx: Tx') },
+      ],
+    },
+    {
+      name: "each kind of handle: with the organisation, before it, either, and the definer's (step 18)",
+      code: `
+        async function a(tx: OrgTx, pool: Pool) { await withOrg(pool, orgId, work); }
+        async function b(pre: PreOrgTx, pool: Pool) { await withoutOrg(pool, work); }
+        async function c(tx: Tx, pool: Pool) { await withResolvedOrg(pool, work); }
+        async function d(definer: DefinerTx, pool: Pool) { await withOrg(pool, orgId, work); }
+      `,
+      errors: [
+        { message: withHandle('withOrg', 'tx: OrgTx') },
+        { message: withHandle('withoutOrg', 'pre: PreOrgTx') },
+        { message: withHandle('withResolvedOrg', 'tx: Tx') },
+        { message: withHandle('withOrg', 'definer: DefinerTx') },
       ],
     },
     {

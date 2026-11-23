@@ -322,8 +322,8 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
       // One transaction: the registration and its audit event commit together, and a failure
       // leaves the pairing claimed, so the player's next poll can still collect.
       const deviceToken = randomToken();
-      const paired = await withResolvedOrg(pool, async (tx, enterOrg) => {
-        const done = await pairingComplete(tx, {
+      const paired = await withResolvedOrg(pool, async (pre, enterOrg) => {
+        const done = await pairingComplete(pre, {
           pairingId: id,
           pollingTokenHash,
           deviceTokenHash: sha256(deviceToken),
@@ -334,7 +334,7 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
           // ended, or the screen got a player meanwhile. That change commits with this row. A
           // refusal names no organisation (sec.pairing_complete returns none), so the row has
           // none, like pairing.create and pairing.lock.
-          await auditUnscoped(tx, {
+          await auditUnscoped(pre, {
             actorType: 'anonymous',
             actorId: null,
             action: 'pairing.complete',
@@ -345,7 +345,7 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
           });
           return null;
         }
-        await enterOrg(done.orgId);
+        const tx = await enterOrg(done.orgId);
         const { rows } = await tx.query<{
           id: string;
           name: string;

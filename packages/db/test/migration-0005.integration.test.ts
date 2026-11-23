@@ -24,9 +24,9 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { withOrg, type Pool } from '../src/index.ts';
+import { withOrg, type OrgId, type Pool } from '../src/index.ts';
 import { resetTestDatabase, runMigrations, type MigrationResult } from '../src/migrate.ts';
-import { appPool, migratorClient, migratorUrl } from './support.ts';
+import { appPool, migratorClient, migratorUrl, testOrgId } from './support.ts';
 
 const MIGRATIONS = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -47,7 +47,7 @@ interface LegacyDisplay {
 }
 
 interface LegacyOrg {
-  readonly orgId: string;
+  readonly orgId: OrgId;
   readonly playlists: readonly [string, string];
   readonly displays: Readonly<
     Record<
@@ -62,7 +62,7 @@ interface LegacyOrg {
  * the owner needs the organisation context, because row-level security is forced.
  */
 async function createLegacyOrg(migrator: pg.Client, name: string): Promise<LegacyOrg> {
-  const orgId = randomUUID();
+  const orgId = testOrgId(randomUUID());
   const siteId = randomUUID();
   const membershipId = randomUUID();
   const mediaId = randomUUID();

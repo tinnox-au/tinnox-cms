@@ -11,7 +11,7 @@ import {
   type DeliveryStatusView,
   type Rect,
 } from '@tinnox/contracts';
-import type { Tx } from '@tinnox/db';
+import type { OrgTx } from '@tinnox/db';
 import { buildDeliveryStatusView, type ReportedState } from '@tinnox/domain';
 import { z } from 'zod';
 import type { AppContext } from './context.ts';
@@ -108,7 +108,7 @@ type StatusRow = DeliveryRow & { display_id: string; registration_id: string | n
  * delivery columns. At most `ABSOLUTE.maxListItems` displays are returned.
  */
 export async function loadStatusViews(
-  tx: Tx,
+  tx: OrgTx,
   ctx: AppContext,
   displayId: string | null,
 ): Promise<DeliveryStatusView[]> {

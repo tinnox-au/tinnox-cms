@@ -47,6 +47,7 @@ import {
   pgCode,
   stillWaiting,
   twoTransactions,
+  withNoOrgSet,
   type TestOrg,
 } from './support.ts';
 
@@ -554,13 +555,16 @@ describe('pairing', () => {
       }),
     );
     expect(await pgCode(foreignMember)).toBe(PG.insufficientPrivilege);
+    // pairingClaim takes an OrgTx, so it cannot be called with no organisation any more. The
+    // function's own refusal is still what is tested: the same statement, sent raw.
     const noContext = withoutOrg(pool, (tx) =>
-      pairingClaim(tx, {
-        code: p.code,
-        displayId: a.displayId,
-        membershipId: a.membershipId,
-        ...claimLimits,
-      }),
+      withNoOrgSet(tx).query('SELECT outcome FROM sec.pairing_claim($1, $2, $3, $4, $5)', [
+        p.code,
+        a.displayId,
+        a.membershipId,
+        claimLimits.maxFailures,
+        claimLimits.windowSeconds,
+      ]),
     );
     expect(await pgCode(noContext)).toBe(PG.insufficientPrivilege);
   });
@@ -784,9 +788,14 @@ describe('pairing', () => {
     expect(await withOrg(pool, b.orgId, (tx) => pairingCancelClaims(tx, org.displayId))).toEqual(
       [],
     );
-    expect(await pgCode(withoutOrg(pool, (tx) => pairingCancelClaims(tx, org.displayId)))).toBe(
-      PG.insufficientPrivilege,
-    );
+    // As above: pairingCancelClaims takes an OrgTx, so the call with no organisation is sent raw.
+    expect(
+      await pgCode(
+        withoutOrg(pool, (tx) =>
+          withNoOrgSet(tx).query('SELECT sec.pairing_cancel_claims($1) AS ids', [org.displayId]),
+        ),
+      ),
+    ).toBe(PG.insufficientPrivilege);
     expect(await pollOutcome(p)).toBe('claimed');
 
     expect(await withOrg(pool, org.orgId, (tx) => pairingCancelClaims(tx, org.displayId))).toEqual([

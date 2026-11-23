@@ -4,12 +4,14 @@
  * at `/testing`. Lint keeps the last two out of the API (the db entries of eslint.config.js);
  * this file holds the other half, that nothing of theirs can be had through the root entry.
  */
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import * as root from './index.ts';
 import * as migrate from './migrate.ts';
+import * as orgId from './org-id.ts';
+import * as preOrg from './pre-org.ts';
 import * as testing from './testing.ts';
 
 const SRC = dirname(fileURLToPath(import.meta.url));
@@ -81,6 +83,7 @@ describe('the entries of @tinnox/db (AG-1.10)', () => {
       expect.arrayContaining([
         'asDefiner',
         'connectMigrator',
+        'newOrgId',
         'resetTestDatabase',
         'runMigrations',
       ]),
@@ -94,14 +97,48 @@ describe('the entries of @tinnox/db (AG-1.10)', () => {
       'installAuditDebtGuard',
       'removeAuditDebtGuard',
       'removeAuditFault',
+      'testOrgId',
       'unjudgedSql',
       'watchAuditDebt',
       'whileAuditFails',
       'whileUnauditedAllowed',
+      'withNoOrgSet',
     ]);
     expect(Object.keys(root)).toEqual(
       expect.arrayContaining(['createPool', 'ping', 'withOrg', 'sql', 'deviceByRegistrationId']),
     );
+  });
+
+  // AG-2.3, AG-2.2 (adoption plan step 18): two modules no entry exports. ./org-id.ts makes the
+  // OrgId, and ./pre-org.ts sends a statement where no organisation is set. Each is imported by
+  // the modules named here and no other, so a new importer is a change to this list.
+  it('only the named modules reach the OrgId maker and the statements of a PreOrgTx', () => {
+    const sources = readdirSync(SRC).filter(
+      (name) => name.endsWith('.ts') && !name.endsWith('.test.ts'),
+    );
+    const importersOf = (module: string): string[] =>
+      sources.filter((name) => imported(join(SRC, name)).includes(join(SRC, module))).sort();
+    expect(
+      importersOf('org-id.ts'),
+      'src/org-id.ts makes an OrgId from any string. A lookup that names an organisation belongs in src/sec.ts; anything else gets its OrgId from one of those lookups',
+    ).toEqual(['definer.ts', 'migrate.ts', 'sec.ts', 'testing.ts']);
+    expect(
+      importersOf('pre-org.ts'),
+      'src/pre-org.ts sends a statement on a transaction with no organisation. Only the sec.* wrappers (src/sec.ts), asDefiner and the testing entry do that; a tenant statement goes on the OrgTx of withOrg or enterOrg',
+    ).toEqual(['definer.ts', 'sec.ts', 'testing.ts', 'tx.ts']);
+
+    const fromRoot = Object.keys(root);
+    for (const name of [
+      ...Object.keys(orgId),
+      ...Object.keys(preOrg),
+      'newOrgId',
+      'testOrgId',
+      'withNoOrgSet',
+    ]) {
+      expect(fromRoot, `${name} must not be exported by the runtime entry`).not.toContain(name);
+    }
+    expect(Object.keys(orgId).sort()).toEqual(['mintOrgId', 'readAsDefiner']);
+    expect(Object.keys(preOrg).sort()).toEqual(['keepStatements', 'statementsOf']);
   });
 
   it('the runtime entry has no MigratorPool type either (checked by npm run typecheck)', () => {

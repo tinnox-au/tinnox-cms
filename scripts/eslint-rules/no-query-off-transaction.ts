@@ -1,15 +1,18 @@
 // AG-2.1 (adoption plan sections 2.4 and 3.2): in the API and the offline tools a statement is
-// sent only on a transaction handle, the `tx` that the callback of withOrg, withoutOrg or
-// withResolvedOrg receives. A statement on anything else runs outside a transaction: on the pool
-// or a pooled client with no organisation set, so row-level security shows a tenant read nothing
-// and nobody notices; on the handle of poolAsTx as a statement of its own, which is for the typed
-// sec.* wrappers of packages/db/src/sec.ts only.
+// sent only on a transaction handle: an OrgTx, the `tx` that the callback of withOrg receives or
+// that enterOrg returns inside withResolvedOrg. A statement on anything else runs outside a
+// transaction: on the pool or a pooled client with no organisation set, so row-level security
+// shows a tenant read nothing and nobody notices; on the handle of poolAsTx as a statement of its
+// own, which is for the typed sec.* wrappers of packages/db/src/sec.ts only.
 //
-// With type information the receiver is judged by its type: it must be a Tx (the marked type of
-// packages/db/src/tx.ts, which only run() makes). So a pool passed under the name `tx`, a pooled
-// client, an Autocommit and a value typed `any` are all reported. Without type information (a
-// file linted outside a TypeScript project) the rule falls back to the name: the receiver must be
-// an identifier called `tx`.
+// With type information the receiver is judged by its type: it must carry the mark of a
+// transaction handle (packages/db/src/tx.ts, which only run() makes), or the mark of the handle
+// asDefiner gives its work (packages/db/src/definer.ts), on which an offline tool reads across
+// organisations as tinnox_definer (D25). So a pool passed under the name `tx`, a pooled client,
+// an Autocommit and a value typed `any` are all reported. A PreOrgTx carries the mark too, but
+// it has no query: the type checker refuses that call (adoption plan step 18), so this rule need
+// not. Without type information (a file linted outside a TypeScript project) the rule falls back
+// to the name: the receiver must be an identifier called `tx`.
 //
 // `allowed` lists statements that may be sent off a transaction, each with its reason: the
 // statement must be a string literal that the entry's pattern matches. eslint.config.js gives the
@@ -23,6 +26,7 @@ import { createRule } from './create-rule.ts';
 import { brandReader } from './typed.ts';
 
 const TX = { symbol: 'inTransaction', file: 'packages/db/src/tx.ts' } as const;
+const DEFINER = { symbol: 'asTheDefiner', file: 'packages/db/src/definer.ts' } as const;
 
 interface Allowed {
   /** A regular expression (source) the statement text must match. */
@@ -44,7 +48,7 @@ export default createRule<Options, 'offTransaction'>({
     type: 'problem',
     docs: {
       description:
-        'Disallow query() on anything but a transaction handle (a Tx of @tinnox/db) in the API and the offline tools',
+        'Disallow query() on anything but a transaction handle (an OrgTx of @tinnox/db, or the handle of asDefiner) in the API and the offline tools',
     },
     schema: [
       {
@@ -69,16 +73,19 @@ export default createRule<Options, 'offTransaction'>({
     defaultOptions: [{}],
     messages: {
       offTransaction:
-        'Do not call query() on {{receiver}}: only a transaction handle takes a statement (the tx that the callback of withOrg, withoutOrg or withResolvedOrg receives). On the pool, a pooled client or the handle of poolAsTx the statement runs outside any transaction and with no organisation. Use withOrg(pool, session.orgId, (tx) => tx.query(...)), a typed sec.* wrapper from @tinnox/db (add it to packages/db/src/sec.ts if it is missing), or ping(pool) for a liveness probe.',
+        'Do not call query() on {{receiver}}: only an OrgTx takes a statement (the tx that the callback of withOrg receives, or that enterOrg returns inside withResolvedOrg). On the pool, a pooled client or the handle of poolAsTx the statement runs outside any transaction and with no organisation. Use withOrg(pool, session.orgId, (tx) => tx.query(...)), a typed sec.* wrapper from @tinnox/db (add it to packages/db/src/sec.ts if it is missing), or ping(pool) for a liveness probe. An offline tool that reads across organisations sends the statement on the handle asDefiner gives its work (@tinnox/db/migrate).',
     },
   },
   defaultOptions: [{}],
   create(context, [options]) {
     const isTx = brandReader(context, TX);
+    const isDefiner = brandReader(context, DEFINER);
     const allowed = (options.allowed ?? []).map((entry) => new RegExp(entry.sql));
 
     function onTransaction(receiver: TSESTree.Expression): boolean {
-      if (isTx !== undefined) return isTx(receiver);
+      if (isTx !== undefined && isDefiner !== undefined) {
+        return isTx(receiver) || isDefiner(receiver);
+      }
       return receiver.type === AST_NODE_TYPES.Identifier && receiver.name === 'tx';
     }
 

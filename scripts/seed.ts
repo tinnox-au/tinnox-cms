@@ -13,8 +13,8 @@
 // this script creates the matching membership rows. A subject without a membership cannot
 // sign in. Customers' members come from scripts/provision-member.ts instead.
 import type { Role } from '@tinnox/contracts';
-import { withOrg, type Tx } from '@tinnox/db';
-import { connectMigrator, type MigratorPool } from '@tinnox/db/migrate';
+import { withOrg, type OrgId, type OrgTx } from '@tinnox/db';
+import { connectMigrator, newOrgId, type MigratorPool } from '@tinnox/db/migrate';
 import { loadEnv, requireEnv } from './lib/env.ts';
 
 loadEnv();
@@ -31,7 +31,7 @@ interface SeedMember {
 }
 
 interface SeedOrg {
-  readonly orgId: string;
+  readonly orgId: OrgId;
   readonly orgName: string;
   readonly siteId: string;
   readonly siteName: string;
@@ -39,10 +39,13 @@ interface SeedOrg {
   readonly members: readonly SeedMember[];
 }
 
-/** Fixed identifiers so documentation, tests and repeated runs agree. Synthetic data only. */
+/**
+ * Fixed identifiers so documentation, tests and repeated runs agree. Synthetic data only. The
+ * seed creates these organisations, so it names their ids itself (newOrgId, D25).
+ */
 export const SEED = {
   primary: {
-    orgId: '10000000-0000-4000-8000-000000000001',
+    orgId: newOrgId('10000000-0000-4000-8000-000000000001'),
     orgName: 'TINNOX Internal',
     siteId: '10000000-0000-4000-8000-000000000002',
     siteName: 'Melbourne Workshop',
@@ -55,7 +58,7 @@ export const SEED = {
     ],
   },
   second: {
-    orgId: '20000000-0000-4000-8000-000000000001',
+    orgId: newOrgId('20000000-0000-4000-8000-000000000001'),
     orgName: 'Isolation Test Organisation',
     siteId: '20000000-0000-4000-8000-000000000002',
     siteName: 'Isolation Test Site',
@@ -71,8 +74,8 @@ export const SEED = {
  * `npm run setup -- --force` (new subjects, old rows kept) never fails.
  */
 async function seedMember(
-  tx: Tx,
-  orgId: string,
+  tx: OrgTx,
+  orgId: OrgId,
   member: SeedMember,
   subject: string,
 ): Promise<string> {

@@ -16,7 +16,13 @@ import {
   type TagDto,
   type TagListResponse,
 } from '@tinnox/contracts';
-import { auditScoped, STAGE_A_CONSTRAINTS, violatedConstraint, withOrg, type Tx } from '@tinnox/db';
+import {
+  auditScoped,
+  STAGE_A_CONSTRAINTS,
+  violatedConstraint,
+  withOrg,
+  type OrgTx,
+} from '@tinnox/db';
 import type { FastifyInstance } from 'fastify';
 import { requirePermission, tagScopeKey, withOrgAllowed } from '../auth/permissions.ts';
 import { operatorOf } from '../auth/session.ts';
@@ -57,7 +63,7 @@ function toTagDto(row: TagRow): TagDto {
   };
 }
 
-async function loadTag(tx: Tx, id: string): Promise<TagDto | null> {
+async function loadTag(tx: OrgTx, id: string): Promise<TagDto | null> {
   const { rows } = await tx.query<TagRow>(
     `SELECT ${TAG_COLUMNS} FROM tag t WHERE t.id = $1 AND t.org_id = app_org_id()`,
     [id],

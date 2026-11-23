@@ -11,11 +11,19 @@ import {
   withoutOrg,
   withResolvedOrg,
   type Autocommit,
+  type OrgId,
+  type OrgTx,
   type Pool,
+  type PreOrgTx,
   type Tx,
 } from './index.ts';
+import { newOrgId } from './migrate.ts';
+import { testOrgId, withNoOrgSet } from './testing.ts';
 
-const ORG = '00000000-0000-4000-8000-000000000001';
+const ORG = testOrgId('00000000-0000-4000-8000-000000000001');
+
+/** What sends a statement on either kind of handle: a PreOrgTx has no query of its own. */
+const statementsOn = (tx: Tx): Autocommit => ('query' in tx ? tx : withNoOrgSet(tx));
 
 /**
  * A pool with one connection that records its statements and how it was released, how often a
@@ -219,21 +227,34 @@ describe('a transaction handle after its transaction ended (U-2)', () => {
       const kept: Tx[] = [];
       await run(pool, (tx) => kept.push(tx));
       const sent = [...statements];
-      await expect(kept[0]?.query('SELECT 1')).rejects.toThrow(HANDLE_CLOSED);
+      if (kept[0] === undefined) throw new Error('the callback did not run');
+      await expect(statementsOn(kept[0]).query('SELECT 1')).rejects.toThrow(HANDLE_CLOSED);
       expect(statements).toEqual(sent);
     }
   });
 
+  it('refuses a statement on the handle enterOrg returned, kept after the commit', async () => {
+    const { pool, statements } = fakePool();
+    const kept: OrgTx[] = [];
+    await withResolvedOrg(pool, async (_tx, enterOrg) => {
+      kept.push(await enterOrg(ORG));
+    });
+    const sent = [...statements];
+    await expect(kept[0]?.query('SELECT 1')).rejects.toThrow(HANDLE_CLOSED);
+    expect(statements).toEqual(sent);
+  });
+
   it('refuses it after a rollback too', async () => {
     const { pool, statements } = fakePool();
-    const kept: Tx[] = [];
+    const kept: PreOrgTx[] = [];
     await expect(
       withoutOrg(pool, async (tx) => {
         kept.push(tx);
         throw new Error('boom');
       }),
     ).rejects.toThrow('boom');
-    await expect(kept[0]?.query('SELECT 1')).rejects.toThrow(HANDLE_CLOSED);
+    if (kept[0] === undefined) throw new Error('the callback did not run');
+    await expect(withNoOrgSet(kept[0]).query('SELECT 1')).rejects.toThrow(HANDLE_CLOSED);
     expect(statements).toEqual(['BEGIN', 'ROLLBACK']);
   });
 
@@ -266,7 +287,7 @@ describe('a transaction handle after its transaction ended (U-2)', () => {
 
   it('refuses enterOrg after the transaction ended', async () => {
     const { pool, statements } = fakePool();
-    const kept: ((orgId: string) => Promise<void>)[] = [];
+    const kept: ((orgId: OrgId) => Promise<OrgTx>)[] = [];
     await withResolvedOrg(pool, async (_tx, enterOrg) => {
       kept.push(enterOrg);
     });
@@ -276,13 +297,14 @@ describe('a transaction handle after its transaction ended (U-2)', () => {
 
   it('gives each transaction its own handle: a new one works while an old one stays closed', async () => {
     const { pool, statements } = fakePool();
-    const kept: Tx[] = [];
+    const kept: PreOrgTx[] = [];
     await withoutOrg(pool, async (tx) => {
       kept.push(tx);
     });
     await withoutOrg(pool, async (tx) => {
-      await tx.query('SELECT 2');
-      await expect(kept[0]?.query('SELECT 1')).rejects.toThrow(HANDLE_CLOSED);
+      await withNoOrgSet(tx).query('SELECT 2');
+      if (kept[0] === undefined) throw new Error('the first callback did not run');
+      await expect(withNoOrgSet(kept[0]).query('SELECT 1')).rejects.toThrow(HANDLE_CLOSED);
     });
     expect(statements).toEqual(['BEGIN', 'COMMIT', 'BEGIN', 'SELECT 2', 'COMMIT']);
   });
@@ -297,7 +319,7 @@ const nested = (opener: string): string =>
 // run() sees.
 describe('a transaction inside another (U-3)', () => {
   const inItsOwnTransaction = (pool: Pool, text: string): Promise<unknown> =>
-    withoutOrg(pool, (tx) => tx.query(text));
+    withoutOrg(pool, (tx) => withNoOrgSet(tx).query(text));
   const onThePool = (pool: Pool, text: string): Promise<unknown> => poolAsTx(pool).query(text);
   const openers = [
     ['withOrg', (pool: Pool, fn: () => Promise<unknown>) => withOrg(pool, ORG, fn)],
@@ -426,20 +448,136 @@ describe('Tx and Autocommit (D2)', () => {
     expect(takesEither(autocommit)).toBe(autocommit);
   });
 
-  it('every opener hands its callback a Tx, which is also accepted where either handle is', async () => {
+  it('every opener hands its callback a Tx, and an OrgTx is also accepted where either handle is', async () => {
     const { pool } = fakePool();
     const seen: Tx[] = [];
     await withOrg(pool, ORG, async (tx) => {
       seen.push(needsTx(tx));
+      expect(takesEither(tx)).toBe(tx);
     });
     await withoutOrg(pool, async (tx) => {
       seen.push(needsTx(tx));
     });
-    await withResolvedOrg(pool, async (tx) => {
-      seen.push(needsTx(tx));
-      expect(takesEither(tx)).toBe(tx);
+    await withResolvedOrg(pool, async (tx, enterOrg) => {
+      seen.push(needsTx(tx), needsTx(await enterOrg(ORG)));
     });
-    expect(seen).toHaveLength(3);
-    expectTypeOf<Tx>().toExtend<Autocommit>();
+    expect(seen).toHaveLength(4);
+    expectTypeOf<OrgTx>().toExtend<Autocommit>();
+  });
+});
+
+// AG-2.3 (adoption plan step 18): the organisation a query runs for is a type that only the
+// database's own answers have, so nothing read from a request can be handed to withOrg or
+// enterOrg. Checked by `npm run typecheck`, as above.
+describe('OrgId: a string is not an organisation (AG-2.3)', () => {
+  const PLAIN = '00000000-0000-4000-8000-000000000001';
+
+  it('withOrg and enterOrg refuse a plain string, a field of an object and a template', async () => {
+    const { pool, statements } = fakePool();
+    const body: { orgId: string } = { orgId: PLAIN };
+    // @ts-expect-error a string is not an OrgId: it must come from a lookup of sec.ts
+    await withOrg(pool, PLAIN, async () => undefined);
+    // @ts-expect-error nor is a string field, whatever it is called
+    await withOrg(pool, body.orgId, async () => undefined);
+    // @ts-expect-error nor is a string built from an OrgId: the result is a string again
+    await withOrg(pool, `${ORG}`, async () => undefined);
+    await withResolvedOrg(pool, async (_tx, enterOrg) => {
+      // @ts-expect-error enterOrg takes an OrgId too
+      await enterOrg(PLAIN);
+    });
+    // The fake pool has no row-level security to protect, so the forced calls above did run.
+    expect(statements.filter((text) => text === 'BEGIN')).toHaveLength(4);
+
+    expectTypeOf<string>().not.toExtend<OrgId>();
+    expectTypeOf<OrgId>().toExtend<string>();
+    expectTypeOf(withOrg).parameter(1).toEqualTypeOf<OrgId>();
+  });
+
+  it('the offline tools and the tests have their own makers, outside the runtime entry', () => {
+    expectTypeOf(newOrgId).returns.toEqualTypeOf<OrgId>();
+    expectTypeOf(testOrgId).returns.toEqualTypeOf<OrgId>();
+    expect(testOrgId(PLAIN)).toBe(PLAIN);
+    expect(newOrgId(PLAIN)).toBe(PLAIN);
+    // With no argument, a fresh id that withOrg accepts.
+    expect(newOrgId()).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(newOrgId()).not.toBe(newOrgId());
+  });
+
+  it('still checks the value at run time, for one that got the type without being an id', async () => {
+    const { pool, statements } = fakePool();
+    await expect(withOrg(pool, testOrgId('not-a-uuid'), async () => undefined)).rejects.toThrow(
+      'withOrg requires a lower-case UUID organisation id',
+    );
+    await expect(
+      withResolvedOrg(pool, (_tx, enterOrg) =>
+        enterOrg(testOrgId('ABCDEF00-0000-4000-8000-000000000001')),
+      ),
+    ).rejects.toThrow('enterOrg requires a lower-case UUID organisation id');
+    // withOrg refused before it took a connection; enterOrg inside its transaction, which rolled back.
+    expect(statements).toEqual(['BEGIN', 'ROLLBACK']);
+  });
+});
+
+// AG-2.1, AG-2.2 (adoption plan step 18): a statement of the caller's own goes on an OrgTx only,
+// and a transaction with no organisation yet is a PreOrgTx, which has no query. Checked by
+// `npm run typecheck`, as above.
+describe('OrgTx and PreOrgTx (AG-2.1, AG-2.2)', () => {
+  const needsOrg = (tx: OrgTx): OrgTx => tx;
+  const needsPre = (tx: PreOrgTx): PreOrgTx => tx;
+
+  it('withOrg gives an OrgTx, which is not accepted where a PreOrgTx is needed', async () => {
+    const { pool, statements } = fakePool();
+    await withOrg(pool, ORG, async (tx) => {
+      needsOrg(tx);
+      // @ts-expect-error the organisation is set: what records "no organisation" does not take it
+      needsPre(tx);
+      await tx.query('TENANT QUERY');
+    });
+    expect(statements).toEqual([
+      'BEGIN',
+      "SELECT set_config('app.org_id', $1, true)",
+      'TENANT QUERY',
+      'COMMIT',
+    ]);
+  });
+
+  it('withoutOrg gives a PreOrgTx: no query, and not accepted where an OrgTx is needed', async () => {
+    const { pool, statements } = fakePool();
+    await withoutOrg(pool, async (tx) => {
+      needsPre(tx);
+      // @ts-expect-error a PreOrgTx is not accepted where an OrgTx is needed
+      needsOrg(tx);
+      // @ts-expect-error a tenant query with no organisation does not compile: there is no query
+      expect(tx.query).toBeUndefined();
+      expect('query' in tx).toBe(false);
+    });
+    expect(statements).toEqual(['BEGIN', 'COMMIT']);
+    expectTypeOf<PreOrgTx>().not.toHaveProperty('query');
+    expectTypeOf<PreOrgTx>().not.toExtend<Autocommit>();
+    expectTypeOf<PreOrgTx>().not.toExtend<OrgTx>();
+    expectTypeOf<OrgTx>().not.toExtend<PreOrgTx>();
+  });
+
+  it('withResolvedOrg gives a PreOrgTx, and enterOrg the OrgTx of the same transaction', async () => {
+    const { pool, statements, taken } = fakePool();
+    await withResolvedOrg(pool, async (tx, enterOrg) => {
+      needsPre(tx);
+      // @ts-expect-error before enterOrg there is no organisation: a PreOrgTx is not an OrgTx
+      needsOrg(tx);
+      const inOrg = needsOrg(await enterOrg(ORG));
+      await inOrg.query('TENANT QUERY');
+      // The handle from before is still the same transaction, for a sec.* wrapper that takes it.
+      await withNoOrgSet(tx).query('SAME TRANSACTION');
+    });
+    expect(statements).toEqual([
+      'BEGIN',
+      "SELECT set_config('app.org_id', $1, true)",
+      'TENANT QUERY',
+      'SAME TRANSACTION',
+      'COMMIT',
+    ]);
+    expect(taken).toHaveLength(1);
   });
 });
