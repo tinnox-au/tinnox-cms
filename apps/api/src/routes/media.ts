@@ -2,6 +2,10 @@
  * Private media: streamed upload into quarantine, listing, authorised preview
  * and deletion. Files reach the library only after the isolated worker accepts
  * them (media/pipeline.ts).
+ * Every read runs inside readOrg with the organisation of the verified session; every write
+ * runs inside changeAsOperator, which checks the member's role again first and writes the audit
+ * rows the change returns on its transaction (auth/permissions.ts). An upload refused before
+ * any row is written leaves only its audit row, through recordRefusal (auth/refusal.ts).
  */
 import {
   ABSOLUTE,
@@ -18,18 +22,18 @@ import {
   type MediaUsageResponse,
 } from '@tinnox/contracts';
 import {
-  auditScoped,
   CommitOutcomeUnknownError,
+  readOrg,
   STAGE_A_CONSTRAINTS,
   violatedConstraint,
-  withOrg,
   type OrgReadTx,
 } from '@tinnox/db';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { abandonBody, withOrgAllowed, withOrgDecisionAllowed } from '../auth/permissions.ts';
+import { abandonBody, changeAsOperator } from '../auth/permissions.ts';
+import { recordRefusal } from '../auth/refusal.ts';
 import { operatorOf, type OperatorSession } from '../auth/session.ts';
 import { perMinute, type AppContext } from '../context.ts';
-import { accept, refuse } from '../db-helpers.ts';
+import { accept, refuse, type Decision } from '../db-helpers.ts';
 import { HttpError, notFound, parseInput, pgErrorCode } from '../errors.ts';
 import { MEDIA_COLUMNS, toMediaDto, usedBytes, type MediaRow } from '../media/rows.ts';
 import { serveObject } from '../media/serve.ts';
@@ -58,27 +62,27 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
   const { pool, config } = ctx;
   const limits = config.limits;
 
-  async function auditUpload(
+  /** The audit row of an upload refused before any row was written, in its own transaction. */
+  async function recordUploadRefusal(
+    request: FastifyRequest,
     session: OperatorSession,
     result: 'failure' | 'denied',
     detail: UploadRefusal,
   ): Promise<void> {
-    await withOrg(pool, session.orgId, (tx) =>
-      auditScoped(tx, {
-        actorType: 'operator',
-        actorId: session.membershipId,
-        action: 'media.upload',
-        objectType: 'media',
-        objectId: null,
-        result,
-        detail,
-      }),
-    );
+    await recordRefusal(ctx, request, session, {
+      actorType: 'operator',
+      actorId: session.membershipId,
+      action: 'media.upload',
+      objectType: 'media',
+      objectId: null,
+      result,
+      detail,
+    });
   }
 
   app.get(ROUTES.media, async (request): Promise<MediaListResponse> => {
     const session = operatorOf(request);
-    return withOrg(pool, session.orgId, async (tx) => {
+    return readOrg(pool, session.orgId, async (tx) => {
       const { rows } = await tx.query<MediaRow>(
         `SELECT ${MEDIA_COLUMNS} FROM media m
          WHERE m.org_id = app_org_id() AND m.deleted_at IS NULL
@@ -104,10 +108,10 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
         );
       }
 
-      const used = await withOrg(pool, session.orgId, usedBytes);
+      const used = await readOrg(pool, session.orgId, usedBytes);
       const remaining = limits.maxOrgStorageBytes - used;
       if (remaining <= 0) {
-        await auditUpload(session, 'denied', { reason: 'storage_quota_exceeded' });
+        await recordUploadRefusal(request, session, 'denied', { reason: 'storage_quota_exceeded' });
         abandonBody(request, reply);
         throw new HttpError(
           413,
@@ -134,7 +138,10 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
       // A declared length far above the limit is refused before any byte is read.
       const declared = Number(request.headers['content-length']);
       if (Number.isFinite(declared) && declared > cap + 1024 * 1024) {
-        await auditUpload(session, 'denied', { reason: 'too_large', declaredBytes: declared });
+        await recordUploadRefusal(request, session, 'denied', {
+          reason: 'too_large',
+          declaredBytes: declared,
+        });
         abandonBody(request, reply);
         throw tooLarge();
       }
@@ -155,7 +162,7 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
 
       const received = await ctx.media.receive(part.file, cap);
       if (received.truncated) {
-        await auditUpload(session, 'denied', {
+        await recordUploadRefusal(request, session, 'denied', {
           reason: quotaBound ? 'storage_quota_exceeded' : 'too_large',
         });
         abandonBody(request, reply);
@@ -163,13 +170,13 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
       }
       if (received.bytes === 0) {
         await ctx.media.discard(received.jobId);
-        await auditUpload(session, 'failure', { reason: 'empty_file' });
+        await recordUploadRefusal(request, session, 'failure', { reason: 'empty_file' });
         throw new HttpError(400, 'bad_request', 'The file is empty.');
       }
       const mimeType = sniffMediaType(received.head);
       if (mimeType === null) {
         await ctx.media.discard(received.jobId);
-        await auditUpload(session, 'failure', {
+        await recordUploadRefusal(request, session, 'failure', {
           reason: 'unrecognised_type',
           bytes: received.bytes,
         });
@@ -183,30 +190,33 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
       let media: MediaDto;
       try {
         // The role is checked again first (a demotion during the upload refuses it), then the
-        // quota lock. A refusal throws, and the stored file is discarded below.
-        media = await withOrgDecisionAllowed(ctx, request, async (tx) => {
+        // quota lock. A quota refusal is a decision, not a throw, so its audit row commits; it
+        // is thrown once the transaction has committed, and the stored file is discarded below.
+        const decision = await changeAsOperator<Decision<MediaDto>>(ctx, request, async (tx) => {
           // Serialise uploads per organisation so concurrent requests cannot pass the quota together.
           await tx.query(
             "SELECT pg_advisory_xact_lock(hashtextextended('tinnox.media_quota:' || app_org_id()::text, 0))",
           );
           const usedNow = await usedBytes(tx);
           if (usedNow + received.bytes > limits.maxOrgStorageBytes) {
-            await auditScoped(tx, {
-              actorType: 'operator',
-              actorId: session.membershipId,
-              action: 'media.upload',
-              objectType: 'media',
-              objectId: null,
-              result: 'denied',
-              detail: { reason: 'storage_quota_exceeded', bytes: received.bytes },
-            });
-            return refuse(
-              new HttpError(
-                413,
-                'storage_quota_exceeded',
-                `The file does not fit in the remaining storage (${megabytes(Math.max(0, limits.maxOrgStorageBytes - usedNow))} free).`,
+            return {
+              value: refuse(
+                new HttpError(
+                  413,
+                  'storage_quota_exceeded',
+                  `The file does not fit in the remaining storage (${megabytes(Math.max(0, limits.maxOrgStorageBytes - usedNow))} free).`,
+                ),
               ),
-            );
+              audit: {
+                actorType: 'operator',
+                actorId: session.membershipId,
+                action: 'media.upload',
+                objectType: 'media',
+                objectId: null,
+                result: 'denied',
+                detail: { reason: 'storage_quota_exceeded', bytes: received.bytes },
+              },
+            };
           }
           const inserted = await tx.query<MediaRow>(
             `INSERT INTO media AS m
@@ -225,17 +235,21 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
           );
           const row = inserted.rows[0];
           if (row === undefined) throw new Error('media insert returned no row');
-          await auditScoped(tx, {
-            actorType: 'operator',
-            actorId: session.membershipId,
-            action: 'media.upload',
-            objectType: 'media',
-            objectId: row.id,
-            result: 'success',
-            detail: { bytes: received.bytes, sniffedType: mimeType },
-          });
-          return accept(toMediaDto(row));
+          return {
+            value: accept(toMediaDto(row)),
+            audit: {
+              actorType: 'operator',
+              actorId: session.membershipId,
+              action: 'media.upload',
+              objectType: 'media',
+              objectId: row.id,
+              result: 'success',
+              detail: { bytes: received.bytes, sniffedType: mimeType },
+            },
+          };
         });
+        if (!decision.ok) throw decision.error;
+        media = decision.value;
       } catch (error) {
         // When COMMIT did not confirm, the row may exist: keep the bytes. The scan queues
         // them if it does (they are still marked in progress for up to an hour), and the
@@ -263,7 +277,7 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
   app.get(ROUTES.mediaItemPattern, async (request): Promise<MediaDto> => {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
-    return withOrg(pool, session.orgId, async (tx) => {
+    return readOrg(pool, session.orgId, async (tx) => {
       const row = await loadMediaRow(tx, id);
       if (row === null) throw notFound('The media item');
       return toMediaDto(row);
@@ -280,7 +294,7 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     const patch = parseInput(MediaPatchSchema, request.body, 'media item');
     try {
-      return await withOrgAllowed(ctx, request, async (tx) => {
+      return await changeAsOperator(ctx, request, async (tx) => {
         const locked = await tx.query<{
           kind: 'image' | 'video';
           name: string | null;
@@ -364,18 +378,20 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
         }
         if (patch.tagIds !== undefined) await replaceTags(tx, 'media', id, patch.tagIds);
 
-        await auditScoped(tx, {
-          actorType: 'operator',
-          actorId: session.membershipId,
-          action: 'media.update',
-          objectType: 'media',
-          objectId: id,
-          result: 'success',
-          detail: { fields: Object.keys(patch).sort() },
-        });
         const row = await loadMediaRow(tx, id);
         if (row === null) throw new Error('updated media item is not visible');
-        return toMediaDto(row);
+        return {
+          value: toMediaDto(row),
+          audit: {
+            actorType: 'operator',
+            actorId: session.membershipId,
+            action: 'media.update',
+            objectType: 'media',
+            objectId: id,
+            result: 'success',
+            detail: { fields: Object.keys(patch).sort() },
+          },
+        };
       });
     } catch (error) {
       // The folder or a tag was deleted between the check above and the write.
@@ -397,7 +413,7 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
   app.get(ROUTES.mediaUsagePattern, async (request): Promise<MediaUsageResponse> => {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
-    return withOrg(pool, session.orgId, async (tx) => {
+    return readOrg(pool, session.orgId, async (tx) => {
       const media = await tx.query(
         'SELECT 1 FROM media WHERE id = $1 AND org_id = app_org_id() AND deleted_at IS NULL',
         [id],
@@ -438,7 +454,7 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
   ): Promise<FastifyReply> {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
-    const row = await withOrg(pool, session.orgId, async (tx) => {
+    const row = await readOrg(pool, session.orgId, async (tx) => {
       const { rows } = await tx.query<{
         id: string;
         status: string;
@@ -498,7 +514,7 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     let keysToRemove: (string | null)[];
     try {
-      keysToRemove = await withOrgAllowed(ctx, request, async (tx) => {
+      keysToRemove = await changeAsOperator(ctx, request, async (tx) => {
         const { rows } = await tx.query<{
           status: string;
           storage_key: string | null;
@@ -549,17 +565,19 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
         } else {
           await tx.query('DELETE FROM media WHERE id = $1 AND org_id = app_org_id()', [id]);
         }
-        await auditScoped(tx, {
-          actorType: 'operator',
-          actorId: session.membershipId,
-          action: 'media.delete',
-          objectType: 'media',
-          objectId: id,
-          result: 'success',
-          detail: { bytesRetainedForPublications: retained },
-        });
-        // shortcut: quota ignores thumbnail bytes (<=512 KiB each).
-        return retained ? [] : [row.storage_key, row.thumb_storage_key];
+        return {
+          // shortcut: quota ignores thumbnail bytes (<=512 KiB each).
+          value: retained ? [] : [row.storage_key, row.thumb_storage_key],
+          audit: {
+            actorType: 'operator',
+            actorId: session.membershipId,
+            action: 'media.delete',
+            objectType: 'media',
+            objectId: id,
+            result: 'success',
+            detail: { bytesRetainedForPublications: retained },
+          },
+        };
       });
     } catch (error) {
       // A publish or playlist edit referenced the row between the checks and the DELETE.

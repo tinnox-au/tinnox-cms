@@ -1,8 +1,9 @@
 /**
  * Every write transaction of an operator route checks the member's role again first
  * (withOrgAllowed, withOrgDecisionAllowed; stage-c.md 6.3). This counts the plain withOrg and
- * withOrgDecision calls left in each route file against a list of the reads and audit-only
- * transactions, so a new write that uses plain withOrg fails here.
+ * withOrgDecision calls left in each route file against a list of the reads, so a new write
+ * that uses plain withOrg fails here. A refusal that only leaves an audit row goes through
+ * recordRefusal (auth/refusal.ts).
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -14,9 +15,8 @@ const ROUTES_DIR = join(import.meta.dirname, '..', 'routes');
 const OUTSIDE_OPERATOR_API = new Set(['auth.ts', 'ops.ts', 'player.ts']);
 
 /**
- * Plain withOrg calls allowed per file: reads, plus the audit-only transactions of media.ts
- * (auditUpload) and the quota read before an upload streams. Add a read here; a write goes
- * through withOrgAllowed.
+ * Plain withOrg calls allowed per file: reads. Add a read here; a write goes through
+ * withOrgAllowed. A file on the new API (readOrg, changeAsOperator) has none.
  */
 const READS: Readonly<Record<string, number>> = {
   'alert-recipients.ts': 1,
@@ -25,7 +25,7 @@ const READS: Readonly<Record<string, number>> = {
   'displays.ts': 0,
   'folders.ts': 0,
   'layouts.ts': 0,
-  'media.ts': 6,
+  'media.ts': 0,
   'members.ts': 3,
   'overview.ts': 0,
   'playlists.ts': 2,
