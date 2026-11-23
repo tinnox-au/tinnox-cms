@@ -3,7 +3,7 @@ contract: status/v2
 repo: tinnox-au/tinnox-cms
 initiative: TINNOX CMS
 key: CMS
-next_id: 29
+next_id: 30
 phase: Not written yet: one sentence on what this project is and where it stands
 gate: -
 seeded: 17 Nov 2026 by status init
@@ -36,6 +36,7 @@ None.
 | CMS-25 | Fix the open layouts review findings LYX-01 to LYX-05 (round 4); each closes with its poteto plan step | proposed | - | 22 Nov |
 | CMS-26 | Ruleset on main: no force push or deletion, merge or squash only, pull requests and the three CI jobs required (poteto D12, D14); Michael creates it | proposed | - | 22 Nov |
 | CMS-27 | Ask TINNOX whether DEC-13 (data stays in Australia) allows alert e-mails to mailboxes outside Australia (poteto D23) | proposed | - | 22 Nov |
+| CMS-29 | Revoke three unused tinnox_definer grants in a new migration: member_invite.invited_by SELECT, UPDATE on login_state and pairing_claim_failure (poteto step 6) | proposed | - | 23 Nov |
 
 ## To do
 
@@ -214,3 +215,6 @@ from: CMS-23
 
 ### CMS-28
 from: CMS-24
+
+### CMS-29
+from: CMS-28
