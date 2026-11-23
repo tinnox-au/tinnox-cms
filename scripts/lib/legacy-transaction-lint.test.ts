@@ -93,10 +93,8 @@ const FOUND_BY_STEP_19 = [
   'apps/api/src/media/pipeline.ts',
   'apps/api/src/publishing.ts',
   'apps/api/src/routes/alert-recipients.ts',
-  'apps/api/src/routes/apps.ts',
   'apps/api/src/routes/auth.ts',
   'apps/api/src/routes/displays.ts',
-  'apps/api/src/routes/folders.ts',
   'apps/api/src/routes/layouts.ts',
   'apps/api/src/routes/media.ts',
   'apps/api/src/routes/members.ts',
@@ -104,7 +102,6 @@ const FOUND_BY_STEP_19 = [
   'apps/api/src/routes/playlists.ts',
   'apps/api/src/routes/push.ts',
   'apps/api/src/routes/schedules.ts',
-  'apps/api/src/routes/tags.ts',
   'scripts/lib/provision.ts',
   'scripts/seed.ts',
 ];

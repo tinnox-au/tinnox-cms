@@ -20,10 +20,10 @@ const OUTSIDE_OPERATOR_API = new Set(['auth.ts', 'ops.ts', 'player.ts']);
  */
 const READS: Readonly<Record<string, number>> = {
   'alert-recipients.ts': 1,
-  'apps.ts': 2,
+  'apps.ts': 0,
   'audit.ts': 0,
   'displays.ts': 5,
-  'folders.ts': 1,
+  'folders.ts': 0,
   'layouts.ts': 2,
   'media.ts': 6,
   'members.ts': 3,
@@ -31,7 +31,7 @@ const READS: Readonly<Record<string, number>> = {
   'playlists.ts': 2,
   'push.ts': 2,
   'schedules.ts': 2,
-  'tags.ts': 1,
+  'tags.ts': 0,
 };
 
 // The word boundary leaves out withOrgAllowed and withOrgDecisionAllowed; import lines have

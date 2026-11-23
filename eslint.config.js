@@ -897,16 +897,13 @@ export const LEGACY_TRANSACTION_FILES = [
   // The operator routes: reads in plain withOrg, writes through withOrgAllowed or
   // withOrgDecisionAllowed with auditScoped in the callback.
   'apps/api/src/routes/alert-recipients.ts',
-  'apps/api/src/routes/apps.ts',
   'apps/api/src/routes/displays.ts',
-  'apps/api/src/routes/folders.ts',
   'apps/api/src/routes/layouts.ts',
   'apps/api/src/routes/media.ts',
   'apps/api/src/routes/members.ts',
   'apps/api/src/routes/playlists.ts',
   'apps/api/src/routes/push.ts',
   'apps/api/src/routes/schedules.ts',
-  'apps/api/src/routes/tags.ts',
   // Sign-in, sign-out and the player protocol: no role, and partly before the organisation is
   // known.
   'apps/api/src/routes/auth.ts',
