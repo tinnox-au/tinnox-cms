@@ -334,9 +334,17 @@ describe('e-mail alerts for screens', () => {
     });
     try {
       lossy.advanceClock(DELAY_MS);
-      const unknown = await checkAlerts(lossy);
+      const logged: { orgId?: unknown; msg: string }[] = [];
+      const unknown = await checkAlerts(lossy, {
+        logger: { error: (obj: { orgId?: unknown }, msg: string) => logged.push({ ...obj, msg }) },
+      });
       // Counted as failed, not as an alert: the run cannot say the transition was recorded.
       expect(unknown.failed).toBeGreaterThanOrEqual(1);
+      // ...and logged as unconfirmed, the one thing settle() changed here (TST-10 of the group C
+      // review): before step 27 the catch-all also counted it failed and sent nothing.
+      expect(logged.filter((line) => line.orgId === org.orgId).map((line) => line.msg)).toEqual([
+        'display alert claims were not confirmed for an organisation; no e-mail was sent for them',
+      ]);
       expect(lossy.sentMail.filter((m) => m.subject.endsWith(': Alert unconfirmed'))).toEqual([]);
     } finally {
       await lossy.close();

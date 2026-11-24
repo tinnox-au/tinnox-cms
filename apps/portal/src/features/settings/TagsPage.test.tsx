@@ -75,7 +75,7 @@ describe('TagsPage', () => {
 
   it('offers a Viewer no change', async () => {
     const screen = await renderPage('media', 'viewer');
-    await expect.element(screen.getByText(MEDIA_TAG.name)).toBeVisible();
+    await expect.element(screen.getByText(MEDIA_TAG.name, { exact: true })).toBeVisible();
     expect(screen.getByRole('button', { name: 'New tag' }).elements()).toHaveLength(0);
     expect(
       screen.getByRole('button', { name: `Actions for tag ${MEDIA_TAG.name}` }).elements(),
@@ -93,7 +93,7 @@ describe('TagsPage', () => {
     async (scope, tag, keys) => {
       const screen = await renderPage(scope, 'editor', keys);
       await expect.element(screen.getByRole('button', { name: 'New tag' })).toBeVisible();
-      await expect.element(screen.getByText(tag.name)).toBeVisible();
+      await expect.element(screen.getByText(tag.name, { exact: true })).toBeVisible();
       expect(
         screen.getByRole('button', { name: `Actions for tag ${tag.name}` }).elements(),
       ).toHaveLength(0);

@@ -213,10 +213,13 @@ const NO_RANDOM_IN_TESTS = [
 // its negation (`expect([401, 403]).not.toContain(response.status)`,
 // `expect(response.status).not.toBeOneOf([401])`) is refused. Since CHK-4 of the group C review a
 // comparison inside expect() is also seen as `!==` or `!=` against a status literal
-// (`expect(response.status !== 401).toBe(true)`) and behind `!` (`expect(!(status < 400))`). Not
-// seen: arithmetic on the status (`Math.floor(status / 100)`), a comparison compared again
-// (`expect(status < 400 === false)`) and an exact comparison asserted false
-// (`expect(response.status === 401).toBe(false)`).
+// (`expect(response.status !== 401).toBe(true)`) and behind `!` (`expect(!(status < 400))`).
+// Since TST-5 an exact comparison asserted false is seen too
+// (`expect(response.status === 401).toBe(false)`), and so, in the files that send real requests,
+// is a response's `ok` asserted false (NO_RESPONSE_NOT_OK below). Not seen: arithmetic on the
+// status (`Math.floor(status / 100)`), the status as text (`expect(String(status)).toMatch(/^4/)`),
+// a comparison compared again (`expect(status < 400 === false)`) and a negation by a named
+// constant (`.not.toBe(OK)`, left alone so `.not.toBe(previousStatus)` stays allowed).
 const RANGE_STATUS_MESSAGE =
   "Assert the exact status: expect(response.status).toBe(204), or for an error expectError(response, 'not_found') from apps/api/test/support.ts (also exported by tests/integration/support.ts), which checks the status and the error code. A range or a 'not 401' passes on a crash or a rate limit (RCX-03).";
 const STATUS_READ = (path) =>
@@ -253,6 +256,15 @@ const RELATIONAL_STATUS_WITHIN = (path, depth) =>
     ? RELATIONAL_STATUS(path)
     : `:matches(${RELATIONAL_STATUS(path)}, [${path}.type='LogicalExpression']:matches(${RELATIONAL_STATUS_WITHIN(`${path}.left`, depth - 1)}, ${RELATIONAL_STATUS_WITHIN(`${path}.right`, depth - 1)}), [${path}.type='UnaryExpression'][${path}.operator='!']${RELATIONAL_STATUS_WITHIN(`${path}.argument`, depth - 1)})`;
 const STATUS_NEGATED_LIST = `CallExpression[callee.property.name=/^(toContain|toBeOneOf)$/][callee.object.property.name='not']${EXPECT_CALL('callee.object.object')}`;
+// "Is false": toBe, toEqual or toStrictEqual with false, toBeFalsy, or the negation of true or of
+// toBeTruthy, on expect() or expect.soft() whose argument `subject` matches; `subject` takes the
+// path of that argument from the matcher call.
+const ASSERTED_FALSE = (subject) =>
+  `:matches(CallExpression[callee.property.name=/^(toBe|toEqual|toStrictEqual)$/][arguments.0.raw='false']${EXPECT_CALL('callee.object')}${subject('callee.object.arguments.0')}, CallExpression[callee.property.name='toBeFalsy']${EXPECT_CALL('callee.object')}${subject('callee.object.arguments.0')}, CallExpression[callee.property.name=/^(toBe|toEqual|toStrictEqual)$/][arguments.0.raw='true'][callee.object.property.name='not']${EXPECT_CALL('callee.object.object')}${subject('callee.object.object.arguments.0')}, CallExpression[callee.property.name='toBeTruthy'][callee.object.property.name='not']${EXPECT_CALL('callee.object.object')}${subject('callee.object.object.arguments.0')})`;
+// An exact comparison of a status with a status literal, either way round: asserted false, it is
+// "not 401" (`expect(response.status === 401).toBe(false)`).
+const STATUS_EQUALS_LITERAL = (path) =>
+  `[${path}.type='BinaryExpression'][${path}.operator=/^===?$/]:matches(${STATUS_SUBJECT(`${path}.left`)}${HTTP_STATUS_LITERAL(`${path}.right`)}, ${STATUS_SUBJECT(`${path}.right`)}${HTTP_STATUS_LITERAL(`${path}.left`)})`;
 const NO_RANGE_STATUS = [
   {
     selector: `${STATUS_COMPARISON}${NOT_OTHER_LITERAL_ARGUMENT}${STATUS_READ('callee.object.arguments.0')}`,
@@ -283,9 +295,33 @@ const NO_RANGE_STATUS = [
     message: RANGE_STATUS_MESSAGE,
   },
   {
+    selector: ASSERTED_FALSE(STATUS_EQUALS_LITERAL),
+    message: RANGE_STATUS_MESSAGE,
+  },
+  {
     // The status on one side and a list that opens with a status literal on the other.
     selector: `${STATUS_NEGATED_LIST}:matches(${STATUS_SUBJECT('callee.object.object.arguments.0')}${HTTP_STATUS_LITERAL('arguments.0.elements.0')}, ${STATUS_SUBJECT('arguments.0')}${HTTP_STATUS_LITERAL('callee.object.object.arguments.0.elements.0')})`,
     message: RANGE_STATUS_MESSAGE,
+  },
+];
+
+// TST-5 of the group C review: a response's `ok` asserted false (`expect(response.ok).toBe(false)`,
+// Playwright's `expect(response.ok()).toBeFalsy()`) is "not 2xx", which a 500 or a 429 passes.
+// Only in the files that send real requests (REAL_SERVICE_TEST_FILES): unit tests assert the `ok`
+// of a result type (`expect(result.ok).toBe(false)` in apps/portal/src/lib), which is exact.
+// The `ok` of a query's row (`expect(taken.rows[0]?.ok).toBe(false)`, packages/db/test) is a
+// column, not a response, and is left alone; any other `ok` that is not a response's is
+// asserted through its object, as the message says.
+const ROW_ELEMENT = (path) =>
+  `:matches([${path}.object.name='rows'], [${path}.object.property.name='rows'])`;
+const NOT_ROW_OK = (path) =>
+  `:not(${ROW_ELEMENT(`${path}.object`)}, ${ROW_ELEMENT(`${path}.object.expression`)}, ${ROW_ELEMENT(`${path}.expression.object`)})`;
+const OK_READ = (path) =>
+  `:matches([${path}.property.name='ok'], [${path}.expression.property.name='ok'], [${path}.callee.property.name='ok'], [${path}.argument.callee.property.name='ok'], [${path}.argument.property.name='ok'])${NOT_ROW_OK(path)}`;
+const NO_RESPONSE_NOT_OK = [
+  {
+    selector: ASSERTED_FALSE(OK_READ),
+    message: `${RANGE_STATUS_MESSAGE} An \`ok\` that is not an HTTP response's is asserted through its object: expect(result).toMatchObject({ ok: false }).`,
   },
 ];
 
@@ -2381,6 +2417,21 @@ export default tseslint.config(
         ...NO_SKIPPED_TESTS,
         ...NO_RANDOM_IN_TESTS,
         ...NO_RANGE_STATUS,
+        ...NO_BRAND_CAST,
+        ...NO_HTML_SINK_CALLS,
+      ],
+    },
+  },
+  {
+    // The test files that send real requests also refuse a response's `ok` asserted false.
+    files: REAL_SERVICE_TEST_FILES,
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...NO_SKIPPED_TESTS,
+        ...NO_RANDOM_IN_TESTS,
+        ...NO_RANGE_STATUS,
+        ...NO_RESPONSE_NOT_OK,
         ...NO_BRAND_CAST,
         ...NO_HTML_SINK_CALLS,
       ],

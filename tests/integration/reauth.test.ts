@@ -119,6 +119,10 @@ function statementRefusals() {
     refuseNext(matches: (text: string) => boolean, sqlstate: string): void {
       armed = { matches, sqlstate };
     },
+    /** Drops a refusal no statement took, so a failed case does not fail the next sign-in. */
+    disarm(): void {
+      armed = null;
+    },
   };
 }
 
@@ -378,6 +382,8 @@ describe('signing in again after the sessions were ended', () => {
         expect(setCookie(response, t.config.sessionCookieName) ?? '').toBe('');
       } finally {
         idp.sub = sub;
+        // TST-4 of the group C review.
+        refusals.disarm();
       }
       expect(await unscopedLoginFailures('member_locked')).toBe(before + 1);
       expect(await liveSessions(ended.membershipId)).toBe(0);

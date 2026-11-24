@@ -1,9 +1,9 @@
 /**
- * The /api routes the application serves, written out for the boundary tests
- * (session-csrf.test.ts, roles-matrix.test.ts). Not read from the API's own tables, so a route
+ * The /api routes the application serves, and which role may use each, written out for the
+ * boundary tests (session-csrf.test.ts, roles-matrix.test.ts, cross-org.test.ts). Not read from the API's own tables, so a route
  * the API adds or drops shows up here as a test failure.
  */
-import { ROUTES } from '@tinnox/contracts';
+import { ROUTES, type Role } from '@tinnox/contracts';
 
 /**
  * Every route of the operator API, as registered (`:id` is a UUID): the 51 of portal v2, the
@@ -91,4 +91,35 @@ export const LOGOUT: readonly [string, string] = ['POST', ROUTES.authLogout];
 /** The operator routes with `:id` replaced by `id`. */
 export function operatorRoutes(id: string): [string, string][] {
   return OPERATOR_ROUTE_PATTERNS.map(([method, pattern]) => [method, pattern.replace(':id', id)]);
+}
+
+/** The people, invite and alert address routes an Editor may not use. */
+const MEMBER_MANAGEMENT = new Set([
+  'GET /api/alert-recipients',
+  'POST /api/alert-recipients',
+  'DELETE /api/alert-recipients/:id',
+  'GET /api/members',
+  'PATCH /api/members/:id',
+  'POST /api/members/:id/remove',
+  'POST /api/members/:id/sign-out',
+  'GET /api/invites',
+  'POST /api/invites',
+  'POST /api/invites/:id/cancel',
+]);
+
+/**
+ * Whether a role may use an operator route, written from the decision (CMS-13, DEC-35; see
+ * roles-matrix.test.ts). cross-org.test.ts takes its Editor pass from it.
+ */
+export function allowed(role: Role, method: string, pattern: string): boolean {
+  const route = `${method} ${pattern}`;
+  switch (role) {
+    case 'owner':
+    case 'admin':
+      return true;
+    case 'editor':
+      return !MEMBER_MANAGEMENT.has(route);
+    case 'viewer':
+      return method === 'GET' && !MEMBER_MANAGEMENT.has(route);
+  }
 }

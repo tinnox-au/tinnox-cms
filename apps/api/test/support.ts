@@ -1093,10 +1093,13 @@ export function statementHolds(): StatementHolds {
   };
 }
 
-/** Runs the e-mail alert check once at the app's clock, sending through `ctx.mail` unless given another. */
+/**
+ * Runs the e-mail alert check once at the app's clock, sending through `ctx.mail` unless given
+ * another, and logging nowhere unless given a logger.
+ */
 export function checkAlerts(
   t: TestApp,
-  overrides: Partial<Pick<DisplayAlertDeps, 'mail' | 'shouldStop'>> = {},
+  overrides: Partial<Pick<DisplayAlertDeps, 'mail' | 'shouldStop' | 'logger'>> = {},
 ): Promise<DisplayAlertResult> {
   const mail = overrides.mail ?? t.ctx.mail;
   if (mail === null) throw new Error('this test app has no mailer');
@@ -1105,7 +1108,7 @@ export function checkAlerts(
     now: t.ctx.now(),
     mail,
     portalOrigin: t.config.portalOrigin,
-    logger: { error: () => undefined },
+    logger: overrides.logger ?? { error: () => undefined },
     shouldStop: overrides.shouldStop,
   });
 }

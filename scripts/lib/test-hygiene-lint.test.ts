@@ -225,6 +225,8 @@ describe('module mocks in integration and e2e tests (OTH-13)', () => {
 
 const RANGE_STATUS =
   /^Assert the exact status: .*expectError\(response, 'not_found'\).*\(RCX-03\)\.$/;
+const NOT_OK =
+  /^Assert the exact status: .*\(RCX-03\)\. An `ok` that is not an HTTP response's is asserted through its object: expect\(result\)\.toMatchObject\(\{ ok: false \}\)\.$/;
 
 describe('a status asserted as a range or a negation (RCX-03)', { timeout: 30_000 }, () => {
   it.each([
@@ -265,6 +267,12 @@ describe('a status asserted as a range or a negation (RCX-03)', { timeout: 30_00
     'expect(response.status).not.toBeOneOf([401]);',
     'expect(!(response.status < 400)).toBe(true);',
     'expect(!(status >= 500)).toBe(true);',
+    // TST-5 (group C review): an exact comparison asserted false is "not 401" too.
+    'expect(response.status === 401).toBe(false);',
+    'expect(401 == reply.statusCode).toBeFalsy();',
+    'expect(status === 500).not.toBe(true);',
+    'expect.soft(response.status === 200).not.toBeTruthy();',
+    'expect(response.status === 401).toEqual(false);',
   ])('flags %s', async (code) => {
     const messages = await flagged('tests/integration/fixture.test.ts', code);
     expect(messages).toHaveLength(1);
@@ -310,6 +318,10 @@ describe('a status asserted as a range or a negation (RCX-03)', { timeout: 30_00
       "expect(['failed']).not.toContain(row.status);",
       "expect(['400 validation_failed']).toContain(`${response.status} ${code}`);",
       'expect(!(elapsedMs < 500)).toBe(true);',
+      "expect(row.status === 'ready').toBe(false);",
+      'expect(run.status === 0).toBe(false);',
+      'expect(response.status === other).toBe(false);',
+      'expect(response.ok).toBe(true);',
     ].join('\n');
     expect(await flagged('tests/integration/fixture.test.ts', code)).toEqual([]);
   });
@@ -318,5 +330,66 @@ describe('a status asserted as a range or a negation (RCX-03)', { timeout: 30_00
     expect(
       await flagged('apps/api/src/fixture.ts', 'expect(response.status).toBeLessThan(500);'),
     ).toEqual([]);
+  });
+
+  // TST-5 (group C review): a response's `ok` asserted false is "not 2xx".
+  it.each([
+    'expect(response.ok).toBe(false);',
+    'expect((await fetch(url)).ok).toBeFalsy();',
+    'expect(response.ok()).not.toBe(true);',
+    'expect.soft(response?.ok).not.toBeTruthy();',
+    "expect(response.ok, 'what').toStrictEqual(false);",
+    'expect(await answer.ok()).toBe(false);',
+  ])('flags %s where tests send real requests', async (code) => {
+    for (const path of [
+      'tests/integration/fixture.test.ts',
+      'tests/e2e/fixture.spec.ts',
+      'apps/api/test/fixture.integration.test.ts',
+      'apps/api/test/support.ts',
+      'packages/db/test/fixture.integration.test.ts',
+    ]) {
+      expect(await flagged(path, code), path).toEqual([expect.stringMatching(NOT_OK)]);
+    }
+  });
+
+  it('keeps the other test rules where it flags ok', async () => {
+    const messages = await flagged(
+      'tests/integration/fixture.test.ts',
+      "it.skip('a', () => {}); expect(response.status).not.toBe(401); Math.random();",
+    );
+    expect(messages).toHaveLength(3);
+    expect(messages).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(SKIPPED),
+        expect.stringMatching(RANGE_STATUS),
+        expect.stringMatching(RANDOM),
+      ]),
+    );
+  });
+
+  it("leaves a result type's ok, and an ok asserted true, alone", async () => {
+    for (const path of [
+      'apps/portal/src/lib/fixture.test.ts',
+      'apps/media-worker/src/fixture.test.ts',
+      'apps/api/src/fixture.test.ts',
+    ]) {
+      expect(await flagged(path, 'expect(result.ok).toBe(false);'), path).toEqual([]);
+    }
+    expect(
+      await flagged('tests/integration/fixture.test.ts', 'expect(response.ok).toBe(true);'),
+    ).toEqual([]);
+  });
+
+  it("leaves a query row's ok column alone, and tells the author how to assert another ok", async () => {
+    const rows = [
+      'expect(taken.rows[0]?.ok).toBe(false);',
+      'expect(taken.rows[0].ok).toBeFalsy();',
+      'expect(taken.rows[0]!.ok).toBe(false);',
+      'expect(rows[0]?.ok).not.toBe(true);',
+    ].join('\n');
+    expect(await flagged('packages/db/test/fixture.integration.test.ts', rows)).toEqual([]);
+    expect(
+      await flagged('packages/db/test/fixture.integration.test.ts', 'expect(row.ok).toBe(false);'),
+    ).toEqual([expect.stringMatching(NOT_OK)]);
   });
 });

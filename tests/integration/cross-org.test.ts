@@ -35,6 +35,7 @@ import {
   type TestApp,
   type TestOrg,
 } from './support.ts';
+import { allowed, OPERATOR_ROUTE_PATTERNS } from './routes.ts';
 
 describe('organisation isolation through the API', () => {
   let t: TestApp;
@@ -756,6 +757,13 @@ describe('organisation isolation through the API', () => {
    * A and once as a fresh UUID, both as organisation B, and names the answer both must be. A
    * route that takes no such id says why. A route without a case fails the test, so a new route
    * cannot skip the question.
+   *
+   * The operator probes run as B's Owner and again as B's Editor (TST-1 of the group C review), so
+   * a role check made after a lookup that reads outside row-level security (a sec.* lookup) would
+   * show as a different answer. A role check after a lookup under row-level security cannot show
+   * here under any role: the foreign row is invisible, so both ids answer the lookup's 404. That a
+   * role refusal comes before the lookup is held by lint (NO_API_403 and the ban on importing
+   * ROLE_REFUSALS outside apps/api/src/auth/, in eslint.config.js), not by this test.
    */
   it('answers another organisation’s id exactly like an id that was never issued, on every route (D1)', async () => {
     interface Ids {
@@ -779,7 +787,10 @@ describe('organisation isolation through the API', () => {
     // refusal came from the reference lookup and not from a body that no longer parses.
     type Detail = Readonly<Record<string, string>>;
     type Details = readonly Detail[];
-    type Probe = readonly [AnsweredErrorCode, (x: Ids) => Promise<Response>, Details?];
+    // The message, where given, proves which lookup refused: a 404 of the caller's own object in
+    // the path, gone or stale, would otherwise answer the same for both ids (SEC-4 of the group C
+    // review).
+    type Probe = readonly [AnsweredErrorCode, (x: Ids) => Promise<Response>, Details?, string?];
     type CrossOrgCase = { readonly none: string } | { readonly probes: readonly Probe[] };
 
     // A code A's operator claimed for a screen of A and no player has collected: the one kind of
@@ -814,15 +825,29 @@ describe('organisation isolation through the API', () => {
       Object.keys(foreign).map((key) => [key, randomUUID()]),
     ) as unknown as Ids;
 
+    // B's Owner, then B's Editor: see the passes below.
+    let caller: Operator = bob;
     const as = (method: string, path: string, json?: unknown): Promise<Response> =>
-      bob.fetch(path, {
+      caller.fetch(path, {
         method,
         ...(json === undefined ? {} : { json }),
         ...(method === 'POST' && (path === '/api/push' || path.endsWith('/publish'))
           ? { headers: { 'idempotency-key': randomUUID() } }
           : {}),
       });
-    const notFound = (send: (x: Ids) => Promise<Response>): Probe => ['not_found', send];
+    const notFound = (send: (x: Ids) => Promise<Response>, message?: string): Probe => [
+      'not_found',
+      send,
+      undefined,
+      message,
+    ];
+    const NOT_FOUND = (what: string): string => `${what} was not found.`;
+    const conflict = (send: (x: Ids) => Promise<Response>): Probe => [
+      'conflict',
+      send,
+      undefined,
+      'The report names a publication that was not published to this display.',
+    ];
     const invalid = (details: Details, send: (x: Ids) => Promise<Response>): Probe => [
       'validation_failed',
       send,
@@ -843,28 +868,36 @@ describe('organisation isolation through the API', () => {
       'GET /api/sites': none(LIST),
       'GET /api/displays': none(LIST),
       'POST /api/displays': probes(
-        notFound((x) =>
-          as('POST', '/api/displays', {
-            siteId: x.siteId,
-            name: 'planted',
-            canvas: { width: 640, height: 360 },
-          }),
+        notFound(
+          (x) =>
+            as('POST', '/api/displays', {
+              siteId: x.siteId,
+              name: 'planted',
+              canvas: { width: 640, height: 360 },
+            }),
+          NOT_FOUND('The site'),
         ),
       ),
       'GET /api/displays/status': none(LIST),
       'GET /api/displays/:id': probes(notFound((x) => as('GET', `/api/displays/${x.displayId}`))),
       'PATCH /api/displays/:id': probes(
         notFound((x) => as('PATCH', `/api/displays/${x.displayId}`, { name: 'taken' })),
-        notFound((x) =>
-          as('PATCH', `/api/displays/${b.displayId}`, { assignedPlaylistId: x.playlistId }),
+        notFound(
+          (x) => as('PATCH', `/api/displays/${b.displayId}`, { assignedPlaylistId: x.playlistId }),
+          NOT_FOUND('The playlist'),
         ),
-        notFound((x) =>
-          as('PATCH', `/api/displays/${b.displayId}`, { assignedScheduleId: x.scheduleId }),
+        notFound(
+          (x) => as('PATCH', `/api/displays/${b.displayId}`, { assignedScheduleId: x.scheduleId }),
+          NOT_FOUND('The schedule'),
         ),
-        notFound((x) =>
-          as('PATCH', `/api/displays/${b.displayId}`, { assignedLayoutId: x.layoutId }),
+        notFound(
+          (x) => as('PATCH', `/api/displays/${b.displayId}`, { assignedLayoutId: x.layoutId }),
+          NOT_FOUND('The layout'),
         ),
-        notFound((x) => as('PATCH', `/api/displays/${b.displayId}`, { tagIds: [x.displayTagId] })),
+        notFound(
+          (x) => as('PATCH', `/api/displays/${b.displayId}`, { tagIds: [x.displayTagId] }),
+          NOT_FOUND('The tag'),
+        ),
       ),
       // A fresh code each time, so the display is what decides the answer.
       'POST /api/displays/:id/claim': probes(
@@ -884,8 +917,14 @@ describe('organisation isolation through the API', () => {
       'GET /api/media/:id': probes(notFound((x) => as('GET', `/api/media/${x.mediaId}`))),
       'PATCH /api/media/:id': probes(
         notFound((x) => as('PATCH', `/api/media/${x.mediaId}`, { name: 'taken' })),
-        notFound((x) => as('PATCH', `/api/media/${b.mediaId}`, { folderId: x.folderId })),
-        notFound((x) => as('PATCH', `/api/media/${b.mediaId}`, { tagIds: [x.mediaTagId] })),
+        notFound(
+          (x) => as('PATCH', `/api/media/${b.mediaId}`, { folderId: x.folderId }),
+          NOT_FOUND('The folder'),
+        ),
+        notFound(
+          (x) => as('PATCH', `/api/media/${b.mediaId}`, { tagIds: [x.mediaTagId] }),
+          NOT_FOUND('The tag'),
+        ),
       ),
       'DELETE /api/media/:id': probes(notFound((x) => as('DELETE', `/api/media/${x.mediaId}`))),
       'GET /api/media/:id/preview': probes(
@@ -1039,19 +1078,29 @@ describe('organisation isolation through the API', () => {
       'POST /api/playlists/:id/duplicate': probes(
         notFound((x) => as('POST', `/api/playlists/${x.playlistId}/duplicate`)),
       ),
+      // The screen is looked up before the playlist (routes/playlists.ts), so the first probe's
+      // message also proves B's own screen was found.
       'POST /api/playlists/:id/publish': probes(
-        notFound((x) =>
-          as('POST', `/api/playlists/${x.playlistId}/publish`, { displayId: b.displayId }),
+        notFound(
+          (x) => as('POST', `/api/playlists/${x.playlistId}/publish`, { displayId: b.displayId }),
+          NOT_FOUND('The playlist'),
         ),
-        notFound((x) =>
-          as('POST', `/api/playlists/${b.playlistId}/publish`, { displayId: x.displayId }),
+        notFound(
+          (x) => as('POST', `/api/playlists/${b.playlistId}/publish`, { displayId: x.displayId }),
+          NOT_FOUND('The screen'),
         ),
       ),
 
       'GET /api/push': none(LIST),
       'POST /api/push': probes(
-        notFound((x) => as('POST', '/api/push', { displayIds: [x.displayId] })),
-        notFound((x) => as('POST', '/api/push', { displayIds: [b.displayId, x.displayId] })),
+        notFound(
+          (x) => as('POST', '/api/push', { displayIds: [x.displayId] }),
+          NOT_FOUND('The screen'),
+        ),
+        notFound(
+          (x) => as('POST', '/api/push', { displayIds: [b.displayId, x.displayId] }),
+          NOT_FOUND('The screen'),
+        ),
       ),
       'GET /api/overview': none(LIST),
       'GET /api/audit': none('its filters are a category, a result and a page; no object'),
@@ -1098,8 +1147,15 @@ describe('organisation isolation through the API', () => {
       'DELETE /player/registration': none('the device credential names the registration'),
       'GET /player/manifest': none('the device credential names the display'),
       'POST /player/media-urls': probes(
-        notFound((x) => requestMediaUrls(t, player, x.publicationId, [b.mediaId])),
-        notFound((x) => requestMediaUrls(t, player, b.publicationId, [x.mediaId])),
+        notFound(
+          (x) => requestMediaUrls(t, player, x.publicationId, [b.mediaId]),
+          'That publication is not the current publication of this display. Fetch the manifest again.',
+        ),
+        // Only B's current publication gets this far: a stale one answers the message above.
+        notFound(
+          (x) => requestMediaUrls(t, player, b.publicationId, [x.mediaId]),
+          'An asset is not part of that publication.',
+        ),
       ),
       'GET /player/media/:assetId': probes(
         // A valid address of B's player with the asset swapped: the signature no longer holds.
@@ -1120,41 +1176,77 @@ describe('organisation isolation through the API', () => {
         // registration makes the request A's (so B's publication then answers 404), and one never
         // issued answers 401 device_revoked (docs/player-protocol-v1.md section 6, check 3). Only
         // a holder of the signing secret can put either in a URL.
-        notFound((x) =>
-          fetch(
-            signedMediaUrl(t, {
-              registrationId: player.registrationId,
-              publicationId: b.publicationId,
-              assetId: x.mediaId,
-            }),
-          ),
-        ),
-        notFound((x) =>
-          fetch(
-            signedMediaUrl(t, {
-              registrationId: player.registrationId,
-              publicationId: x.publicationId,
-              assetId: b.mediaId,
-            }),
-          ),
-        ),
-      ),
-      'POST /player/heartbeat': probes(
-        ['forbidden', (x) => sendHeartbeat(t, player, heartbeatBody(x.displayId, 2_000_000))],
-        [
-          'conflict',
+        notFound(
           (x) =>
-            sendHeartbeat(
-              t,
-              player,
-              heartbeatBody(b.displayId, 2_000_000, {
-                downloadedPublicationId: x.publicationId,
-                activePublicationId: x.publicationId,
-                activeItemIndex: 0,
-                playerState: 'playing',
+            fetch(
+              signedMediaUrl(t, {
+                registrationId: player.registrationId,
+                publicationId: b.publicationId,
+                assetId: x.mediaId,
               }),
             ),
-        ],
+          NOT_FOUND('The media file'),
+        ),
+        notFound(
+          (x) =>
+            fetch(
+              signedMediaUrl(t, {
+                registrationId: player.registrationId,
+                publicationId: x.publicationId,
+                assetId: b.mediaId,
+              }),
+            ),
+          NOT_FOUND('The media file'),
+        ),
+      ),
+      // Every publication a report names goes through one lookup (routes/player.ts); the staging
+      // and error probes hold that for the two fields the other probe does not name (SEC-6 of
+      // the group C review).
+      'POST /player/heartbeat': probes(
+        ['forbidden', (x) => sendHeartbeat(t, player, heartbeatBody(x.displayId, 2_000_000))],
+        conflict((x) =>
+          sendHeartbeat(
+            t,
+            player,
+            heartbeatBody(b.displayId, 2_000_000, {
+              downloadedPublicationId: x.publicationId,
+              activePublicationId: x.publicationId,
+              activeItemIndex: 0,
+              playerState: 'playing',
+            }),
+          ),
+        ),
+        conflict((x) =>
+          sendHeartbeat(
+            t,
+            player,
+            heartbeatBody(b.displayId, 2_000_000, {
+              staging: {
+                publicationId: x.publicationId,
+                phase: 'downloading',
+                assetsDone: 0,
+                assetsTotal: 1,
+              },
+            }),
+          ),
+        ),
+        conflict((x) =>
+          sendHeartbeat(
+            t,
+            player,
+            heartbeatBody(b.displayId, 2_000_000, {
+              errors: [
+                {
+                  code: 'download_failed',
+                  message: 'A probe of the cross-organisation test.',
+                  at: '2026-11-25T00:00:00.000Z',
+                  publicationId: x.publicationId,
+                  assetId: null,
+                },
+              ],
+            }),
+          ),
+        ),
       ),
     };
 
@@ -1176,8 +1268,15 @@ describe('organisation isolation through the API', () => {
     ];
     expect(gaps).toEqual([]);
 
-    /** Status and body, without the request id: everything else must not depend on the id. */
-    const answerOf = async (response: Response): Promise<{ status: number; body: unknown }> => {
+    /**
+     * Status, body without the request id, and the headers that tell a client what to do next:
+     * none of it may depend on the id. Headers that change with every request (the date, the
+     * rate limit's count) are left out (SEC-6 of the group C review).
+     */
+    const COMPARED_HEADERS = ['cache-control', 'retry-after', 'www-authenticate'];
+    const answerOf = async (
+      response: Response,
+    ): Promise<{ status: number; headers: Record<string, string | null>; body: unknown }> => {
       const text = await response.text();
       let body: unknown = text;
       try {
@@ -1187,50 +1286,82 @@ describe('organisation isolation through the API', () => {
       } catch {
         // Not JSON: compared as text.
       }
-      return { status: response.status, body };
+      const headers = Object.fromEntries(
+        COMPARED_HEADERS.map((name) => [name, response.headers.get(name)]),
+      );
+      return { status: response.status, headers, body };
     };
     const wrong: string[] = [];
+    const probe = async (what: string, [code, send, details, message]: Probe): Promise<void> => {
+      const real = await answerOf(await send(foreign));
+      const none = await answerOf(await send(unknown));
+      if (JSON.stringify(real) !== JSON.stringify(none)) {
+        wrong.push(
+          `${what}: another organisation's id answered ${JSON.stringify(real)}, an unknown id ${JSON.stringify(none)}`,
+        );
+      }
+      const error = (
+        real.body as {
+          error?: { code?: string; message?: string; details?: Detail[] };
+        }
+      ).error;
+      if (real.status !== ERROR_STATUS[code] || error?.code !== code) {
+        wrong.push(`${what}: answered ${real.status} ${String(error?.code)}, expected ${code}`);
+      }
+      // A path that matches no route answers the same 404 for both ids, and tests nothing
+      // (CHK-6 of the group C review): the not-found handler's message (apps/api/src/errors.ts).
+      if (error?.message === 'There is nothing at this address.') {
+        wrong.push(`${what}: reached no route`);
+      }
+      if (message !== undefined && error?.message !== message) {
+        wrong.push(`${what}: said ${JSON.stringify(error?.message)}, expected "${message}"`);
+      }
+      if (details !== undefined) {
+        // Each expected detail names the keys it checks; the answer carries those and no more.
+        const given = (error?.details ?? []).map((detail, n) =>
+          Object.fromEntries(Object.keys(details[n] ?? {}).map((key) => [key, detail[key]])),
+        );
+        if (JSON.stringify(given) !== JSON.stringify(details)) {
+          wrong.push(
+            `${what}: details ${JSON.stringify(error?.details)}, expected ${JSON.stringify(details)}`,
+          );
+        }
+      }
+    };
+
     let probed = 0;
     for (const [route, c] of Object.entries(cases)) {
       if ('none' in c) continue;
-      for (const [index, [code, send, details]] of c.probes.entries()) {
+      for (const [index, p] of c.probes.entries()) {
         probed += 1;
-        const what = `${route} probe ${index + 1}`;
-        const real = await answerOf(await send(foreign));
-        const none = await answerOf(await send(unknown));
-        if (JSON.stringify(real) !== JSON.stringify(none)) {
-          wrong.push(
-            `${what}: another organisation's id answered ${JSON.stringify(real)}, an unknown id ${JSON.stringify(none)}`,
-          );
-        }
-        const error = (
-          real.body as {
-            error?: { code?: string; message?: string; details?: Detail[] };
-          }
-        ).error;
-        if (real.status !== ERROR_STATUS[code] || error?.code !== code) {
-          wrong.push(`${what}: answered ${real.status} ${String(error?.code)}, expected ${code}`);
-        }
-        // A path that matches no route answers the same 404 for both ids, and tests nothing
-        // (CHK-6 of the group C review): the not-found handler's message (apps/api/src/errors.ts).
-        if (error?.message === 'There is nothing at this address.') {
-          wrong.push(`${what}: reached no route`);
-        }
-        if (details !== undefined) {
-          // Each expected detail names the keys it checks; the answer carries those and no more.
-          const given = (error?.details ?? []).map((detail, n) =>
-            Object.fromEntries(Object.keys(details[n] ?? {}).map((key) => [key, detail[key]])),
-          );
-          if (JSON.stringify(given) !== JSON.stringify(details)) {
-            wrong.push(
-              `${what}: details ${JSON.stringify(error?.details)}, expected ${JSON.stringify(details)}`,
-            );
-          }
-        }
+        await probe(`${route} probe ${index + 1}`, p);
       }
     }
     expect(wrong).toEqual([]);
     expect(probed).toBeGreaterThan(60);
+
+    // Again as an Editor of B, on the operator routes an Editor may use, taken from the roles
+    // matrix's oracle (`allowed` in routes.ts), so a route an Editor is later allowed is probed
+    // here too. The player and sign-in routes do not depend on the operator's role, and B's poll
+    // of A's pairing must stay the one wrong attempt checked below.
+    const editorMay = new Set(
+      OPERATOR_ROUTE_PATTERNS.filter(([method, pattern]) => allowed('editor', method, pattern)).map(
+        ([method, pattern]) => `${method} ${pattern}`,
+      ),
+    );
+    // Each is a case above under the same name, or this pass would skip it unseen.
+    expect([...editorMay].filter((route) => !(route in cases))).toEqual([]);
+    caller = await signIn(t, await addMember(orgB, 'editor'));
+    let probedAsEditor = 0;
+    for (const [route, c] of Object.entries(cases)) {
+      if ('none' in c || !editorMay.has(route)) continue;
+      for (const [index, p] of c.probes.entries()) {
+        probedAsEditor += 1;
+        await probe(`${route} probe ${index + 1} as an Editor`, p);
+      }
+    }
+    expect(wrong).toEqual([]);
+    expect(probedAsEditor).toBeGreaterThan(50);
 
     // A's display and player still answer. The one probe that changes something of A's is B's
     // poll of A's claimed pairing with its own polling token: a counted wrong attempt

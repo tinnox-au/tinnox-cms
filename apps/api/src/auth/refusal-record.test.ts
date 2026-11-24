@@ -11,7 +11,7 @@ import { ROUTES } from '@tinnox/contracts';
 import { databaseOn, testOrgId, type Pool } from '@tinnox/db/testing';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import pg from 'pg';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { AppContext } from '../context.ts';
 import { HttpError } from '../errors.ts';
 import { recordPermissionDenied, type DenialRecord } from './permission-audit.ts';
@@ -172,19 +172,35 @@ describe('a refusal whose audit row cannot be written (AUD-9, step 26)', () => {
     expect(logged).toEqual(['failed to record csrf rejection']);
   });
 
+  // abandonBody closes the connection 2 s later unless the body ends first. The fake request
+  // never ends, so the clock is faked and moved on: the close is asserted, and no timer outlives
+  // the case to call a missing destroy() in a later file (TST-3 of the group C review).
   it("abandons a Viewer's upload body when its refusal row fails the request (AUD-9)", async () => {
-    const lost = new Error('Connection terminated unexpectedly');
-    const { ctx } = failingAudit(lost);
-    const { request } = requestTo(ROUTES.media);
-    const abandoned: string[] = [];
-    Object.assign(request, {
-      operator: { ...SESSION, role: 'viewer' },
-      raw: { resume: () => abandoned.push('resume'), once: () => undefined },
-    });
-    const reply = {
-      header: (name: string, value: string) => abandoned.push(`${name}: ${value}`),
-    } as unknown as FastifyReply;
-    await expect(permissionGuard(ctx)(request, reply)).rejects.toBe(lost);
-    expect(abandoned).toEqual(['connection: close', 'resume']);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const lost = new Error('Connection terminated unexpectedly');
+      const { ctx } = failingAudit(lost);
+      const { request } = requestTo(ROUTES.media);
+      const abandoned: string[] = [];
+      const listeners: string[] = [];
+      Object.assign(request, {
+        operator: { ...SESSION, role: 'viewer' },
+        raw: {
+          resume: () => abandoned.push('resume'),
+          destroy: () => abandoned.push('destroy'),
+          once: (event: string) => listeners.push(event),
+        },
+      });
+      const reply = {
+        header: (name: string, value: string) => abandoned.push(`${name}: ${value}`),
+      } as unknown as FastifyReply;
+      await expect(permissionGuard(ctx)(request, reply)).rejects.toBe(lost);
+      expect(abandoned).toEqual(['connection: close', 'resume']);
+      expect(listeners).toEqual(['end']);
+      vi.advanceTimersByTime(2_000);
+      expect(abandoned).toEqual(['connection: close', 'resume', 'destroy']);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

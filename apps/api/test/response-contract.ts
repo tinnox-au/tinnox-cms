@@ -106,7 +106,10 @@ function failOnMismatches(when: string): void {
 }
 
 // Registered when a test file loads this module (through support.ts), so each test that sent a
-// mismatching answer fails, and a hook of the file that did fails the file.
+// mismatching answer fails. An answer sent in a beforeAll or beforeEach is reported by the first
+// test's afterEach; only one sent after the last test, in an afterAll, fails the file here. The
+// state is per file because each integration file runs in its own module graph (Vitest's default
+// isolate, which vitest.config.ts keeps).
 afterEach(() => {
   failOnMismatches('during this test');
 });
