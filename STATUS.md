@@ -53,11 +53,12 @@ None.
 | Id | Card | Agreed | PR | Since |
 |---|---|---|---|---|
 | CMS-4 | Real-hardware check on Raspberry Pi 5 (8GB) under Linux: the browser player in Chromium kiosk mode on a monitor | Michael 23 Nov | - | 23 Nov |
-| CMS-31 | Poteto pyramid refactor, group C: errors and outcomes (steps 23 to 28 of the adoption plan); Michael starts it | Michael 24 Nov | - | 24 Nov |
 
 ## In review
 
-None.
+| Id | Card | Agreed | PR | Since |
+|---|---|---|---|---|
+| CMS-31 | Poteto pyramid refactor, group C: errors and outcomes (steps 23 to 28 of the adoption plan); Michael starts it | Michael 24 Nov | #40 | 25 Nov |
 
 ## Done, last 14 days
 
