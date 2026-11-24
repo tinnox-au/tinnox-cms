@@ -482,7 +482,7 @@ export async function deviceByTokenHash(
 /**
  * The organisation and display of an active registration, by the registration id a signed media
  * URL names (0003); null for an unknown or revoked one. The media route verifies the signature
- * first, then enters the organisation with withOrg.
+ * first, then reads in the organisation with readOrg.
  */
 export async function deviceByRegistrationId(
   db: AnyScope,

@@ -743,7 +743,7 @@ export const UNSCOPED_HELPER_FILES = {
   'apps/api/src/routes/auth.ts':
     'before the organisation is known: poolAsTx for the one-time login state of a sign-in (loginStatePut, loginStateTake), kept before any member is identified',
   'apps/api/src/routes/player.ts':
-    'before the organisation is known: poolAsTx for deviceByTokenHash and deviceByRegistrationId, which resolve a device credential or a signed media URL to its organisation, and withoutOrg for pairingCreate and pairingPoll, when the pairing session belongs to no organisation yet',
+    'before the organisation is known: poolAsTx for verifyDeviceCredential (apps/api/src/auth/device.ts) and deviceByRegistrationId, which resolve a device credential or a signed media URL to its organisation',
   'apps/api/src/alerts.ts':
     'not before the organisation is known, but across all of them: poolAsTx for displayAlertOrgs, the list of organisations the alert check then enters one by one with changeAsJob and readOrg',
   'apps/api/src/housekeeping.ts':
@@ -820,7 +820,7 @@ export const PRE_ORG_CHANGE_FILES = {
   'apps/api/src/routes/auth.ts':
     'sign-in and sign-out: the identity, or the session being ended, is resolved to its member and organisation inside the transaction that records it, so no role has been checked yet',
   'apps/api/src/routes/player.ts':
-    'pairing: the polling token of a pairing session is resolved to the organisation that claimed it inside the transaction that registers the display; a device has no role',
+    'pairing: a pairing session belongs to no organisation while it is created and polled, and its polling token is resolved to the organisation that claimed it inside the transaction that registers the display; a device has no role',
   'apps/api/src/routes/alert-recipients.ts':
     'the confirmation link of an alert address: its token is resolved to the organisation and recipient inside the transaction that confirms it, with no session',
   'scripts/lib/provision.ts':
@@ -894,8 +894,6 @@ const AUDIT_WRITERS = ['packages/db/src/sec.ts'];
 // its line; nothing is added (scripts/lib/legacy-transaction-lint.test.ts holds the list to
 // what step 19 found). Test files are outside the rule: they arrange data with withOrg.
 export const LEGACY_TRANSACTION_FILES = [
-  // The player protocol: no role, and partly before the organisation is known.
-  'apps/api/src/routes/player.ts',
   // The legacy wrappers themselves (withOrgAllowed and withOrgDecisionAllowed, already on
   // changeOrg; withOrgDecision), deleted when their last caller has moved.
   'apps/api/src/auth/permissions.ts',
