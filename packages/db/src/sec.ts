@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 // refuses a value import here, so nothing of that package, zod included, loads with this one.
 import type { AuditAction, AuditEventOf } from '@tinnox/contracts';
 import { noteAuditRow } from './audit-note.ts';
+import { listingOf, type Listing } from './listing.ts';
 import { mintOrgId } from './org-id.ts';
 import type { Database } from './database.ts';
 import { statementsOf } from './pre-org.ts';
@@ -502,25 +503,31 @@ export interface MediaProcessingJob {
   readonly createdAt: Date;
 }
 
+/** sec.media_processing_jobs never returns more rows than this, and never fewer than one (0003). */
+export const MEDIA_PROCESSING_JOBS_CAP = 5000;
+
 /**
  * The oldest `limit` media rows still waiting for validation, in every organisation (0003): the
  * media pipeline's queue. It then enters each row's organisation with readOrg and changeAsJob
- * (apps/api/src/jobs.ts).
+ * (apps/api/src/jobs.ts). The list is `complete` only when it is shorter than the limit the
+ * function applied (`limit` clamped to 1 to MEDIA_PROCESSING_JOBS_CAP); a full list may be cut
+ * off, and clean-up must not treat it as the set of all pending jobs (SCX-02).
  */
 export async function mediaProcessingJobs(
   db: AnyScope,
   limit: number,
-): Promise<MediaProcessingJob[]> {
+): Promise<Listing<MediaProcessingJob>> {
   const { rows } = await statementsOf(db).query<{
     media_id: string;
     org_id: string;
     created_at: Date;
   }>('SELECT media_id, org_id, created_at FROM sec.media_processing_jobs($1)', [limit]);
-  return rows.map((r) => ({
+  const jobs = rows.map((r) => ({
     mediaId: r.media_id,
     orgId: mintOrgId(r.org_id),
     createdAt: r.created_at,
   }));
+  return listingOf(jobs, Math.max(1, Math.min(limit, MEDIA_PROCESSING_JOBS_CAP)));
 }
 
 /** Every organisation's id, for the alert check (0014); it then enters each with changeAsJob. */

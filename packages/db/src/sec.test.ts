@@ -405,7 +405,10 @@ describe('the organisation a lookup names is an OrgId (AG-2.3)', () => {
       Extract<Resolved<typeof sec.pairingComplete>, { outcome: 'completed' }>['orgId']
     >().toEqualTypeOf<OrgId>();
     expectTypeOf<
-      Resolved<typeof sec.mediaProcessingJobs>[number]['orgId']
+      Extract<
+        Resolved<typeof sec.mediaProcessingJobs>,
+        { complete: true }
+      >['items'][number]['orgId']
     >().toEqualTypeOf<OrgId>();
     expectTypeOf<Resolved<typeof sec.displayAlertOrgs>>().toEqualTypeOf<OrgId[]>();
     expectTypeOf<Resolved<typeof sec.alertRecipientByTokenHash>['orgId']>().toEqualTypeOf<OrgId>();

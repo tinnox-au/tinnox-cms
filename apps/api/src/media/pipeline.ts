@@ -50,7 +50,10 @@ import {
 } from '@tinnox/contracts';
 import {
   CommitOutcomeUnknownError,
+  anyOf,
+  MEDIA_PROCESSING_JOBS_CAP,
   mediaProcessingJobs,
+  type Listing,
   poolAsTx,
   readOrg,
   unaudited,
@@ -77,8 +80,6 @@ const ORPHAN_GRACE_MS = 2 * 60 * 1000;
 const IN_FLIGHT_MAX_MS = 60 * 60 * 1000;
 /** Pending jobs looked at by one scan, oldest first. */
 const SCAN_BATCH = 500;
-/** sec.media_processing_jobs never returns more rows than this (migration 0003). */
-const PENDING_LIST_CAP = 5000;
 /** Name of the file the worker touches to show it is running (informational only). */
 export const WORKER_ALIVE_FILE = '.worker-alive';
 
@@ -355,12 +356,12 @@ export class MediaPipeline {
   }
 
   /** The oldest `limit` jobs still waiting for validation, in every organisation. */
-  async #pending(limit: number): Promise<MediaProcessingJob[]> {
+  async #pending(limit: number): Promise<Listing<MediaProcessingJob>> {
     return mediaProcessingJobs(poolAsTx(this.#db), limit);
   }
 
   async #scan(): Promise<void> {
-    const jobs = await this.#pending(SCAN_BATCH);
+    const jobs = anyOf(await this.#pending(SCAN_BATCH));
     const now = this.#now().getTime();
     const perJob = this.#limits.mediaInspectionTimeoutMs + this.#perJobGraceMs;
     for (const [index, job] of jobs.entries()) {
@@ -751,15 +752,15 @@ export class MediaPipeline {
     // by then), and its bytes may be older than the grace period: without this note the
     // sweep would remove them. An upload that starts later has files newer than the cutoff.
     const inFlightAtStart = new Set(this.#inFlight.keys());
-    const jobs = await this.#pending(PENDING_LIST_CAP);
-    if (jobs.length >= PENDING_LIST_CAP) {
+    const listing = await this.#pending(MEDIA_PROCESSING_JOBS_CAP);
+    if (!listing.complete) {
       this.#log.warn(
-        { pending: jobs.length },
+        { pending: listing.sample.length },
         'media job sweep skipped: too many pending jobs to tell which files are orphaned',
       );
       return 0;
     }
-    const pending = new Set(jobs.map((job) => job.mediaId));
+    const pending = new Set(listing.items.map((job) => job.mediaId));
     const cutoff = now - ORPHAN_GRACE_MS;
     let removed = 0;
     for (const dir of [this.#inbox, this.#outbox]) {

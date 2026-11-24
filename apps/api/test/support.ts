@@ -34,7 +34,15 @@ import {
   type ScheduleDto,
   type ScheduleEventInput,
 } from '@tinnox/contracts';
-import { mediaProcessingJobs, poolAsTx, sessionCreate, sha256, type OrgId } from '@tinnox/db';
+import {
+  anyOf,
+  MEDIA_PROCESSING_JOBS_CAP,
+  mediaProcessingJobs,
+  poolAsTx,
+  sessionCreate,
+  sha256,
+  type OrgId,
+} from '@tinnox/db';
 import {
   testOrgId,
   unjudgedSql,
@@ -825,7 +833,9 @@ export async function settleStrayMediaJobs(pool: Pool): Promise<number> {
   let settled = 0;
   for (;;) {
     // Through the typed wrapper: the organisation it names is what withOrg takes.
-    const jobs = await mediaProcessingJobs(poolAsTx(databaseOn(pool)), 5000);
+    const jobs = anyOf(
+      await mediaProcessingJobs(poolAsTx(databaseOn(pool)), MEDIA_PROCESSING_JOBS_CAP),
+    );
     if (jobs.length === 0) return settled;
     const byOrg = new Map<OrgId, string[]>();
     for (const job of jobs) byOrg.set(job.orgId, [...(byOrg.get(job.orgId) ?? []), job.mediaId]);
