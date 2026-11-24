@@ -270,12 +270,11 @@ describe('what a change records against what its route states (D3)', () => {
   });
 
   // Adoption plan step 20: UNAUDITED_REASONS and NO_AUDIT_REASONS, and how the two relate.
-  it('takes what one run found under any statement: nothing changed, a replay', async () => {
+  it('takes what one run found under any statement that may write: nothing changed, a replay', async () => {
     const { pool, statements } = fakePool();
     for (const stated of [
       { actions: ['folder.create'] },
       { none: 'telemetry' },
-      { none: 'read_only' },
     ] as const satisfies readonly StatedAudit[]) {
       for (const reason of ['nothing_changed', 'idempotent_replay'] as const) {
         await changeOrg(databaseOn(pool), ORG, permitFor(stated), () =>
@@ -283,8 +282,14 @@ describe('what a change records against what its route states (D3)', () => {
         );
       }
     }
-    expect(statements.filter((text) => text === 'COMMIT')).toHaveLength(6);
+    expect(statements.filter((text) => text === 'COMMIT')).toHaveLength(4);
     expect(statements).not.toContain('ROLLBACK');
+  });
+
+  it('AUD-6: issues no permit to a statement that says the route only reads', () => {
+    expect(() => permitFor({ none: 'read_only' })).toThrow(
+      /says the route only reads \(read_only\), so it gets no WritePermit \(AUD-6\): read with readOrg\(db, orgId, fn\) from @tinnox\/db, whose transaction refuses a write\./,
+    );
   });
 
   it('takes an uncounted attempt only where the statement grants it (D3, step 20 review)', async () => {

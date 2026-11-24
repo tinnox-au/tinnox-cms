@@ -630,17 +630,37 @@ describe('loopback by name (EAX-08)', () => {
     "const j = host.startsWith('127.');",
     "const k = host.includes('localhost');",
     "switch (host) { case 'localhost': break; }",
+    // CHK-5: a constant that holds one, an object key to look a host up by, a regular expression.
+    "const LOCAL = 'localhost';",
+    'const LOOP = `127.0.0.1`;',
+    "const m = { 'localhost': true }[host];",
+    'const n = { localhost: true }[host];',
+    'const o = /^(localhost|127\\.0\\.0\\.1)$/i.test(host);',
+    'const p = /^\\[?::1\\]?$/.test(host);',
     // The isLoopbackHost that config.ts had before the shared rule, one literal at a time.
     'const l = new Set([`[::1]`]).has(host) || host.endsWith(`.localhost`);',
   ];
 
-  it.each(['apps/api/src/mail.ts', 'apps/api/src/fixture.ts', 'apps/api/src/auth/oidc.ts'])(
-    'flags a comparison with a loopback name or literal in %s',
+  it.each([
+    'apps/api/src/mail.ts',
+    'apps/api/src/fixture.ts',
+    'apps/api/src/auth/oidc.ts',
+    // CHK-4: the two entry points keep the API's list but the clock rule.
+    'apps/api/src/main.ts',
+    'apps/api/src/alerts-once.ts',
+  ])('flags a comparison with a loopback name or literal in %s', async (path) => {
+    for (const code of COMPARISONS.slice(0, -1)) await expectOne(path, code, LOOPBACK);
+    const messages = await flagged(path, COMPARISONS.at(-1) ?? '');
+    expect(messages).toHaveLength(2);
+    for (const message of messages) expect(message).toMatch(LOOPBACK);
+  });
+
+  it.each(['apps/api/src/main.ts', 'apps/api/src/alerts-once.ts'])(
+    'CHK-4: keeps the organisation-from-request rule in %s, which may read the clock',
     async (path) => {
-      for (const code of COMPARISONS.slice(0, -1)) await expectOne(path, code, LOOPBACK);
-      const messages = await flagged(path, COMPARISONS.at(-1) ?? '');
-      expect(messages).toHaveLength(2);
-      for (const message of messages) expect(message).toMatch(LOOPBACK);
+      expect(await flagged(path, 'const o = request.body.orgId; const t = Date.now();')).toEqual([
+        expect.stringMatching(/^The organisation comes from operatorOf\(request\)\.orgId/),
+      ]);
     },
   );
 
@@ -666,6 +686,9 @@ describe('loopback by name (EAX-08)', () => {
       "const f = ['relay.example.com'].includes(host);",
       "const g = host.endsWith('.example.com');",
       "const h = host.startsWith('10.');",
+      "const i = { relay: 'relay.example.com' };",
+      'const j = /^relay\\.example\\.com$/.test(host);',
+      "const k = 'localhost:5173 is the portal in development';",
     ])
       expect(await flagged('apps/api/src/fixture.ts', code)).toEqual([]);
   });

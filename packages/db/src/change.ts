@@ -238,6 +238,13 @@ export interface WritePermit<Granted = unknown> {
  * `WritePermit` everywhere.
  */
 export function issueWritePermit<Granted>(held: PermitTerms<Granted>): WritePermit<Granted> {
+  // AUD-6: a route that states it only reads opens readOrg, whose transaction refuses a write. A
+  // permit would open a read-write one, where a write that returns nothing_changed would pass.
+  if ('none' in held.stated && held.stated.none === 'read_only') {
+    throw new Error(
+      `${held.statedIn} says the route only reads (read_only), so it gets no WritePermit (AUD-6): read with readOrg(db, orgId, fn) from @tinnox/db, whose transaction refuses a write. A route that writes says what it audits in that row instead.`,
+    );
+  }
   return Object.freeze({ [terms]: held });
 }
 

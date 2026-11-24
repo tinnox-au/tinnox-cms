@@ -13,6 +13,7 @@
  */
 import { poolOfDatabase, type Database } from './database.ts';
 import type { PoolClient } from './pool.ts';
+import { refuseNested } from './nesting.ts';
 
 /**
  * The session locks, each keyed hashtextextended('tinnox.<name>', 0). The key is the one the
@@ -44,6 +45,13 @@ export async function withSessionLock<T>(
   work: (signal: AbortSignal) => Promise<T>,
 ): Promise<SessionLockOutcome<T>> {
   const key = `tinnox.${lock}`;
+  // CHK-3: the lock's connection is checked out while an outer transaction would hold another,
+  // the pool-exhaustion half of U-3 (tinnox/no-nested-transaction reports what one file shows).
+  refuseNested(
+    'withSessionLock',
+    'Take the lock first and open the transactions inside its work, as runDisplayAlerts in apps/api/src/alerts.ts does.',
+    'withSessionLock holds a connection of its own while the open transaction holds another.',
+  );
   const client = await poolOfDatabase(db).connect();
   const lost = new AbortController();
   // Set when the connection must not go back to the pool: it was lost, or may still hold the lock.

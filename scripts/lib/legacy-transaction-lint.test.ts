@@ -311,9 +311,13 @@ describe('the entry of the jobs (SCR-34)', { timeout: 30_000 }, () => {
     "import { changeAsJob } from './jobs.ts';",
     "import { changeAsJob as change } from '../jobs.ts';",
     "export { changeAsJob } from '../../src/jobs.ts';",
+    // SEC-3: TypeScript (NodeNext) and tsx resolve these spellings to jobs.ts too.
+    "import { changeAsJob } from './jobs.js';",
+    "import { changeAsJob } from '../jobs.js';",
+    "import * as jobs from '../jobs.mjs';",
   ];
   const REFUSED =
-    /^'(\.\.?\/)+(src\/)?jobs\.ts' import is restricted from being used by a pattern\. apps\/api\/src\/jobs\.ts is the entry of the jobs that run with no request \(SCR-34\): changeAsJob changes an organisation with no role check and no credential, so only the alert check and the media pipeline may import it \(JOB_CHANGE_FILES in eslint\.config\.js\)\. An operator route calls changeAsOperator\(ctx, request, fn\) from apps\/api\/src\/auth\/permissions\.ts, which checks the role again first; a player route calls changeAsDevice\(ctx, request, device, fn\) from apps\/api\/src\/auth\/device\.ts; a read calls readOrg\(ctx\.db, orgId, fn\) from @tinnox\/db\. A new job gets its row in JOB_AUDIT \(apps\/api\/src\/route-audit\.ts\) and its file in JOB_CHANGE_FILES with its reason, in its pull request\.$/;
+    /^'(\.\.?\/)+(src\/)?jobs\.m?[jt]s' import is restricted from being used by a pattern\. apps\/api\/src\/jobs\.ts is the entry of the jobs that run with no request \(SCR-34\): changeAsJob changes an organisation with no role check and no credential, so only the alert check and the media pipeline may import it \(JOB_CHANGE_FILES in eslint\.config\.js\)\. An operator route calls changeAsOperator\(ctx, request, fn\) from apps\/api\/src\/auth\/permissions\.ts, which checks the role again first; a player route calls changeAsDevice\(ctx, request, device, fn\) from apps\/api\/src\/auth\/device\.ts; a read calls readOrg\(ctx\.db, orgId, fn\) from @tinnox\/db\. A new job gets its row in JOB_AUDIT \(apps\/api\/src\/route-audit\.ts\) and its file in JOB_CHANGE_FILES with its reason, in its pull request\.$/;
   const JOB_FILES = ['apps/api/src/alerts.ts', 'apps/api/src/media/pipeline.ts'];
 
   it.each([

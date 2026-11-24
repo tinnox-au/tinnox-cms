@@ -76,6 +76,14 @@ describe('no-raw-audit-insert (AG-3.1, D25)', { timeout: 30_000 }, () => {
         errors: [{ message: MESSAGE }, { message: MESSAGE }, { message: MESSAGE }],
       },
       {
+        name: 'CHK-10: MERGE INTO the table, and a block comment between INSERT and INTO',
+        code: `
+          await tx.query("MERGE INTO audit_event a USING src s ON false WHEN NOT MATCHED THEN INSERT (action) VALUES ('x.y')");
+          await tx.query('INSERT /* c */ INTO audit_event (action) VALUES ($1)', [action]);
+        `,
+        errors: [{ message: MESSAGE }, { message: MESSAGE }],
+      },
+      {
         name: 'the insert with the table or the schema quoted, and with another schema',
         code: `
           await tx.query('INSERT INTO "audit_event" (action) VALUES ($1)', [action]);

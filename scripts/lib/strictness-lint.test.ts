@@ -496,6 +496,22 @@ describe(
         'the row type of a query',
         "export const found = await tx.query<{ org_id: OrgId }>('SELECT $1::uuid AS org_id', [id]);",
       ],
+      [
+        'SEC-4: the annotated type of a query result, which fills in the row type',
+        "export const found: QueryResult<{ org_id: OrgId }> = await tx.query('SELECT $1::text AS org_id', [id]);",
+      ],
+      [
+        'SEC-4: the same inside a promise, on a let',
+        'let pending: Promise<pg.QueryResult<{ id: string; org: OrgId }>> = load();',
+      ],
+      [
+        'SEC-4: the same on a destructured result',
+        "const { rows }: QueryResult<{ org_id: OrgId }> = await tx.query('SELECT $1::text AS org_id', [fromPath]);",
+      ],
+      [
+        'SEC-4: the same on a destructured list',
+        'const [first]: QueryResult<{ org_id: OrgId }>[] = await Promise.all(reads);',
+      ],
       ['a zod type taken on trust', 'export const Org = z.custom<OrgId>();'],
       // Only expectTypeOf and its matchers are let through, not any method that starts with "to".
       ['a method that takes the type on trust', 'export const org = input.toBranded<OrgId>();'],

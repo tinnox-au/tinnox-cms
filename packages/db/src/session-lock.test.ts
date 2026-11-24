@@ -6,6 +6,7 @@
  */
 import { EventEmitter } from 'node:events';
 import { describe, expect, it } from 'vitest';
+import { current } from './nesting.ts';
 import { withSessionLock } from './session-lock.ts';
 import { databaseOn, type Pool } from './testing.ts';
 
@@ -39,6 +40,24 @@ function fakePool(answers: Answers = {}) {
 const answer = (ok: boolean) => () => Promise.resolve({ rows: [{ ok }] });
 
 describe('withSessionLock (EAX-06)', () => {
+  it('CHK-3: refuses to run while a transaction is open on the same path, before it takes a connection', async () => {
+    const { db, sent, released } = fakePool();
+    let ran = false;
+    const nested = current.run({ open: true }, () =>
+      withSessionLock(db, 'display_alerts', () => {
+        ran = true;
+        return Promise.resolve();
+      }),
+    );
+    await expect(nested).rejects.toThrow(
+      // It opens no transaction, so the message says what it does hold instead.
+      /^withSessionLock was called while a transaction is open on the same asynchronous path \(inside the callback of [^)]*, or in a helper it called\)\. withSessionLock holds a connection of its own while the open transaction holds another\. Take the lock first and open the transactions inside its work, as runDisplayAlerts in apps\/api\/src\/alerts\.ts does\.$/,
+    );
+    expect(ran).toBe(false);
+    expect(sent).toEqual([]);
+    expect(released).toEqual([]);
+  });
+
   it('EAX-06: takes the lock, runs the work, gives the lock back and returns the connection', async () => {
     const { db, sent, released, client } = fakePool();
     let seen: AbortSignal | undefined;

@@ -1,7 +1,7 @@
-import { AsyncLocalStorage } from 'node:async_hooks';
 import pg from 'pg';
 import { poolOfDatabase, type Database } from './database.ts';
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from './pool.ts';
+import { current, OPENERS, refuseNested, type Transaction } from './nesting.ts';
 import { keepStatements } from './pre-org.ts';
 import { rememberPool } from './tx-pool.ts';
 
@@ -84,36 +84,6 @@ export interface PreOrgTx {
  * names the one it needs: `tx: OrgTx`, or `tx: OrgReadTx` when it only reads.
  */
 export type Tx = OrgTx | PreOrgTx;
-
-/** The functions that open a transaction and give their callback its handle, for the messages. */
-const OPENERS = 'withOrg, withoutOrg, withResolvedOrg, readOrg, changeOrg or changePreOrg';
-
-/** One transaction of run(): `open` from BEGIN until its callback returns or throws. */
-interface Transaction {
-  open: boolean;
-}
-
-/**
- * The transaction whose callback is running on this asynchronous path, if any (U-3). The store
- * is entered around the callback only, and work the callback started keeps it after the
- * callback has ended, so `open` is what says whether the transaction is still there.
- */
-const current = new AsyncLocalStorage<Transaction>();
-
-/**
- * U-3: a second transaction takes another pooled connection, so it commits or rolls back on its
- * own (an audit row could commit while its change rolls back), it does not see the outer
- * transaction's rows, and the outer holds a connection while it waits for the inner. Checked
- * before a connection is taken. tinnox/no-nested-transaction reports the cases lint can read
- * (scripts/eslint-rules/no-nested-transaction.ts).
- */
-function refuseNested(opener: string, instead = 'Pass the outer tx to the helper.'): void {
-  if (current.getStore()?.open === true) {
-    throw new Error(
-      `${opener} was called while a transaction is open on the same asynchronous path (inside the callback of ${OPENERS}, or in a helper it called). This opens a second transaction on another connection that commits independently. ${instead}`,
-    );
-  }
-}
 
 /** The statements of one transaction: what a handle of run() sends, until the transaction ends. */
 function statementsOn(client: PoolClient, transaction: Transaction): Autocommit {

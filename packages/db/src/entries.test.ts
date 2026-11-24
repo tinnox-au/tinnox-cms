@@ -257,7 +257,7 @@ describe('the entries of @tinnox/db (AG-1.10)', () => {
 
   it('the runtime entry has no MigratorPool type either (checked by npm run typecheck)', () => {
     // @ts-expect-error MigratorPool is exported from '@tinnox/db/migrate' only.
-    expectTypeOf<root.MigratorPool>().toBeAny();
+    expectTypeOf<root.MigratorPool>();
     expectTypeOf<migrate.MigratorPool>().toExtend<testing.Pool>();
     // A tool passes its pool to changePreOrg as the API passes AppContext.db (step 21).
     expectTypeOf<migrate.MigratorPool>().toExtend<root.Database>();
@@ -279,8 +279,8 @@ describe('the entries of @tinnox/db (AG-1.10)', () => {
     );
     expect(Object.keys(testing)).toEqual(expect.arrayContaining(['createPool', 'databaseOn']));
     // @ts-expect-error The Pool type is exported from '@tinnox/db/testing' only.
-    expectTypeOf<root.Pool>().toBeAny();
+    expectTypeOf<root.Pool>();
     // @ts-expect-error So is PoolClient.
-    expectTypeOf<root.PoolClient>().toBeAny();
+    expectTypeOf<root.PoolClient>();
   });
 });

@@ -20,6 +20,16 @@ const MODE = {
 const writer = (name: string) => ({
   message: `${name} creates a file or folder in the job directory without the exchange helpers (CU-02): its mode is left to the umask. Use publishExchangeFile(tempPath, finalPath, data), writeExchangeFile(path, data), createExchangeWriteStream(path), shareExchangeFile(path) or makeExchangeDir(path, mode) from ./exchange-file.ts, which set the mode explicitly.`,
 });
+// CHK-9: the media worker's ./exchange-file.ts has only the two file writers, so its messages
+// name only those.
+const WORKER_FILE = 'apps/media-worker/src/attempts.ts';
+const WORKER_MODE = {
+  message:
+    'A `mode` option is reduced by the process umask (CU-02), so the other uid may not be able to read what you write. Write the file with publishExchangeFile(tempPath, finalPath, data) or writeExchangeFile(path, data), both from ./exchange-file.ts, which set the mode again with chmod.',
+};
+const workerWriter = (name: string) => ({
+  message: `${name} creates a file or folder in the job directory without the exchange helpers (CU-02): its mode is left to the umask. Use publishExchangeFile(tempPath, finalPath, data) or writeExchangeFile(path, data) from ./exchange-file.ts, which set the mode explicitly.`,
+});
 const namespace = (module: string) => ({
   message: `A namespace or default import of ${module} hides which writer is called, so the rule cannot see it (CU-02). Import the names you read with (open, lstat, readdir, rename) and write through ./exchange-file.ts.`,
 });
@@ -149,6 +159,29 @@ describe('exchange-files (CU-02)', { timeout: 30_000 }, () => {
           await handle.chmod(0o600);
         `,
         errors: [writer('handle.writeFile'), writer('handle.chmod')],
+      },
+      {
+        name: 'CHK-9: in the media worker, the messages name only the helpers its exchange-file.ts has',
+        filename: WORKER_FILE,
+        code: `
+          import { mkdir } from 'node:fs/promises';
+          await helper(path, { mode: 0o644 });
+          await handle.chmod(0o600);
+        `,
+        errors: [workerWriter('mkdir'), WORKER_MODE, workerWriter('handle.chmod')],
+      },
+      {
+        name: 'CHK-9: an open assigned to a local name is the same opener',
+        filename: WORKER_FILE,
+        code: `
+          import { open } from 'node:fs/promises';
+          const o = open;
+          const again = o;
+          await o(p, 'w');
+          await again(p, 'r', 0o600);
+          await o(p, 'r');
+        `,
+        errors: [openCall('open'), openCall('open')],
       },
     ],
   });

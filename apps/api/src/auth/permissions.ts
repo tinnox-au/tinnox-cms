@@ -470,11 +470,10 @@ export async function assertStillAllowed(
 /** SQLSTATE lock_not_available: `lock_timeout` (5 s for tinnox_app) ran out. */
 const LOCK_NOT_AVAILABLE = '55P03';
 
-function requirementOf(
-  request: FastifyRequest,
-  options: { readonly required?: Requirement } | undefined,
-): Requirement {
-  const required = options?.required ?? request.permission?.required;
+// SEC-5: the re-check is always the requirement the guard resolved. A handler could once name its
+// own, which could only loosen the one check the permit exists to run.
+function requirementOf(request: FastifyRequest): Requirement {
+  const required = request.permission?.required;
   if (required === undefined) {
     throw new Error('a write ran outside the permission guard');
   }
@@ -513,8 +512,6 @@ async function settle(
 
 /** What a write may ask of the role guard beyond the route's own row. */
 export interface WriteOptions {
-  /** The requirement a handler narrowed from a stored row; the guard's otherwise. */
-  readonly required?: Requirement;
   /** Take the organisation's membership lock before the role is read again. */
   readonly lockMembership?: boolean;
 }
@@ -530,7 +527,7 @@ function writePermit(
   session: OperatorSession,
   options: WriteOptions | undefined,
 ): WritePermit<Role> {
-  const required = requirementOf(request, options);
+  const required = requirementOf(request);
   const key = routeKey(request.method, request.routeOptions.url ?? '');
   const rule = ruleOf(key, ROUTE_PERMISSIONS);
   // The guard marks every request it lets through, and lets none through without a row. A

@@ -18,9 +18,14 @@
 //   or any other object writes.
 // Reading (open read-only, lstat, readdir), rename and removal stay with the caller.
 //
+// An `open` imported under another name, or assigned to a local name (`const o = open`), is
+// followed. The messages name the helpers of the side the file is on: the worker's helper file
+// has only publishExchangeFile and writeExchangeFile (CHK-9).
+//
 // Not seen, and left to review: a writer taken from a dynamic import or require, a writer
-// reached through a module that re-exports node:fs, and an `open` whose flags come from a
-// variable (it is refused, since the rule cannot tell what the variable holds).
+// reached through a module that re-exports node:fs, a writer method named by a computed key
+// (`handle['chmod']`), and an `open` whose flags come from a variable (it is refused, since the
+// rule cannot tell what the variable holds).
 import { AST_NODE_TYPES, type TSESTree } from '@typescript-eslint/utils';
 import { createRule } from './create-rule.ts';
 
@@ -77,6 +82,17 @@ const READ_CONSTANTS: ReadonlySet<string> = new Set([
   'O_DIRECT',
 ]);
 
+// What each side's ./exchange-file.ts exports, for the messages.
+const WORKER_FILE = /(^|[\\/])apps[\\/]media-worker[\\/]/;
+const API_FILE_HELPERS =
+  'publishExchangeFile(tempPath, finalPath, data) or writeExchangeFile(path, data) and a folder with makeExchangeDir(path, mode), all';
+const WORKER_FILE_HELPERS =
+  'publishExchangeFile(tempPath, finalPath, data) or writeExchangeFile(path, data), both';
+const API_WRITERS =
+  'publishExchangeFile(tempPath, finalPath, data), writeExchangeFile(path, data), createExchangeWriteStream(path), shareExchangeFile(path) or makeExchangeDir(path, mode)';
+const WORKER_WRITERS =
+  'publishExchangeFile(tempPath, finalPath, data) or writeExchangeFile(path, data)';
+
 const nameOf = (node: TSESTree.Identifier | TSESTree.StringLiteral): string =>
   node.type === AST_NODE_TYPES.Identifier ? node.name : node.value;
 
@@ -109,9 +125,9 @@ export default createRule<[], 'mode' | 'writer' | 'namespace' | 'open'>({
     },
     schema: [],
     messages: {
-      mode: 'A `mode` option is reduced by the process umask (CU-02), so the other uid may not be able to read what you write. Write the file with publishExchangeFile(tempPath, finalPath, data) or writeExchangeFile(path, data) and a folder with makeExchangeDir(path, mode), all from ./exchange-file.ts, which set the mode again with chmod.',
+      mode: 'A `mode` option is reduced by the process umask (CU-02), so the other uid may not be able to read what you write. Write the file with {{helpers}} from ./exchange-file.ts, which set the mode again with chmod.',
       writer:
-        '{{name}} creates a file or folder in the job directory without the exchange helpers (CU-02): its mode is left to the umask. Use publishExchangeFile(tempPath, finalPath, data), writeExchangeFile(path, data), createExchangeWriteStream(path), shareExchangeFile(path) or makeExchangeDir(path, mode) from ./exchange-file.ts, which set the mode explicitly.',
+        '{{name}} creates a file or folder in the job directory without the exchange helpers (CU-02): its mode is left to the umask. Use {{helpers}} from ./exchange-file.ts, which set the mode explicitly.',
       namespace:
         'A namespace or default import of {{module}} hides which writer is called, so the rule cannot see it (CU-02). Import the names you read with (open, lstat, readdir, rename) and write through ./exchange-file.ts.',
       open: "{{name}} here may create or write a file whose mode is left to the umask (CU-02). Open only to read, with no mode argument and flags of fsConstants.O_RDONLY (with O_NOFOLLOW or O_NONBLOCK) or a literal 'r', and write through publishExchangeFile(tempPath, finalPath, data) or writeExchangeFile(path, data) from ./exchange-file.ts.",
@@ -121,7 +137,17 @@ export default createRule<[], 'mode' | 'writer' | 'namespace' | 'open'>({
   create(context) {
     // Local names bound to open or openSync of node:fs, so an alias is followed.
     const openers = new Map<string, string>();
+    const worker = WORKER_FILE.test(context.filename);
+    const fileHelpers = worker ? WORKER_FILE_HELPERS : API_FILE_HELPERS;
+    const writers = worker ? WORKER_WRITERS : API_WRITERS;
     return {
+      VariableDeclarator(node) {
+        // CHK-9: `const o = open` is the same opener under another name.
+        if (node.id.type !== AST_NODE_TYPES.Identifier) return;
+        if (node.init?.type !== AST_NODE_TYPES.Identifier) return;
+        const opener = openers.get(node.init.name);
+        if (opener !== undefined) openers.set(node.id.name, opener);
+      },
       Property(node) {
         if (node.parent.type !== AST_NODE_TYPES.ObjectExpression) return;
         const key = node.key;
@@ -131,7 +157,9 @@ export default createRule<[], 'mode' | 'writer' | 'namespace' | 'open'>({
             : key.type === AST_NODE_TYPES.Literal && typeof key.value === 'string'
               ? key.value
               : null;
-        if (named === 'mode') context.report({ node: key, messageId: 'mode' });
+        if (named === 'mode') {
+          context.report({ node: key, messageId: 'mode', data: { helpers: fileHelpers } });
+        }
       },
       ImportDeclaration(node) {
         const module = String(node.source.value);
@@ -142,7 +170,11 @@ export default createRule<[], 'mode' | 'writer' | 'namespace' | 'open'>({
             if (specifier.importKind === 'type') continue;
             const name = nameOf(specifier.imported);
             if (WRITERS.has(name)) {
-              context.report({ node: specifier, messageId: 'writer', data: { name } });
+              context.report({
+                node: specifier,
+                messageId: 'writer',
+                data: { name, helpers: writers },
+              });
             } else if (name === 'promises') {
               // The promises object of node:fs is the whole of node:fs/promises under one name.
               context.report({
@@ -169,7 +201,10 @@ export default createRule<[], 'mode' | 'writer' | 'namespace' | 'open'>({
           context.report({
             node: callee,
             messageId: 'writer',
-            data: { name: context.sourceCode.getText(callee).replace(/\s+/g, ' ') },
+            data: {
+              name: context.sourceCode.getText(callee).replace(/\s+/g, ' '),
+              helpers: writers,
+            },
           });
           return;
         }

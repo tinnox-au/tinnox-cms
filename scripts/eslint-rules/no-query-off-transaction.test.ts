@@ -160,8 +160,14 @@ describe('with type information', { timeout: 30_000 }, () => {
           declare const maybe: Pool | undefined;
           await maybe?.query('SELECT 1');
           await pool['query']('SELECT 1');
+          await pool[\`query\`]('SELECT 1');
         `),
-        errors: [{ message: message('maybe') }, { message: message('pool') }],
+        errors: [
+          { message: message('maybe') },
+          { message: message('pool') },
+          // CHK-7: a template key with nothing interpolated is the same member.
+          { message: message('pool') },
+        ],
       },
       {
         name: 'an allowed statement opens nothing else: another statement, or the same one built at run time',

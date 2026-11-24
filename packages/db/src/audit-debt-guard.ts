@@ -142,7 +142,7 @@ export const EXEMPT_SHAPES: Readonly<
 > = {
   display_alert: {
     shape: 'delete',
-    why: 'step 20 ruling (DEC-38), alert_closed_silently: the alert check (apps/api/src/alerts.ts) closes an offline episode without an e-mail and writes no audit row, as today (docs/portal-v2/stage-c-alerts.md section 9 rows 7 and 22); it is the only code that deletes from display_alert, and a close with its e-mail writes display.online_alert. Open: CMS-36',
+    why: 'step 20 ruling (DEC-38), alert_closed_silently: the alert check (apps/api/src/alerts.ts) closes an offline episode without an e-mail and writes no audit row, as today (docs/portal-v2/stage-c-alerts.md section 9 rows 7 and 22); it is the only code that deletes from display_alert (scripts/lib/audit-exemptions.test.ts holds that, AUD-3), and a close with its e-mail writes display.online_alert. Open: CMS-36',
   },
   pairing_session: {
     shape: 'expired_by_time',

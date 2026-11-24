@@ -25,10 +25,12 @@
 // entries to the one file that needs them.
 //
 // Not seen, and left to review: query taken off the handle before it is called
-// (`const { query } = pool`, `pool.query.bind(pool)`), and a computed member name that is not a
-// literal (`pool[name](...)`).
+// (`const { query } = pool`, `pool.query.bind(pool)`, `pool.query.call(pool, text)`,
+// `pool.query.apply(pool, [text])`), and a computed member name that is not fixed text
+// (`pool[name](...)`; `pool['query']` and ``pool[`query`]`` are seen).
 import { AST_NODE_TYPES, type TSESTree } from '@typescript-eslint/utils';
 import { createRule } from './create-rule.ts';
+import { isQueryKey } from './sql-fragments.ts';
 import { brandReader } from './typed.ts';
 
 const TX = { symbol: 'inTransaction', file: 'packages/db/src/tx.ts' } as const;
@@ -44,7 +46,7 @@ type Options = [{ allowed?: readonly Allowed[] }];
 
 function isQueryMember(node: TSESTree.MemberExpression): boolean {
   return node.computed
-    ? node.property.type === AST_NODE_TYPES.Literal && node.property.value === 'query'
+    ? isQueryKey(node.property)
     : node.property.type === AST_NODE_TYPES.Identifier && node.property.name === 'query';
 }
 

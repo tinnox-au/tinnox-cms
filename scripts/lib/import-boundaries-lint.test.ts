@@ -487,6 +487,10 @@ describe('test code (rule (h))', () => {
     ['apps/api/src/fixture.ts', '../test/support.ts'],
     ['apps/api/src/fixture.ts', './security.test.ts'],
     ['scripts/lib/fixture.ts', '../../tests/integration/support.ts'],
+    // SEC-3: TypeScript resolves these spellings to the .ts test files too.
+    ['apps/api/src/routes/fixture.ts', '../change.test-support.js'],
+    ['apps/api/src/fixture.ts', './security.test.js'],
+    ['packages/domain/src/fixture.ts', './fixtures.test-support.mjs'],
   ])('flags a test import in the non-test file %s', async (path, specifier) => {
     expect(await flagged(path, importOf(specifier))).toEqual([expect.stringMatching(TEST_CODE)]);
   });

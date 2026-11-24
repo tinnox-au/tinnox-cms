@@ -198,9 +198,11 @@ describe('an operator write on changeOrg (SCR-34)', () => {
     await expect(
       changeAsOperator(contextOn(pool), requestTo('POST', '/api/no-such-route'), write),
     ).rejects.toThrow('a write ran outside the permission guard');
-    // A requirement the handler names does not replace the guard's own decision.
+    // A handler cannot name a requirement of its own (SEC-5), and one smuggled past the types
+    // does not replace the guard's own decision.
     await expect(
       changeAsOperator(contextOn(pool), requestTo('POST', ROUTES.folders, null), write, {
+        // @ts-expect-error WriteOptions has no requirement: the re-check is the guard's (SEC-5)
         required: { all: ['content.write'] },
       }),
     ).rejects.toThrow('a write ran outside the permission guard');
@@ -218,7 +220,7 @@ describe('the permit of a write comes from the role guard only (SCR-34)', () => 
       // @ts-expect-error changeOrg takes the permit, and a route has none to give
       await changeOrg(ctx.db, ORG, change);
       // @ts-expect-error the requirement the guard resolved is not a permit
-      await changeOrg(ctx.db, ORG, request.permission, change);
+      await changeOrg(ctx.db, ORG, request.permission!, change);
       // @ts-expect-error nor is a re-check a route wrote for itself: only issueWritePermit makes one
       await changeOrg(ctx.db, ORG, { recheck: () => Promise.resolve('owner') }, change);
       // @ts-expect-error a change by an operator returns { value, audit }, not a bare value
