@@ -2,6 +2,7 @@
  * Outgoing e-mail (CMS-15): plain text over SMTP to any provider. Callers never log the
  * addresses, the message or the transport options.
  */
+import { isLoopbackAddress } from '@tinnox/contracts';
 import { createTransport } from 'nodemailer';
 import type { AppConfig } from './config.ts';
 
@@ -26,7 +27,7 @@ export function createMailer(config: AppConfig['mail']): Mailer | null {
     // Never plain text over a network: STARTTLS or implicit TLS, except to a loopback address
     // (Mailpit in development). Not a name, even localhost: Nodemailer resolves names through
     // DNS, which may answer with another machine.
-    requireTLS: !config.secure && config.host !== '127.0.0.1' && config.host !== '::1',
+    requireTLS: !config.secure && !isLoopbackAddress(config.host),
     ...(config.user === null || config.password === null
       ? {}
       : { auth: { user: config.user, pass: config.password } }),

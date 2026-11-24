@@ -3,6 +3,7 @@
 // start while loopbackProblems finds a host or URL that is not loopback. The rules are pure so
 // that the unit project tests them; the stack is only exercised by the browser suite.
 import { isIP } from 'node:net';
+import { isLoopbackAddress } from '@tinnox/contracts';
 
 /** A value the stack is about to use, and where it was set (for the refusal's instruction). */
 export interface Target {
@@ -21,19 +22,6 @@ const HOST_NAME = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])
 /** True for a value that names somewhere to connect to, by its name or by its form. */
 export function pointsSomewhere(name: string, value: string): boolean {
   return value !== '' && (POINTER_NAME.test(name) || URL_VALUE.test(value));
-}
-
-/**
- * True for a literal loopback address only: 127.0.0.0/8 or ::1, bare or in URL brackets. A name
- * is never loopback here, because what it resolves to is up to the machine (EAX-08).
- */
-export function isLoopbackAddress(host: string): boolean {
-  const bare = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
-  const family = isIP(bare);
-  if (family === 4) return bare.startsWith('127.');
-  // The URL parser writes every spelling of an IPv6 address in one canonical form.
-  if (family === 6) return new URL(`http://[${bare}]/`).hostname === '[::1]';
-  return false;
 }
 
 /** A bare host, lower-cased; null when the value is not an address or a host name. */

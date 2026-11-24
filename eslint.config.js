@@ -521,6 +521,37 @@ const NO_ROLE_SWITCH = [
   },
 ];
 
+// EAX-08: a security exemption is decided on an address, never on a name. A loopback name or
+// literal, in any case, is refused where API code compares a host with it: an equality test, a
+// switch case, a list or Set to look it up in, and the argument of endsWith, startsWith or
+// includes (`.localhost`, `127.`), which is how the old isLoopbackHost of config.ts was written.
+// Only the files in LOOPBACK_NAME_ALLOWED may. Not seen: text put together at run time.
+const LOOPBACK_TEXT = '/^(localhost|127\\.0\\.0\\.1|\\[?::1\\]?)$/i';
+const LOOPBACK_AFFIX = '/^(\\.?localhost|127\\.(0\\.0\\.1)?|\\[?::1\\]?)$/i';
+const NO_LOOPBACK_NAME = [
+  {
+    selector: [
+      `BinaryExpression[operator=/^[!=]==?$/] > Literal[value=${LOOPBACK_TEXT}]`,
+      `BinaryExpression[operator=/^[!=]==?$/] > TemplateLiteral > TemplateElement[value.raw=${LOOPBACK_TEXT}]`,
+      `SwitchCase > Literal.test[value=${LOOPBACK_TEXT}]`,
+      `SwitchCase > TemplateLiteral.test > TemplateElement[value.raw=${LOOPBACK_TEXT}]`,
+      `ArrayExpression > Literal[value=${LOOPBACK_TEXT}]`,
+      `ArrayExpression > TemplateLiteral > TemplateElement[value.raw=${LOOPBACK_TEXT}]`,
+      `CallExpression[callee.property.name=/^(endsWith|startsWith|includes)$/] > Literal.arguments[value=${LOOPBACK_AFFIX}]`,
+      `CallExpression[callee.property.name=/^(endsWith|startsWith|includes)$/] > TemplateLiteral.arguments > TemplateElement[value.raw=${LOOPBACK_AFFIX}]`,
+    ].join(', '),
+    message:
+      "Use isLoopbackAddress from '@tinnox/contracts': a name is loopback only once it is resolved, and the one rule for an address is shared with the end-to-end stack (EAX-08). Only the files in LOOPBACK_NAME_ALLOWED of eslint.config.js (apps/api/src/config.ts, for the development origins on 'localhost') may compare a host with a loopback name.",
+  },
+];
+
+// EAX-08: the API files that may compare a host with a loopback name, and why.
+const LOOPBACK_NAME_ALLOWED = [
+  // isLoopback accepts the development name `localhost` for an http origin and issuer
+  // (.env.example), beside isLoopbackAddress; it refuses *.localhost.
+  'apps/api/src/config.ts',
+];
+
 // AG-1.9, AG-1.17 (D5): product code never names the migrator, superuser or provisioning
 // credentials. The one override is CREDENTIAL_NAME_REFUSERS below.
 const NO_CREDENTIAL_NAMES = [
@@ -1440,6 +1471,7 @@ const API_SYNTAX = [
   ...NO_LOADCONFIG_OPTIONS,
   ...NO_RAW_SEC,
   ...NO_ROLE_SWITCH,
+  ...NO_LOOPBACK_NAME,
 ];
 // The list of the offline tools (D25: scripts get the database rules too). The tools that read
 // the migrator URL get it as it is; every other script also gets NO_MIGRATOR_URL.
@@ -1687,17 +1719,26 @@ export default tseslint.config(
       'no-restricted-syntax': ['error', ...API_SYNTAX, ...outboundSyntax('apps/api', name)],
     },
   })),
-  {
-    // D5: the rest of the API's list is unchanged for the files that refuse the credential names.
-    files: CREDENTIAL_NAME_REFUSERS,
-    rules: {
-      'no-restricted-syntax': [
-        'error',
-        ...API_SYNTAX.filter((entry) => !NO_CREDENTIAL_NAMES.includes(entry)),
-        ...outboundSyntax('apps/api', null),
-      ],
-    },
-  },
+  // D5 and EAX-08: a file that refuses the credential names, or may name a loopback host, keeps the
+  // rest of the API's list. One block per file, because flat config replaces the option list and
+  // a file may be in either list or both.
+  ...[...new Set([...CREDENTIAL_NAME_REFUSERS, ...LOOPBACK_NAME_ALLOWED])].map((file) => {
+    const excused = [
+      ...(CREDENTIAL_NAME_REFUSERS.includes(file) ? NO_CREDENTIAL_NAMES : []),
+      ...(LOOPBACK_NAME_ALLOWED.includes(file) ? NO_LOOPBACK_NAME : []),
+    ];
+    const client = Object.entries(OUTBOUND_CLIENTS).find(([, path]) => path === file)?.[0] ?? null;
+    return {
+      files: [file],
+      rules: {
+        'no-restricted-syntax': [
+          'error',
+          ...API_SYNTAX.filter((entry) => !excused.includes(entry)),
+          ...outboundSyntax('apps/api', client),
+        ],
+      },
+    };
+  }),
   {
     // Scripts, the untyped .mjs ones included (this rule reads syntax only), but the offline tools
     // that connect as the migrator. Test files are outside, as everywhere (D4).

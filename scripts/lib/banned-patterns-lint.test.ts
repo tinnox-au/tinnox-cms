@@ -615,6 +615,62 @@ describe('the clock in apps/api/src', () => {
   });
 });
 
+describe('loopback by name (EAX-08)', () => {
+  const LOOPBACK = /^Use isLoopbackAddress from '@tinnox\/contracts'/;
+  const COMPARISONS = [
+    "const a = host === '127.0.0.1';",
+    "const b = host !== '::1';",
+    "const c = '[::1]' == host;",
+    "const d = host === 'localhost';",
+    'const e = host === `localhost`;',
+    "const f = host === 'LOCALHOST';",
+    "const g = ['localhost'].includes(host);",
+    "const h = new Set(['127.0.0.1']).has(host);",
+    "const i = host.endsWith('.localhost');",
+    "const j = host.startsWith('127.');",
+    "const k = host.includes('localhost');",
+    "switch (host) { case 'localhost': break; }",
+    // The isLoopbackHost that config.ts had before the shared rule, one literal at a time.
+    'const l = new Set([`[::1]`]).has(host) || host.endsWith(`.localhost`);',
+  ];
+
+  it.each(['apps/api/src/mail.ts', 'apps/api/src/fixture.ts', 'apps/api/src/auth/oidc.ts'])(
+    'flags a comparison with a loopback name or literal in %s',
+    async (path) => {
+      for (const code of COMPARISONS.slice(0, -1)) await expectOne(path, code, LOOPBACK);
+      const messages = await flagged(path, COMPARISONS.at(-1) ?? '');
+      expect(messages).toHaveLength(2);
+      for (const message of messages) expect(message).toMatch(LOOPBACK);
+    },
+  );
+
+  it('leaves apps/api/src/config.ts, the one file in LOOPBACK_NAME_ALLOWED', async () => {
+    for (const code of COMPARISONS)
+      expect(await flagged('apps/api/src/config.ts', code)).toEqual([]);
+  });
+
+  it('excuses no other file that refuses the credential names', async () => {
+    // config.ts is in both lists; a file excused from one rule still has the other.
+    expect(
+      await flagged('apps/api/src/config.ts', 'const p = env.TINNOX_MIGRATOR_PASSWORD;'),
+    ).toEqual([]);
+    expect(
+      await flagged('apps/api/src/config.ts', 'const t = Date.now(); const n = v!.a;'),
+    ).toHaveLength(2);
+  });
+
+  it('leaves test files and other text alone', async () => {
+    expect(await flagged('apps/api/src/mail.test.ts', COMPARISONS[0] ?? '')).toEqual([]);
+    for (const code of [
+      "const e = host === 'relay.example.com';",
+      "const f = ['relay.example.com'].includes(host);",
+      "const g = host.endsWith('.example.com');",
+      "const h = host.startsWith('10.');",
+    ])
+      expect(await flagged('apps/api/src/fixture.ts', code)).toEqual([]);
+  });
+});
+
 describe('credential names (AG-1.9, AG-1.17, D4, D5)', () => {
   const CREDENTIAL =
     /^Product code never names the migrator, superuser or provisioning credentials/;
