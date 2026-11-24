@@ -34,7 +34,7 @@ import {
   isMediaItem,
   isPushPending,
 } from '@tinnox/contracts';
-import { sql, type AuditInput, type Change, type OrgReadTx, type OrgTx } from '@tinnox/db';
+import { settle, sql, type AuditInput, type Change, type OrgReadTx, type OrgTx } from '@tinnox/db';
 import {
   buildManifest,
   decidePushState,
@@ -51,6 +51,7 @@ import {
   type PublishIssue,
 } from '@tinnox/domain';
 import type { FastifyRequest } from 'fastify';
+import { changeAsOperator, type ConstraintAnswers } from './auth/permissions.ts';
 import type { AppContext } from './context.ts';
 import { bigintToNumber } from './db-helpers.ts';
 import { HttpError, parseInput } from './errors.ts';
@@ -228,12 +229,12 @@ export function idempotencyKeyOf(request: FastifyRequest, action: string): strin
 }
 
 /**
- * What the publish and push routes map `publication_idempotency` to (the constraints option of
- * changeAsOperator): a concurrent request with the same Idempotency-Key created the publication
- * first, a race the lock below should already prevent. The route catches it and runs its attempt
- * once more, which returns the winner's publication.
+ * A concurrent request with the same Idempotency-Key created the publication first (the unique
+ * index `publication_idempotency` refused this one), a race the key lock should already
+ * prevent. Private to `changeOncePerKey`, which maps the constraint to it and runs the keyed
+ * change once more: no route can throw it, catch it or test for it.
  */
-export class PublishRaceLost extends Error {
+class PublishRaceLost extends Error {
   constructor() {
     super('a concurrent request with the same Idempotency-Key published first');
     this.name = 'PublishRaceLost';
@@ -263,6 +264,77 @@ export async function findPublicationByKey(
     [displayId, key],
   );
   return rows[0] ?? null;
+}
+
+/** A change that makes at most one publication for a display under an Idempotency-Key. */
+export interface KeyedPublish<T> {
+  /** The display, as the database spells its id (lower case). */
+  readonly displayId: string;
+  /** The request's Idempotency-Key (`idempotencyKeyOf`). */
+  readonly key: string;
+  /** The registered constraints the route answers. The key's own is answered here. */
+  readonly constraints?: Omit<ConstraintAnswers, 'publication_idempotency'>;
+  /**
+   * The key already made a publication for this display: what to answer, with no statement of
+   * its own. `unaudited('idempotent_replay')` when it answers as the first call did.
+   */
+  replay(previous: PublicationRow): Change<T>;
+  /**
+   * No publication exists under the key: the change, which gives `createPublication` this key
+   * if it publishes.
+   */
+  publish(tx: OrgTx): Promise<Change<T>>;
+}
+
+/**
+ * The one way to publish under an Idempotency-Key (adoption plan section 2.3, step 27), on
+ * `changeAsOperator`:
+ *
+ *   the role check; the key lock; the publication the key already made ? replay : publish
+ *
+ * So a repeat of the request, by the client or here, finds what the first one made and creates
+ * nothing: the lookup is the first thing every run does, under the lock, and no route writes
+ * that order itself. The change runs once more only when it is known to have rolled back
+ * because a concurrent request with the same key won (`publication_idempotency`); that second
+ * run finds the winner's publication and replays it. A COMMIT that did not confirm is not run
+ * again: it is thrown (500 `commit_outcome_unknown`, D9), and the client's repeat with the same
+ * key replays or publishes, whichever the database holds.
+ */
+export async function changeOncePerKey<T>(
+  ctx: AppContext,
+  request: FastifyRequest,
+  keyed: KeyedPublish<T>,
+): Promise<T> {
+  const attempt = (): Promise<T> =>
+    changeAsOperator(
+      ctx,
+      request,
+      async (tx) => {
+        // After the role check, which every attempt repeats first: a demoted member's repeat of
+        // the same key is refused too.
+        await lockPublishKey(tx, keyed.displayId, keyed.key);
+        // Checked before anything else, so a repeat answers as the first call did.
+        const previous = await findPublicationByKey(tx, keyed.displayId, keyed.key);
+        return previous === null ? keyed.publish(tx) : keyed.replay(previous);
+      },
+      {
+        constraints: {
+          ...keyed.constraints,
+          publication_idempotency: () => new PublishRaceLost(),
+        },
+      },
+    );
+  const first = await settle(attempt());
+  switch (first.end) {
+    case 'committed':
+      return first.value;
+    case 'rolled_back':
+      if (!(first.error instanceof PublishRaceLost)) throw first.error;
+      // Lost a race the key lock should already prevent; the winner's row is replayed.
+      return attempt();
+    case 'unknown':
+      throw first.unconfirmed;
+  }
 }
 
 /**

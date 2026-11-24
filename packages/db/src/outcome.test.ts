@@ -13,7 +13,7 @@ import {
   STAGE_C_CONSTRAINTS,
   type ConstraintName,
 } from './constraints.ts';
-import { classifyDbError, isLockTimeout, type DbFailure } from './outcome.ts';
+import { classifyDbError, isLockTimeout, settle, type DbFailure, type TxEnd } from './outcome.ts';
 
 /** What PostgreSQL sends when it refuses a statement, as the pg driver parses it. */
 function serverError(code: string | undefined, constraint?: string): pg.DatabaseError {
@@ -184,5 +184,86 @@ describe('the constraint registry (step 25, U-9)', () => {
       expect(entry.table, name).toMatch(/^public\.[a-z_]+$/);
       expect(entry.means.length, name).toBeGreaterThan(20);
     }
+  });
+});
+
+/** Work that fails with `thrown`, whatever it is: code can throw anything. */
+async function failing(thrown: unknown): Promise<never> {
+  throw thrown;
+}
+
+describe('settle (step 27, SCX-03)', () => {
+  it('committed: the value the work resolved with', async () => {
+    expect(await settle(Promise.resolve({ id: 7 }))).toEqual({
+      end: 'committed',
+      value: { id: 7 },
+    });
+    expect(await settle(Promise.resolve(undefined))).toEqual({
+      end: 'committed',
+      value: undefined,
+    });
+  });
+
+  it('rolled_back: any failure but an unconfirmed COMMIT, with the error and its class', async () => {
+    const taken = serverError('23505', 'tag_org_scope_name_key');
+    expect(await settle(failing(taken))).toEqual({
+      end: 'rolled_back',
+      error: taken,
+      failure: { kind: 'constraint', name: 'tag_org_scope_name_key' },
+    });
+    // Not from the database at all: an HttpError a route threw, a lost connection mid-statement.
+    for (const thrown of [new Error('not found'), 'a string', null, undefined]) {
+      expect(await settle(failing(thrown))).toEqual({
+        end: 'rolled_back',
+        error: thrown,
+        failure: null,
+      });
+    }
+    // A refusal at COMMIT rolled back (./commit-outcome.ts): the server's own error, classed.
+    const serialization = commitFailure(serverError('40001'));
+    expect(await settle(failing(serialization))).toEqual({
+      end: 'rolled_back',
+      error: serialization,
+      failure: { kind: 'transient', sqlstate: '40001' },
+    });
+  });
+
+  it('unknown: a COMMIT that did not confirm, whatever it failed with', async () => {
+    for (const lost of [serverError('40003'), serverError('57P01'), new Error('timeout')]) {
+      const unconfirmed = commitFailure(lost);
+      const ended = await settle(failing(unconfirmed));
+      expect(ended).toEqual({ end: 'unknown', unconfirmed });
+      // The same error object: the API's handler answers what the caller rethrows (D9).
+      expect(ended.end === 'unknown' && ended.unconfirmed).toBe(unconfirmed);
+    }
+  });
+
+  it('is unknown only for the error itself, not for one that names it or wraps it', async () => {
+    const unconfirmed = commitFailure(new Error('timeout'));
+    const lookalike = Object.assign(new Error('COMMIT did not confirm'), {
+      name: 'CommitOutcomeUnknownError',
+    });
+    const wrapped = new Error('upload failed', { cause: unconfirmed });
+    for (const thrown of [lookalike, wrapped]) {
+      expect((await settle(failing(thrown))).end).toBe('rolled_back');
+    }
+  });
+
+  it('never rejects, so a caller cannot skip the outcome', async () => {
+    await expect(settle(Promise.reject(new Error('boom')))).resolves.toMatchObject({
+      end: 'rolled_back',
+    });
+  });
+
+  it('closes the outcomes, and gives the two failures no field in common', () => {
+    expectTypeOf<TxEnd<string>['end']>().toEqualTypeOf<'committed' | 'rolled_back' | 'unknown'>();
+    expectTypeOf(settle(Promise.resolve(1))).resolves.toEqualTypeOf<TxEnd<number>>();
+    // "It threw, so undo and rethrow" needs a field both failing arms have. There is none but
+    // the tag: `error` is the rollback's, `unconfirmed` the unknown outcome's.
+    type Failed = Exclude<TxEnd<string>, { end: 'committed' }>;
+    expectTypeOf<keyof Failed>().toEqualTypeOf<'end'>();
+    expectTypeOf<
+      Extract<Failed, { end: 'unknown' }>['unconfirmed']
+    >().toEqualTypeOf<CommitOutcomeUnknownError>();
   });
 });

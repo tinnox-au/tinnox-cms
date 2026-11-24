@@ -22,6 +22,7 @@ import {
   alertRecipientByTokenHash,
   changePreOrg,
   readOrg,
+  settle,
   sha256,
   unaudited,
   withCountedLimit,
@@ -106,7 +107,7 @@ export function registerAlertRecipientRoutes(app: FastifyInstance, ctx: AppConte
         );
       }
       const token = randomToken();
-      const { recipient, orgName } = await changeAsOperator(ctx, request, async (tx) => {
+      const change = changeAsOperator(ctx, request, async (tx) => {
         // Serialises additions per organisation, so the count and the duplicate check hold.
         const row = await withCountedLimit(
           tx,
@@ -165,6 +166,21 @@ export function registerAlertRecipientRoutes(app: FastifyInstance, ctx: AppConte
           },
         };
       });
+      // The confirmation goes only to an address that is known to be stored (SCX-03, D9).
+      const ended = await settle(change);
+      let stored: { recipient: AlertRecipientDto; orgName: string };
+      switch (ended.end) {
+        case 'committed':
+          stored = ended.value;
+          break;
+        case 'rolled_back':
+          throw ended.error;
+        case 'unknown':
+          // No e-mail: the address may be stored or not. If it is, the list shows it as waiting
+          // and adding it again answers 409; the operator removes it and adds it again.
+          throw ended.unconfirmed;
+      }
+      const { recipient, orgName } = stored;
       try {
         await mail.send({
           to: address,

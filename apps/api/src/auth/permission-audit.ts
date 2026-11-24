@@ -9,7 +9,7 @@
  * member and invite changes are always written.
  */
 import type { PermissionKey } from '@tinnox/contracts';
-import { classifyDbError, isCommitOutcomeUnknown } from '@tinnox/db';
+import { settle } from '@tinnox/db';
 import type { FastifyRequest } from 'fastify';
 import type { AppContext } from '../context.ts';
 import { AuthFailureGuard } from './failure-guard.ts';
@@ -81,8 +81,8 @@ export async function recordPermissionDenied(
   const counted = guardOf(ctx).recordFailure(session.membershipId, '');
   if (!record.always && !counted.first && !counted.crossedLimit) return;
   const route = request.routeOptions.url ?? 'unknown';
-  try {
-    await recordRefusal(ctx, request, session, {
+  const ended = await settle(
+    recordRefusal(ctx, request, session, {
       actorType: 'operator',
       actorId: session.membershipId,
       action: 'security.permission_denied',
@@ -98,9 +98,18 @@ export async function recordPermissionDenied(
           ? {}
           : { refusalsInWindow: counted.count, throttled: counted.crossedLimit }),
       },
-    });
-  } catch (error) {
-    if (classifyDbError(error) === null && !isCommitOutcomeUnknown(error)) throw error;
-    request.log.error({ err: error }, 'failed to record permission refusal');
+    }),
+  );
+  switch (ended.end) {
+    case 'committed':
+      return;
+    case 'rolled_back':
+      // AUD-9: only what the database raised is logged and dropped.
+      if (ended.failure === null) throw ended.error;
+      request.log.error({ err: ended.error }, 'failed to record permission refusal');
+      return;
+    case 'unknown':
+      request.log.error({ err: ended.unconfirmed }, 'failed to record permission refusal');
+      return;
   }
 }

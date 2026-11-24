@@ -5,15 +5,15 @@
 // Environment (controlled host only): DATABASE_MIGRATOR_URL; PROVISION_IDP_ISSUER (default
 // OIDC_ISSUER), PROVISION_IDP_CLIENT_ID and PROVISION_IDP_CLIENT_SECRET, the identity-provider
 // client that can only read accounts. Exit 0 done, 1 refused or failed, 2 usage error.
-import { CommitOutcomeUnknownError } from '@tinnox/db';
+import { settle } from '@tinnox/db';
 import { connectMigrator, type MigratorPool } from '@tinnox/db/migrate';
 import { loadEnv, requireEnv } from './lib/env.ts';
 import { keycloakDirectory, type IdpDirectory } from './lib/idp.ts';
 import {
-  RefusedError,
   USAGE,
   UsageError,
   parseInvocation,
+  reportEnd,
   runInvocation,
   type Invocation,
 } from './lib/provision.ts';
@@ -50,17 +50,11 @@ async function main(argv: readonly string[]): Promise<number> {
     pool = await connectMigrator(requireEnv('DATABASE_MIGRATOR_URL'), {
       applicationName: 'tinnox-provision',
     });
-    const result = await runInvocation(pool, idp, invocation);
-    for (const line of result.lines) console.log(line);
-    return 0;
+    // One transaction per command: done, refused or failed, or outcome unknown (reportEnd).
+    return reportEnd(await settle(runInvocation(pool, idp, invocation)), console);
   } catch (error) {
-    if (error instanceof CommitOutcomeUnknownError) {
-      console.error('outcome unknown: run `pending` or read the audit log before running again');
-    } else if (error instanceof RefusedError) {
-      console.error(`refused: ${error.message}`);
-    } else {
-      console.error(error instanceof Error ? error.message : error);
-    }
+    // Before any command ran: a missing setting, or a login that connectMigrator refused.
+    console.error(error instanceof Error ? error.message : error);
     return 1;
   } finally {
     await pool?.end().catch(() => undefined);

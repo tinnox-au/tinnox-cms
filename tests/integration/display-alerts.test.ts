@@ -21,8 +21,10 @@ import {
   confirmAlertAddress,
   createDisplay,
   createOrg,
+  expectError,
   heartbeatBody,
   lastConfirmationToken,
+  losingCommitAnswers,
   pairPlayer,
   PORTAL_ORIGIN,
   sendHeartbeat,
@@ -324,6 +326,40 @@ describe('e-mail alerts for screens', () => {
     expect(audit.map((e) => e.detail)).toEqual([{ recipients: 1 }]);
   });
 
+  it('sends nothing for claims whose COMMIT did not confirm, and a later run does not send them either (SCX-03, D9)', async () => {
+    const screen = await reportingScreen('Alert unconfirmed');
+    // Every claim of this app commits for real, and the answer to its COMMIT is lost.
+    const lossy = await startTestApp({}, 1000, {
+      wrapPool: (pool) => losingCommitAnswers(pool, /INSERT INTO display_alert/),
+    });
+    try {
+      lossy.advanceClock(DELAY_MS);
+      const unknown = await checkAlerts(lossy);
+      // Counted as failed, not as an alert: the run cannot say the transition was recorded.
+      expect(unknown.failed).toBeGreaterThanOrEqual(1);
+      expect(lossy.sentMail.filter((m) => m.subject.endsWith(': Alert unconfirmed'))).toEqual([]);
+    } finally {
+      await lossy.close();
+    }
+    // The claim did commit, with its audit row...
+    expect(await openEpisodes(screen.id)).toBe(1);
+    const claimed = (await auditEvents(owner, '&category=display')).filter(
+      (e) => e.objectId === screen.id && e.action === 'display.offline_alert',
+    );
+    expect(claimed.map((e) => e.detail)).toEqual([{ recipients: 1 }]);
+    await later(async () => {
+      // ...so no later run claims it again: at most once means this e-mail is never sent.
+      await check();
+      expect(mailFor('Alert unconfirmed')).toEqual([]);
+      // The episode itself goes on as any other.
+      await report(screen.id, screen.player);
+      await check();
+    });
+    expect(mailFor('Alert unconfirmed').map((m) => m.subject)).toEqual([
+      'Screen reporting again: Alert unconfirmed',
+    ]);
+  });
+
   it('skips while another runner holds the lock, and two runs at once send once', async () => {
     const screen = await reportingScreen('Alert race');
     const holder = await appClient(
@@ -511,6 +547,34 @@ describe('alert addresses', () => {
       ['alert_recipient.add', dto.id, null],
     ]);
     expect(JSON.stringify(await auditEvents(owner))).not.toContain('new.person');
+  });
+
+  it('sends no confirmation when the COMMIT that stores an address does not confirm, and adding it again answers 409 (SCX-03, D9)', async () => {
+    const lossy = await startTestApp({}, 1000, {
+      wrapPool: (pool) => losingCommitAnswers(pool, /INSERT INTO alert_recipient/),
+    });
+    try {
+      const operator = await signIn(lossy, await createOrg('Alert address unconfirmed'));
+      const answer = await addAlertAddress(operator, 'maybe@example.com');
+      expect(answer.headers.get('retry-after')).toBeNull();
+      await expectError(answer, 'commit_outcome_unknown');
+      // No link goes to an address the server cannot say it stored.
+      expect(lossy.sentMail).toEqual([]);
+      // It was stored: the list shows it waiting...
+      expect(await (await operator.fetch('/api/alert-recipients')).json()).toMatchObject({
+        items: [{ email: 'maybe@example.com', status: 'waiting' }],
+      });
+      // ...and sending the request again neither adds a second row nor mails the first.
+      const again = await addAlertAddress(operator, 'maybe@example.com');
+      expect((await expectError(again, 'conflict')).message).toBe(
+        'This address is already on the alert list.',
+      );
+      expect(lossy.sentMail).toEqual([]);
+      const added = (await auditEvents(operator, '&category=alert_recipient')).map((e) => e.action);
+      expect(added).toEqual(['alert_recipient.add']);
+    } finally {
+      await lossy.close();
+    }
   });
 
   it('refuses an address that is not one, and unknown fields', async () => {

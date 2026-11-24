@@ -11,6 +11,7 @@ import {
   poolAsTx,
   readOrg,
   sessionRevokeMembership,
+  settle,
   type AuditInput,
   type Autocommit,
   type OrgId,
@@ -239,6 +240,89 @@ describe('a COMMIT that does not confirm (review round 3, SCX-03)', () => {
     expect(error).not.toBeInstanceOf(CommitOutcomeUnknownError);
     expect((error as Error).message).toBe('boom');
     expect(statements).toEqual(['BEGIN', 'ROLLBACK']);
+  });
+});
+
+describe('settle() over the transactions of this package (step 27, SCX-03)', () => {
+  const runs = [
+    (pool: Pool, work: () => Promise<string>) => withOrg(pool, ORG, work),
+    (pool: Pool, work: () => Promise<string>) => withoutOrg(pool, work),
+    (pool: Pool, work: () => Promise<string>) =>
+      withResolvedOrg(pool, async (_tx, enterOrg) => {
+        await enterOrg(ORG);
+        return work();
+      }),
+  ];
+
+  it('committed: the value, once COMMIT has confirmed', async () => {
+    for (const run of runs) {
+      const { pool, statements } = fakePool();
+      expect(await settle(run(pool, () => Promise.resolve('done')))).toEqual({
+        end: 'committed',
+        value: 'done',
+      });
+      expect(statements.at(-1)).toBe('COMMIT');
+    }
+  });
+
+  it('rolled_back: work that failed before COMMIT, with its error and what the database said', async () => {
+    for (const run of runs) {
+      const boom = new Error('boom');
+      const plain = fakePool();
+      expect(await settle(run(plain.pool, () => Promise.reject(boom)))).toEqual({
+        end: 'rolled_back',
+        error: boom,
+        failure: null,
+      });
+      expect(plain.statements.at(-1)).toBe('ROLLBACK');
+
+      const refused = serverError('42501');
+      const denied = fakePool();
+      const ended = await settle(run(denied.pool, () => Promise.reject(refused)));
+      expect(ended).toEqual({ end: 'rolled_back', error: refused, failure: { kind: 'denied' } });
+    }
+  });
+
+  it('rolled_back: a refusal at COMMIT, which the server raises only while rolling back', async () => {
+    for (const run of runs) {
+      const refusal = serverError('40001');
+      const { pool } = fakePool(['COMMIT'], () => refusal);
+      expect(await settle(run(pool, () => Promise.resolve('done')))).toEqual({
+        end: 'rolled_back',
+        error: refusal,
+        failure: { kind: 'transient', sqlstate: '40001' },
+      });
+    }
+  });
+
+  it('unknown: a COMMIT that did not confirm, with the error to rethrow and never as a rollback', async () => {
+    for (const run of runs) {
+      for (const lost of [
+        new Error('Connection terminated unexpectedly'),
+        serverError('57P01', 'FATAL'),
+        serverError('40003'),
+      ]) {
+        const { pool } = fakePool(['COMMIT'], () => lost);
+        const ended = await settle(run(pool, () => Promise.resolve('done')));
+        if (ended.end !== 'unknown') throw new Error(`settled as ${ended.end}`);
+        // What the caller rethrows is what the API's handler answers commit_outcome_unknown (D9).
+        expect(ended.unconfirmed).toBeInstanceOf(CommitOutcomeUnknownError);
+        expect(isCommitOutcomeUnknown(ended.unconfirmed)).toBe(true);
+        expect(ended.unconfirmed.cause).toBe(lost);
+        expect(ended).not.toHaveProperty('error');
+        expect(ended).not.toHaveProperty('failure');
+      }
+    }
+  });
+
+  it('settles a read too: its failed COMMIT changed nothing, so it is a rollback (step 24)', async () => {
+    const lost = new Error('Connection terminated unexpectedly');
+    const { pool } = fakePool(['COMMIT'], () => lost);
+    expect(await settle(readOrg(databaseOn(pool), ORG, () => Promise.resolve('rows')))).toEqual({
+      end: 'rolled_back',
+      error: lost,
+      failure: null,
+    });
   });
 });
 

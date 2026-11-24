@@ -6,7 +6,8 @@
  * is claimed with a conditional statement on display_alert, so it is recorded and mailed once.
  * The claims of one organisation run in one change of the display alerts job (changeAsJob,
  * jobs.ts), which writes the audit rows they return before COMMIT, so claim and audit row commit
- * together; e-mail goes out after the commit, so delivery is at most once per transition.
+ * together; e-mail goes out after the commit, so delivery is at most once per transition. When
+ * the COMMIT of the claims did not confirm, nothing is sent for them (settle(), D9).
  */
 import { alertDelayText, type WorkingHours } from '@tinnox/contracts';
 import {
@@ -14,6 +15,7 @@ import {
   errorField,
   poolAsTx,
   readOrg,
+  settle,
   unaudited,
   withSessionLock,
   type AuditInput,
@@ -90,15 +92,32 @@ export async function runDisplayAlerts(deps: DisplayAlertDeps): Promise<DisplayA
         break;
       }
       if (deps.shouldStop?.() === true) break;
+      const ended = await settle(
+        changeAsJob(deps.db, 'display_alerts', orgId, (tx) => claimTransitions(tx, deps)),
+      );
+      // E-mail goes out only for claims that are known to have committed (SCX-03, D9).
       let outcome: OrgOutcome;
-      try {
-        outcome = await changeAsJob(deps.db, 'display_alerts', orgId, (tx) =>
-          claimTransitions(tx, deps),
-        );
-      } catch (error) {
-        counts.failed += 1;
-        deps.logger.error({ err: error, orgId }, 'display alert check failed for an organisation');
-        continue;
+      switch (ended.end) {
+        case 'committed':
+          outcome = ended.value;
+          break;
+        case 'rolled_back':
+          counts.failed += 1;
+          deps.logger.error(
+            { err: ended.error, orgId },
+            'display alert check failed for an organisation',
+          );
+          continue;
+        case 'unknown':
+          // Nothing is sent. If the claims did commit, no later run claims them again and
+          // their e-mail is lost; sending now could mail a transition that was not recorded,
+          // and mail it again when the next run claims it. At most once wins.
+          counts.failed += 1;
+          deps.logger.error(
+            { err: ended.unconfirmed, orgId },
+            'display alert claims were not confirmed for an organisation; no e-mail was sent for them',
+          );
+          continue;
       }
       counts.offline += outcome.offline;
       counts.online += outcome.online;

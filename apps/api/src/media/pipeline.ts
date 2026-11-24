@@ -39,13 +39,13 @@ import {
   type MediaJobSpec,
 } from '@tinnox/contracts';
 import {
-  CommitOutcomeUnknownError,
   anyOf,
   MEDIA_PROCESSING_JOBS_CAP,
   mediaProcessingJobs,
   type Listing,
   poolAsTx,
   readOrg,
+  settle,
   unaudited,
   type Database,
   type MediaProcessingJob,
@@ -620,62 +620,68 @@ export class MediaPipeline {
       }
     }
 
-    // The stored copies are removed unless the ready row that references them committed,
-    // or may have: when COMMIT did not confirm, deleting could leave a ready row without
-    // its bytes. At worst an unreferenced object stays (review round 3, SCX-03).
-    let keep = false;
-    try {
-      keep = await changeAsJob(this.#db, 'media_pipeline', job.orgId, async (tx) => {
-        const done = await tx.query(
-          `UPDATE media
-           SET status = 'ready', kind = $2, mime_type = $3, bytes = $4, sha256 = $5,
-               width = $6, height = $7, duration_ms = $8, codec = $9, storage_key = $10,
-               thumb_storage_key = $11, error_code = NULL, error_detail = NULL
-           WHERE id = $1 AND org_id = app_org_id() AND status = 'processing'`,
-          [
-            job.mediaId,
-            result.kind,
-            result.mimeType,
-            stored.bytes,
-            stored.sha256,
-            result.width,
-            result.height,
-            result.durationMs,
-            result.codec,
-            key,
-            thumbKey,
-          ],
-        );
-        // The row is gone or no longer waiting: this run changed nothing, so it records nothing.
-        if (done.rowCount !== 1) return { value: false, audit: unaudited('nothing_changed') };
-        return {
-          value: true,
-          audit: {
-            actorType: 'system',
-            actorId: null,
-            action: 'media.validate',
-            objectType: 'media',
-            objectId: job.mediaId,
-            result: 'success',
-            detail: {
-              mimeType: result.mimeType,
-              bytes: stored.bytes,
-              width: result.width,
-              height: result.height,
-              durationMs: result.durationMs,
-              codec: result.codec,
-            },
+    const change = changeAsJob(this.#db, 'media_pipeline', job.orgId, async (tx) => {
+      const done = await tx.query(
+        `UPDATE media
+         SET status = 'ready', kind = $2, mime_type = $3, bytes = $4, sha256 = $5,
+             width = $6, height = $7, duration_ms = $8, codec = $9, storage_key = $10,
+             thumb_storage_key = $11, error_code = NULL, error_detail = NULL
+         WHERE id = $1 AND org_id = app_org_id() AND status = 'processing'`,
+        [
+          job.mediaId,
+          result.kind,
+          result.mimeType,
+          stored.bytes,
+          stored.sha256,
+          result.width,
+          result.height,
+          result.durationMs,
+          result.codec,
+          key,
+          thumbKey,
+        ],
+      );
+      // The row is gone or no longer waiting: this run changed nothing, so it records nothing.
+      if (done.rowCount !== 1) return { value: false, audit: unaudited('nothing_changed') };
+      return {
+        value: true,
+        audit: {
+          actorType: 'system',
+          actorId: null,
+          action: 'media.validate',
+          objectType: 'media',
+          objectId: job.mediaId,
+          result: 'success',
+          detail: {
+            mimeType: result.mimeType,
+            bytes: stored.bytes,
+            width: result.width,
+            height: result.height,
+            durationMs: result.durationMs,
+            codec: result.codec,
           },
-        };
-      });
-    } catch (error) {
-      keep = error instanceof CommitOutcomeUnknownError;
-      throw error;
-    } finally {
-      if (!keep) {
-        await this.#storage.delete(key).catch(() => undefined);
-        if (thumbKey !== null) await this.#storage.delete(thumbKey).catch(() => undefined);
-      }
+        },
+      };
+    });
+    const removeStored = async (): Promise<void> => {
+      await this.#storage.delete(key).catch(() => undefined);
+      if (thumbKey !== null) await this.#storage.delete(thumbKey).catch(() => undefined);
+    };
+    // The stored copies are removed unless the ready row that references them committed, or
+    // may have (review round 3, SCX-03).
+    const ended = await settle(change);
+    switch (ended.end) {
+      case 'committed':
+        // False: the row was gone or no longer waiting, so nothing references the copies.
+        if (!ended.value) await removeStored();
+        break;
+      case 'rolled_back':
+        await removeStored();
+        throw ended.error;
+      case 'unknown':
+        // COMMIT did not confirm: deleting could leave a ready row without its bytes. At
+        // worst an unreferenced object stays.
+        throw ended.unconfirmed;
     }
     await this.#cleanup(job.mediaId);
   }

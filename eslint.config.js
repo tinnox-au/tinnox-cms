@@ -708,6 +708,64 @@ const NO_SQLSTATE_LITERAL = [
   },
 ];
 
+// Step 27 (adoption plan section 2.3, SCX-03): how a change ended is read in one place, settle()
+// of packages/db/src/outcome.ts, which gives 'committed', 'rolled_back' or 'unknown', and
+// switch-exhaustiveness-check fails a switch that leaves one out. So no file of the API, the
+// offline tools or packages/db tests an error for CommitOutcomeUnknownError itself: a catch that
+// does is where stored bytes were deleted, or could be mailed, for a transaction that may have
+// committed. The one test of the class is unconfirmedCommit in packages/db/src/commit-outcome.ts
+// (DB_ONE_PLACES). Tests are outside: they build the error and assert on it. Not seen: the class
+// under another name (`import { CommitOutcomeUnknownError as E }`) and a test of `error.name`.
+const NO_COMMIT_OUTCOME_TEST = [
+  {
+    selector:
+      "BinaryExpression[operator='instanceof']:matches([right.name='CommitOutcomeUnknownError'], [right.property.name='CommitOutcomeUnknownError'])",
+    message:
+      "Do not test for CommitOutcomeUnknownError (SCX-03, step 27). Wrap the change in settle() from @tinnox/db (packages/db/src/outcome.ts): `const ended = await settle(changeAsOperator(ctx, request, fn))`, then `switch (ended.end)` with all three cases. 'committed': use ended.value; only here send e-mail. 'rolled_back': only here delete files or stored objects, then throw ended.error. 'unknown': COMMIT did not confirm, so keep what the rows may own, send nothing, and throw ended.unconfirmed, which the API answers 500 commit_outcome_unknown (D9).",
+  },
+];
+// The predicate is the same test under another name. It stays for the one caller that answers an
+// unknown outcome and has nothing to undo, the API's error handler (D9); COMMIT_OUTCOME_ANSWERERS
+// names it. packages/db is outside: the migration runner reports its own COMMIT with it. This
+// rule goes beyond the plan's: D9 gave the handler the predicate so that it needs no exemption
+// from the instanceof rule above, and it has none; without this rule any caller could ask the
+// predicate in place of settle(), so the handler's excusal here is the one this step adds. A
+// namespace import of @tinnox/db, the other way to reach it, is refused already (CHK-6).
+const NO_COMMIT_OUTCOME_PREDICATE = [
+  {
+    selector: "ImportSpecifier[imported.name='isCommitOutcomeUnknown']",
+    message:
+      "isCommitOutcomeUnknown is for the API's error handler (apps/api/src/errors.ts), which answers 500 commit_outcome_unknown and has nothing to undo (D9). A caller that does anything after its change (deletes stored bytes, sends e-mail, runs again) wraps the change in settle() from @tinnox/db (packages/db/src/outcome.ts) and switches on ended.end: 'committed', 'rolled_back' and 'unknown' (SCX-03, step 27). Only 'rolled_back' may delete files or stored objects; 'unknown' throws ended.unconfirmed.",
+  },
+];
+// Step 27: a publish under an Idempotency-Key goes through changeOncePerKey of
+// apps/api/src/publishing.ts, which takes the key lock, looks up what the key already made and
+// runs again only after a known rollback. Its two steps stay exported for the handle-type test
+// (apps/api/src/read-handles.test.ts), so the rest of the API may not import them and write that
+// order, or a retry, by hand. publishing.ts declares them and imports neither, so nothing is
+// excused; tests are outside. A namespace import is seen where it is used (`p.lockPublishKey`).
+// Not seen: the same SQL written out, a computed or destructured name (`p['lockPublishKey']`,
+// `const { lockPublishKey } = p`), and a route that maps publication_idempotency in the
+// constraints option of changeAsOperator.
+const NO_HAND_KEYED_PUBLISH = [
+  {
+    selector: [
+      'ImportSpecifier[imported.name=/^(lockPublishKey|findPublicationByKey)$/]',
+      'MemberExpression[property.name=/^(lockPublishKey|findPublicationByKey)$/]',
+    ].join(', '),
+    message:
+      'Do not lock or look up an Idempotency-Key by hand (step 27). Publish through changeOncePerKey(ctx, request, { displayId, key, replay, publish }) from apps/api/src/publishing.ts: it takes the key lock, replays what the key already made, and runs once more only when the change is known to have rolled back.',
+  },
+];
+
+// The API files that may ask the predicate, and why.
+const COMMIT_OUTCOME_ANSWERERS = [
+  // The error handler: the last reader of every error of a request. It answers a COMMIT that did
+  // not confirm with 500 commit_outcome_unknown (GET and HEAD: internal_error) and undoes nothing
+  // (D9, adoption plan step 24).
+  'apps/api/src/errors.ts',
+];
+
 // EAX-08: a security exemption is decided on an address, never on a name. A loopback name or
 // literal, in any case, is refused where API code compares a host with it: an equality test, a
 // switch case, a list or Set to look it up in, and the argument of endsWith, startsWith or
@@ -1732,6 +1790,9 @@ const API_SYNTAX = [
   ...NO_SESSION_LOCK,
   ...NO_LOOPBACK_NAME,
   ...NO_SQLSTATE_LITERAL,
+  ...NO_COMMIT_OUTCOME_TEST,
+  ...NO_COMMIT_OUTCOME_PREDICATE,
+  ...NO_HAND_KEYED_PUBLISH,
 ];
 // The list of the offline tools (D25: scripts get the database rules too). The tools that read
 // the migrator URL get it as it is; every other script also gets NO_MIGRATOR_URL.
@@ -1745,10 +1806,16 @@ const SCRIPTS_SYNTAX = [
   ...NO_TRANSACTION_TEXT,
   ...NO_GATED_REEXPORT,
   ...NO_SESSION_LOCK,
+  ...NO_COMMIT_OUTCOME_TEST,
+  ...NO_COMMIT_OUTCOME_PREDICATE,
 ];
 // EAX-06: packages/db holds withSessionLock and the migration runner's lock, so the product list
-// of its source leaves out NO_SESSION_LOCK.
-const DB_SYNTAX = PRODUCT_SYNTAX.filter((entry) => !NO_SESSION_LOCK.includes(entry));
+// of its source leaves out NO_SESSION_LOCK. Step 27: it holds the commit-outcome error, so its
+// source gets the ban on testing for the class, outside the one file that does (DB_ONE_PLACES).
+const DB_SYNTAX = [
+  ...PRODUCT_SYNTAX.filter((entry) => !NO_SESSION_LOCK.includes(entry)),
+  ...NO_COMMIT_OUTCOME_TEST,
+];
 
 // The files of packages/db that are the one place for something the rest may not write, with the
 // list each is excused from. The rest of the package's list is unchanged for them.
@@ -1764,7 +1831,20 @@ const DB_ONE_PLACES = {
   'packages/db/src/sql.ts': NO_SQL_FRAGMENT_CAST,
   // AG-2.3: mintOrgId and the rows asDefiner reads make the OrgId.
   'packages/db/src/org-id.ts': NO_ORG_ID_FORGERY,
+  // SCX-03: unconfirmedCommit, the one test for CommitOutcomeUnknownError, which settle() reads.
+  'packages/db/src/commit-outcome.ts': NO_COMMIT_OUTCOME_TEST,
 };
+
+// The API files that are the one place for something the rest of the API may not write, and the
+// list each is excused from (D5, EAX-08, D9). A file may be in more than one.
+const API_ONE_PLACES = [
+  [CREDENTIAL_NAME_REFUSERS, NO_CREDENTIAL_NAMES],
+  [LOOPBACK_NAME_ALLOWED, NO_LOOPBACK_NAME],
+  [COMMIT_OUTCOME_ANSWERERS, NO_COMMIT_OUTCOME_PREDICATE],
+];
+const API_ONE_PLACE_FILES = [...new Set(API_ONE_PLACES.flatMap(([files]) => files))];
+const apiExcusals = (file) =>
+  API_ONE_PLACES.flatMap(([files, entries]) => (files.includes(file) ? entries : []));
 
 // CHK-12: the one-place excusals of the no-restricted-syntax lists above, by file, so that
 // scripts/lib/db-access-lint.test.ts can show each is still needed: it lints the file's text with
@@ -1772,15 +1852,7 @@ const DB_ONE_PLACES = {
 export const ONE_PLACE_EXCUSALS = {
   ...DB_ONE_PLACES,
   'packages/domain/src/planned.ts': NO_PLANNED_PUBLICATION_CAST,
-  ...Object.fromEntries(
-    [...new Set([...CREDENTIAL_NAME_REFUSERS, ...LOOPBACK_NAME_ALLOWED])].map((file) => [
-      file,
-      [
-        ...(CREDENTIAL_NAME_REFUSERS.includes(file) ? NO_CREDENTIAL_NAMES : []),
-        ...(LOOPBACK_NAME_ALLOWED.includes(file) ? NO_LOOPBACK_NAME : []),
-      ],
-    ]),
-  ),
+  ...Object.fromEntries(API_ONE_PLACE_FILES.map((file) => [file, apiExcusals(file)])),
 };
 
 export default tseslint.config(
@@ -2020,14 +2092,11 @@ export default tseslint.config(
       'no-restricted-syntax': ['error', ...API_SYNTAX, ...outboundSyntax('apps/api', name)],
     },
   })),
-  // D5 and EAX-08: a file that refuses the credential names, or may name a loopback host, keeps the
-  // rest of the API's list. One block per file, because flat config replaces the option list and
-  // a file may be in either list or both.
-  ...[...new Set([...CREDENTIAL_NAME_REFUSERS, ...LOOPBACK_NAME_ALLOWED])].map((file) => {
-    const excused = [
-      ...(CREDENTIAL_NAME_REFUSERS.includes(file) ? NO_CREDENTIAL_NAMES : []),
-      ...(LOOPBACK_NAME_ALLOWED.includes(file) ? NO_LOOPBACK_NAME : []),
-    ];
+  // D5, EAX-08 and D9: a file that refuses the credential names, may name a loopback host, or
+  // answers an unknown commit outcome keeps the rest of the API's list. One block per file,
+  // because flat config replaces the option list and a file may be in more than one list.
+  ...API_ONE_PLACE_FILES.map((file) => {
+    const excused = apiExcusals(file);
     const client = Object.entries(OUTBOUND_CLIENTS).find(([, path]) => path === file)?.[0] ?? null;
     return {
       files: [file],

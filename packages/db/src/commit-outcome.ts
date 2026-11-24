@@ -10,7 +10,9 @@ import pg from 'pg';
  * must not undo work outside the database (delete files or stored objects) on this
  * error: the rows that own that work may exist (review round 3, SCX-03). `cause` holds
  * what COMMIT failed with. The API answers it, on a request that changes state, with 500
- * `commit_outcome_unknown` (apps/api/src/errors.ts, D9).
+ * `commit_outcome_unknown` (apps/api/src/errors.ts, D9). A caller that does anything outside
+ * the database after its change does not catch this class: it reads the end of the change
+ * from settle() (./outcome.ts), whose 'unknown' arm carries this error (step 27).
  */
 export class CommitOutcomeUnknownError extends Error {
   constructor(
@@ -23,13 +25,25 @@ export class CommitOutcomeUnknownError extends Error {
 }
 
 /**
- * True for the error a COMMIT that did not confirm was reported with. The API's error handler
- * asks this rather than testing the class itself, so the lint of step 27, which sends callers
- * to settle(), needs no exception for it (D9). Not a type predicate: the class has the shape of
- * any Error, so narrowing it away would leave the caller's Error with nothing.
+ * `error` itself when it is the error a COMMIT that did not confirm was reported with, else
+ * null. The one test of the class (lint refuses `instanceof CommitOutcomeUnknownError` in every
+ * other file of the package, of the API and of the offline tools, step 27): settle() of
+ * ./outcome.ts reads the outcome of a change through it. Not in the runtime entry.
+ */
+export function unconfirmedCommit(error: unknown): CommitOutcomeUnknownError | null {
+  return error instanceof CommitOutcomeUnknownError ? error : null;
+}
+
+/**
+ * True for the error a COMMIT that did not confirm was reported with. For the API's error
+ * handler (apps/api/src/errors.ts), which answers it and has nothing to undo (D9); lint keeps
+ * it to that file in API source and the offline tools (step 27), where a caller with work
+ * outside the database reads the three outcomes from settle() of ./outcome.ts. Not a type
+ * predicate: the class has the shape of any Error, so narrowing it away would leave the
+ * caller's Error with nothing.
  */
 export function isCommitOutcomeUnknown(error: unknown): boolean {
-  return error instanceof CommitOutcomeUnknownError;
+  return unconfirmedCommit(error) !== null;
 }
 
 /** SQLSTATE 40003, statement_completion_unknown: class 40, yet it confirms nothing. */

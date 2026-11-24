@@ -35,9 +35,11 @@ import {
   issueWritePermit,
   lockOrgMembership,
   membershipForCheck,
+  settle,
   type Change,
   type ConstraintName,
   type OrgTx,
+  type TxEnd,
   type WritePermit,
 } from '@tinnox/db';
 import { permissionsOf } from '@tinnox/domain';
@@ -506,29 +508,31 @@ export function lockTimeoutAsUnavailable(request: FastifyRequest, error: unknown
  * What a change answers when the database refuses it with a constraint of the registry
  * (CONSTRAINTS, packages/db/src/constraints.ts): each name the route maps, with the error to
  * throw in place of the database's. A name the route does not map stays the database's error,
- * a 500 logged by its name. The error is usually an HttpError; a route that does more than
- * answer (publishing runs again after a lost race) maps the name to an error of its own and
- * catches that.
+ * a 500 logged by its name. A route maps names to answers only, usually an HttpError. The one
+ * change that runs again after a refusal is a keyed publish: changeOncePerKey
+ * (apps/api/src/publishing.ts) maps publication_idempotency to its own private error and runs
+ * once more, and its KeyedPublish.constraints leaves that name out of what a route may map.
  */
 export type ConstraintAnswers = { readonly [Name in ConstraintName]?: () => Error };
 
 /**
- * Records a role refusal, answers a registered constraint the route maps, and maps a lock
- * timeout; anything else passes unchanged. (Step 27 of the adoption plan adds an exported
- * settle() for commit outcomes, and renames or absorbs this one.)
+ * What to throw for a change that rolled back (the `rolled_back` end of settle(), @tinnox/db):
+ * records a role refusal, answers a registered constraint the route maps, and maps a lock
+ * timeout; anything else passes unchanged. Until step 27 this was a private `settle` that every
+ * failure went through; a COMMIT that did not confirm no longer comes here.
  */
-async function settle(
+async function rolledBackAnswer(
   ctx: AppContext,
   request: FastifyRequest,
   session: OperatorSession,
-  error: unknown,
+  rolledBack: Extract<TxEnd<unknown>, { end: 'rolled_back' }>,
   constraints: ConstraintAnswers | undefined,
 ): Promise<unknown> {
+  const { error, failure } = rolledBack;
   if (error instanceof PermissionDeniedError) {
     await recordPermissionDenied(ctx, request, session, error.record);
     return error;
   }
-  const failure = classifyDbError(error);
   if (failure?.kind === 'constraint') {
     const answer = constraints?.[failure.name];
     if (answer !== undefined) return answer();
@@ -585,6 +589,9 @@ function writePermit(
  * constraint that `options.constraints` maps is thrown as the route's answer instead (step 26).
  * A lock timeout (55P03) raised anywhere inside (membership lock, actor row, target row, any
  * other lock) becomes 503 service_unavailable with retry-after 2.
+ * A COMMIT that did not confirm is thrown as it came (CommitOutcomeUnknownError): the change may
+ * be saved, so it is neither recorded as a refusal nor mapped to an answer of the route. A
+ * caller that does anything outside the database afterwards wraps this call in settle().
  */
 export async function changeAsOperator<T>(
   ctx: AppContext,
@@ -594,9 +601,13 @@ export async function changeAsOperator<T>(
 ): Promise<T> {
   const session = operatorOf(request);
   const permit = writePermit(request, session, options);
-  try {
-    return await changeOrg(ctx.db, session.orgId, permit, fn);
-  } catch (error) {
-    throw await settle(ctx, request, session, error, options?.constraints);
+  const ended = await settle(changeOrg(ctx.db, session.orgId, permit, fn));
+  switch (ended.end) {
+    case 'committed':
+      return ended.value;
+    case 'rolled_back':
+      throw await rolledBackAnswer(ctx, request, session, ended, options?.constraints);
+    case 'unknown':
+      throw ended.unconfirmed;
   }
 }

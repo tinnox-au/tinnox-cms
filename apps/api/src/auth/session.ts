@@ -9,14 +9,7 @@
  *   CSRF token in X-CSRF-Token.
  */
 import { HEADERS, OpaqueTokenSchema } from '@tinnox/contracts';
-import {
-  classifyDbError,
-  isCommitOutcomeUnknown,
-  poolAsTx,
-  sessionByIdHash,
-  sha256,
-  type SessionLookup,
-} from '@tinnox/db';
+import { poolAsTx, sessionByIdHash, settle, sha256, type SessionLookup } from '@tinnox/db';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { AppContext } from '../context.ts';
 import { HttpError } from '../errors.ts';
@@ -96,8 +89,8 @@ async function recordCsrfRejection(
   session: OperatorSession,
   reason: string,
 ): Promise<void> {
-  try {
-    await recordRefusal(ctx, request, session, {
+  const ended = await settle(
+    recordRefusal(ctx, request, session, {
       actorType: 'operator',
       actorId: session.membershipId,
       action: 'security.csrf_rejected',
@@ -105,10 +98,19 @@ async function recordCsrfRejection(
       objectId: null,
       result: 'denied',
       detail: { reason, method: request.method, route: request.routeOptions.url ?? null },
-    });
-  } catch (error) {
-    if (classifyDbError(error) === null && !isCommitOutcomeUnknown(error)) throw error;
-    request.log.error({ err: error }, 'failed to record csrf rejection');
+    }),
+  );
+  switch (ended.end) {
+    case 'committed':
+      return;
+    case 'rolled_back':
+      // AUD-9: only what the database raised is logged and dropped.
+      if (ended.failure === null) throw ended.error;
+      request.log.error({ err: ended.error }, 'failed to record csrf rejection');
+      return;
+    case 'unknown':
+      request.log.error({ err: ended.unconfirmed }, 'failed to record csrf rejection');
+      return;
   }
 }
 

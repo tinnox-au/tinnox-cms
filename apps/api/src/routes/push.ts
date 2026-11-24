@@ -14,9 +14,9 @@ import {
   type PushResponse,
   type PushResult,
 } from '@tinnox/contracts';
-import { readOrg, unaudited, type Change } from '@tinnox/db';
+import { readOrg, unaudited } from '@tinnox/db';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { changeAsOperator, type ConstraintAnswers } from '../auth/permissions.ts';
+import type { ConstraintAnswers } from '../auth/permissions.ts';
 import { operatorOf, type OperatorSession } from '../auth/session.ts';
 import { perMinute, type AppContext } from '../context.ts';
 import { iso } from '../db-helpers.ts';
@@ -24,26 +24,24 @@ import { HttpError, notFound, parseInput } from '../errors.ts';
 import {
   assessDisplays,
   auditRejectedPublication,
+  changeOncePerKey,
   createPublication,
-  findPublicationByKey,
   idempotencyKeyOf,
   issueDetails,
   lockDisplayForPublish,
   loadPushPlan,
-  lockPublishKey,
   pendingCount,
-  PublishRaceLost,
   type DisplayAssessment,
 } from '../publishing.ts';
 
 /**
- * A push to one display: a concurrent request with the same key won (run again, which returns
- * its publication), or a file of the screen's content was deleted between the plan and the
+ * A push to one display: a file of the screen's content was deleted between the plan and the
  * write. Displays pushed so far keep their publications; a repeat with the same Idempotency-Key
- * returns them and carries on with the rest.
+ * returns them and carries on with the rest. A concurrent request with the same key that won is
+ * answered by `changeOncePerKey`, which runs the push of that display again and returns the
+ * winner's publication.
  */
 const PUSH_RACES = {
-  publication_idempotency: () => new PublishRaceLost(),
   publication_asset_media_id_org_id_fkey: () =>
     new HttpError(
       409,
@@ -78,7 +76,8 @@ export function registerPushRoutes(app: FastifyInstance, ctx: AppContext): void 
   /**
    * Pushes to one display, in its own transaction. The Idempotency-Key of the
    * request is reused per display under the same lock as publishing, so a
-   * repeat of the request finds the publication it made and creates nothing.
+   * repeat of the request finds the publication it made and creates nothing
+   * (`changeOncePerKey`, ../publishing.ts).
    * The member's role is checked again first in each transaction, before the key lock, so a
    * demoted member's replay of the same key is refused too. The audit row of a publication, or
    * of a rejected one, is returned with the result and commits with it.
@@ -89,20 +88,17 @@ export function registerPushRoutes(app: FastifyInstance, ctx: AppContext): void 
     displayId: string,
     key: string,
   ): Promise<PushResult> {
-    return changeAsOperator(
-      ctx,
-      request,
-      async (tx): Promise<Change<PushResult>> => {
-        await lockPublishKey(tx, displayId, key);
-        // Checked before anything else, so a repeat answers as the first call did
-        // even when the display would by now count as up to date.
-        const previous = await findPublicationByKey(tx, displayId, key);
-        if (previous !== null) {
-          return {
-            value: { displayId, outcome: 'published', publicationId: previous.id, issues: [] },
-            audit: unaudited('idempotent_replay'),
-          };
-        }
+    return changeOncePerKey<PushResult>(ctx, request, {
+      displayId,
+      key,
+      constraints: PUSH_RACES,
+      // The key is looked up before anything else, so a repeat answers as the first call did
+      // even when the display would by now count as up to date.
+      replay: (previous) => ({
+        value: { displayId, outcome: 'published', publicationId: previous.id, issues: [] },
+        audit: unaudited('idempotent_replay'),
+      }),
+      publish: async (tx) => {
         const display = await lockDisplayForPublish(tx, displayId);
         if (display === null) throw notFound('The screen');
         const [assessment] = await assessDisplays(tx, ctx, [display], {
@@ -168,8 +164,7 @@ export function registerPushRoutes(app: FastifyInstance, ctx: AppContext): void 
           audit: made.audit,
         };
       },
-      { constraints: PUSH_RACES },
-    );
+    });
   }
 
   app.post(
@@ -201,13 +196,7 @@ export function registerPushRoutes(app: FastifyInstance, ctx: AppContext): void 
       // per-screen results with a 'refused' outcome if people ask what happened.
       const results: PushResult[] = [];
       for (const displayId of displayIds) {
-        try {
-          results.push(await pushDisplay(request, session, displayId, key));
-        } catch (error) {
-          // Lost a race the advisory lock should already prevent; the winner's row is returned.
-          if (!(error instanceof PublishRaceLost)) throw error;
-          results.push(await pushDisplay(request, session, displayId, key));
-        }
+        results.push(await pushDisplay(request, session, displayId, key));
       }
       return { results };
     },

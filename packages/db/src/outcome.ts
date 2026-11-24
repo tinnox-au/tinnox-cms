@@ -3,8 +3,12 @@
  * errors PostgreSQL raises, so that callers stop reading SQLSTATE codes and constraint names
  * themselves (step 26 moves them here). A COMMIT that did not confirm is not one of these: its
  * error is CommitOutcomeUnknownError (./commit-outcome.ts), which this classifier does not class.
+ *
+ * And how a change ended (step 27): settle() turns the promise of one transaction into one of
+ * three outcomes, so a caller with work outside the database handles the third.
  */
 import pg from 'pg';
+import { unconfirmedCommit, type CommitOutcomeUnknownError } from './commit-outcome.ts';
 import { CONSTRAINTS, isConstraintName, type ConstraintName } from './constraints.ts';
 
 /** SQLSTATE lock_not_available: a lock wait ran past `lock_timeout`. */
@@ -87,4 +91,47 @@ export type LockTimeout = Extract<DbFailure, { kind: 'transient' }> & {
  */
 export function isLockTimeout(failure: DbFailure | null): failure is LockTimeout {
   return failure?.kind === 'transient' && failure.sqlstate === LOCK_NOT_AVAILABLE;
+}
+
+/**
+ * How one transaction ended, closed so that a `switch` over `end` sees every outcome (lint
+ * fails a switch that leaves one out: switch-exhaustiveness-check):
+ * - `committed`: COMMIT confirmed; `value` is what the transaction returned.
+ * - `rolled_back`: nothing of it is in the database. `error` is what it failed with, for the
+ *   caller to rethrow, and `failure` what classifyDbError makes of it.
+ * - `unknown`: COMMIT was sent and not confirmed, so the change may be in the database or not.
+ *   `unconfirmed` is the error to rethrow: the API answers it 500 `commit_outcome_unknown` (D9).
+ *
+ * The two failing arms name their error differently on purpose: code that has not told them
+ * apart reads neither, so "it threw, undo" does not compile.
+ */
+export type TxEnd<T> =
+  | { readonly end: 'committed'; readonly value: T }
+  | { readonly end: 'rolled_back'; readonly error: unknown; readonly failure: DbFailure | null }
+  | { readonly end: 'unknown'; readonly unconfirmed: CommitOutcomeUnknownError };
+
+/**
+ * Waits for `work`, the promise of ONE transaction (changeOrg, changePreOrg, or a wrapper of
+ * one: changeAsOperator, changeAsJob, changeAsDevice, changeOrgAsMigrator), and says how it
+ * ended. Never rejects.
+ *
+ * For a caller that does something outside that transaction once it has ended (SCX-03, adoption
+ * plan section 2.3): work outside the database is undone only in `rolled_back` (delete stored
+ * bytes), done only in `committed` (send an e-mail), and in `unknown` neither: keep what the
+ * rows may own, send nothing, and rethrow `unconfirmed`. Lint refuses the hand-written form, a
+ * catch that tests for CommitOutcomeUnknownError (eslint.config.js, NO_COMMIT_OUTCOME_TEST).
+ *
+ * `rolled_back` is every failure but an unconfirmed COMMIT, and that holds only while nothing
+ * in `work` runs after its COMMIT: a promise that goes on after a commit (a second transaction,
+ * a send) would report a later failure as a rollback of the first. A wrapper's own record of a
+ * refusal, written after the rollback, is fine: nothing had committed.
+ */
+export async function settle<T>(work: Promise<T>): Promise<TxEnd<T>> {
+  try {
+    return { end: 'committed', value: await work };
+  } catch (error) {
+    const unconfirmed = unconfirmedCommit(error);
+    if (unconfirmed !== null) return { end: 'unknown', unconfirmed };
+    return { end: 'rolled_back', error, failure: classifyDbError(error) };
+  }
 }
