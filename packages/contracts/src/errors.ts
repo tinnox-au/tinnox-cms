@@ -47,8 +47,9 @@ export type ApiErrorCode = z.infer<typeof ApiErrorCodeSchema>;
 /**
  * The one HTTP status of each code (adoption plan section 2.2, step 28). The API's HttpError takes
  * its status from here, so an HttpError cannot carry a status other than its code's (`not_found`
- * with 403, say). The API's error handler keeps a framework 4xx's own status, and sends
- * bad_request for one it does not list (406, for example). eslint.config.js reads the 403 codes
+ * with 403, say). The API's error handler keeps a framework 4xx's own status under the nearest
+ * code: 406 is mapped to bad_request, and a 4xx it does not list (416, say) falls back to
+ * bad_request. eslint.config.js reads the 403 codes
  * from this table for its lint of API source, so a new 403 code is covered there as soon as it is
  * added here.
  */

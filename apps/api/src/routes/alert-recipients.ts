@@ -175,7 +175,8 @@ export function registerAlertRecipientRoutes(app: FastifyInstance, ctx: AppConte
           throw ended.error;
         case 'unknown':
           // No e-mail: the address may be stored or not. If it is, the list shows it as waiting
-          // and adding it again answers 409; the operator removes it and adds it again.
+          // and adding it again answers 409; the operator would remove it and add it again, but
+          // the portal's dialog does not say so for this code (only confirmation_not_sent does).
           throw ended.unconfirmed;
       }
       const { recipient, orgName } = stored;

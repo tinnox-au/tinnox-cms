@@ -471,7 +471,7 @@ describe('api client: responses and errors', () => {
     expect(isOutcomeUnknown(make(0, 'network_error'))).toBe(true);
     expect(isOutcomeUnknown(make(503, 'service_unavailable'))).toBe(true);
     expect(isOutcomeUnknown(make(500, 'internal_error'))).toBe(true);
-    // D9: the API's answer when COMMIT did not confirm; the dialogs reload to check.
+    // D9: the API's answer when COMMIT did not confirm; the dialogs that check isOutcomeUnknown reload to check.
     expect(isOutcomeUnknown(make(500, 'commit_outcome_unknown'))).toBe(true);
     expect(isOutcomeUnknown(make(429, 'rate_limited'))).toBe(true);
     expect(isOutcomeUnknown(make(200, 'invalid_response'))).toBe(true);
