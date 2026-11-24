@@ -299,3 +299,8 @@ from: CMS-30
 - 24 Nov: Until decided, four tests in tests/integration/display-alerts.test.ts and pairing-and-credentials.test.ts pass these writes through whileUnauditedAllowed, marked undecided. Auditing the alert close needs a new audit action and portal wording.
 - 24 Nov: Also for Michael: step 16 added an audit row for a refused pairing completion (pairing.complete, denied), which closes the residual in threat-model T3. Say if you would rather not have it.
 - 24 Nov: Step 20 kept today's behaviour: both writes now give a named reason and write no audit row. Three more of the same kind to decide: the development seed's rows, a publish refused with 409 idempotency_conflict, and a wrong pairing token under the limit.
+
+### CMS-37
+
+**Notes**
+- 24 Nov: Michael, 24 Nov: media is served direct from Sydney storage, no CDN, if possible. Michael is the incident owner for now. Native players: Linux only for now, Windows 11 set aside.
