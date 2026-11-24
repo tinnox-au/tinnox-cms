@@ -57,14 +57,13 @@ None.
 
 ## In review
 
-| Id | Card | Agreed | PR | Since |
-|---|---|---|---|---|
-| CMS-30 | Poteto pyramid refactor, group B: the database API (steps 13 to 22 of the adoption plan), built locally first | Michael 23 Nov | #39 | 24 Nov |
+None.
 
 ## Done, last 14 days
 
 | Id | Date | Outcome | PR |
 |---|---|---|---|
+| CMS-30 | 24 Nov | Poteto pyramid refactor, group B: the database API (steps 13 to 22 of the adoption plan), built locally first | #39 |
 | CMS-28 | 23 Nov | Poteto pyramid refactor, rest of group A: steps 3, 4, 6, 6a, 11, 12 and 12a to 12c of the adoption plan | #37 |
 | CMS-24 | 22 Nov | Poteto pyramid refactor, group A: guardrails that land with their fixes (document, test, migration, import and lint checks) | #36 |
 | CMS-23 | 22 Nov | Poteto pyramid adoption plan: rule and finding inventory, enforcement design per layer, ordered PR-sized steps (plan only, no code) | #36 |
@@ -260,6 +259,9 @@ from: CMS-28
 **Notes**
 - 24 Nov: Paused 24 Nov 2026 at Michael's request, after step 20. Steps 13 to 20 are built and verified locally on the branch refactor/poteto-pyramid-group-b: not pushed, no pull request. Left: steps 21 and 22, the whole-branch review, the as-built section of the plan, then one pull request.
 - 24 Nov: Steps 13 to 20 merged in pull request 38 on 24 Nov 2026, CI green. Still to build: steps 21 and 22, then the whole-branch review of group B and the as-built section of the plan.
+
+**Evidence**
+Steps 13 to 20 merged in pull request 38 and steps 21 and 22 with the whole-branch review fixes in pull request 39, both with CI green; plan section 6.3 records what was built
 
 ### CMS-31
 from: CMS-30
