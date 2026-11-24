@@ -15,7 +15,8 @@ import type { z } from 'zod';
 
 /**
  * An answer with an error code. Its status is the code's (STATUS_OF of @tinnox/contracts, step
- * 28), so no call site passes one and a code cannot go out with another code's status.
+ * 28), so no call site passes one and an HttpError cannot send a code with another status. The
+ * framework branch of the handler below is the exception: it keeps a framework 4xx's own status.
  */
 export class HttpError extends Error {
   readonly statusCode: number;

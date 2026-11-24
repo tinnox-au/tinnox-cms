@@ -256,6 +256,15 @@ describe('a status asserted as a range or a negation (RCX-03)', { timeout: 30_00
     'expect(limit > reply.statusCode).toBe(true);',
     'expect(response.status).toSatisfy((s) => s >= 400);',
     'expect(status).not.toSatisfy(isServerError);',
+    // CHK-4 (group C review): "not 401" as !==, a negated list, and a range behind `!`.
+    'expect(response.status !== 401).toBe(true);',
+    'expect(401 != reply.statusCode).toBe(true);',
+    'expect(ok && response.status !== 401).toBe(true);',
+    'expect([401, 403]).not.toContain(response.status);',
+    "expect([401, 403], 'what').not.toContain(passed.status);",
+    'expect(response.status).not.toBeOneOf([401]);',
+    'expect(!(response.status < 400)).toBe(true);',
+    'expect(!(status >= 500)).toBe(true);',
   ])('flags %s', async (code) => {
     const messages = await flagged('tests/integration/fixture.test.ts', code);
     expect(messages).toHaveLength(1);
@@ -295,6 +304,12 @@ describe('a status asserted as a range or a negation (RCX-03)', { timeout: 30_00
       'expect(elapsedMs < 500 && done).toBe(true);',
       'expect(response.status === 404).toBe(true);',
       'expect(response.status).toBeOneOf([200, 204]);',
+      'expect(run.status !== 0).toBe(true);',
+      "expect(row.status !== 'ready').toBe(true);",
+      "expect(row.status).not.toBeOneOf(['ready']);",
+      "expect(['failed']).not.toContain(row.status);",
+      "expect(['400 validation_failed']).toContain(`${response.status} ${code}`);",
+      'expect(!(elapsedMs < 500)).toBe(true);',
     ].join('\n');
     expect(await flagged('tests/integration/fixture.test.ts', code)).toEqual([]);
   });

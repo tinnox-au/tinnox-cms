@@ -1,6 +1,7 @@
 /**
- * The player protocol's three 403s (docs/player-protocol-v1.md section 10), named here because a
- * route file builds no 403 of its own (adoption plan step 28; NO_ROUTE_403 in eslint.config.js).
+ * The player protocol's three 403s (docs/player-protocol-v1.md section 10), named here because no
+ * API file outside API_403_BUILDERS builds a 403 (adoption plan step 28, D1; NO_API_403 in
+ * eslint.config.js).
  * Each is decided without looking up the requested id, so it is the same for an own, unknown or
  * another organisation's id (D1): the signed media URL checks read only the URL, and the
  * heartbeat compares the report's display id with the credential's.

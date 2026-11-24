@@ -217,10 +217,16 @@ describe('operator session, CSRF and origin checks', () => {
           'origin_not_allowed',
         );
       }
-      // With both, the request gets past the checks: whatever it answers, it is not 401 or 403.
+      // With both, the request gets past the checks to the handler, which refuses the empty
+      // request on its own terms: no valid body, no such id, or not multipart. Named exactly, so a
+      // crash or a rate limit fails here too (RCX-03; CHK-4 of the group C review).
       if (path !== LOGOUT[1]) {
         const passed = await send({ origin: PORTAL_ORIGIN, 'x-csrf-token': operator.csrfToken });
-        expect([401, 403], what).not.toContain(passed.status);
+        const { code } = ((await passed.json()) as { error: { code: string } }).error;
+        expect(
+          ['400 validation_failed', '404 not_found', '415 unsupported_media_type'],
+          what,
+        ).toContain(`${passed.status} ${code}`);
       }
     }
     // The session survived every refused request, the refused sign-out included.

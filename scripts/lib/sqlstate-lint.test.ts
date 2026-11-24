@@ -63,12 +63,20 @@ describe(
         'if (code === `40P01`) retry();',
         "switch (code) { case '42501': break; case '57014': break; }",
         "const TRANSIENT = new Set(['40001']);",
+        // CHK-2 (group C review): a whole class by its prefix.
+        "if (error.code?.startsWith('23')) throw conflict();",
       ])(`flags %s in ${path}`, async (code) => {
         const messages = await flagged(path, code);
         expect(messages.length).toBeGreaterThan(0);
         for (const message of messages) expect(message).toMatch(SQLSTATE);
       });
     }
+
+    it('leaves other prefixes alone', async () => {
+      const code =
+        "export const v = version.startsWith('2'); export const w = id.startsWith('235');";
+      expect(await flagged('apps/api/src/routes/fixture.ts', code)).toEqual([]);
+    });
 
     it.each(['EPIPE', '23505x', '2350', '12345', 'P0001', '0A000', 'route 23505 failed'])(
       'leaves other text alone: %s',
@@ -96,6 +104,39 @@ describe('no constraint reader in API source (step 26)', { timeout: 30_000 }, ()
     const messages = await flagged(path, "import { violatedConstraint } from '@tinnox/db';");
     expect(messages).toHaveLength(1);
     expect(messages[0]).toMatch(CONSTRAINT_READ);
+  });
+
+  // CHK-2 (group C review): the constraint read off the error, with no import of the reader.
+  const READ_OFF_THE_ERROR =
+    /^Do not read the constraint of a database error in API source \(step 26\): add the constraint to CONSTRAINTS in packages\/db\/src\/constraints\.ts and map it in the constraints option of changeAsOperator/;
+  for (const path of API_PATHS) {
+    it.each([
+      "if (errorField(error, 'constraint') === 'folder_org_name_key') throw nameTaken();",
+      "if (error.constraint === 'tag_org_scope_name_key') throw nameTaken();",
+      "if (error['constraint'] === 'tag_org_scope_name_key') throw nameTaken();",
+      "if ('constraint' in error) report(error);",
+      // A destructured key reads the same property.
+      "const { constraint } = error; if (constraint === 'tag_org_scope_name_key') throw nameTaken();",
+      'const { constraint: name } = error as PgLike; void name;',
+      "const { ['constraint']: name } = error; void name;",
+      'function a({ constraint }: PgLike) { return constraint; }',
+    ])(`flags %s in ${path}`, async (code) => {
+      const messages = await flagged(path, code);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatch(READ_OFF_THE_ERROR);
+    });
+  }
+
+  it('leaves the classifier, the constraints option and other fields alone', async () => {
+    const code = [
+      "if (failure?.kind === 'constraint') return answers[failure.name];",
+      'const options = { constraints: FOLDER_TAKEN }; void options.constraints;',
+      "const field = errorField(error, 'code'); void field;",
+      'const c = constraint; void row[c];',
+      'const logged = { constraint: failure.name }; void logged;',
+      'const { constraints } = options; void constraints;',
+    ].join('\n');
+    expect(await flagged('apps/api/src/routes/fixture.ts', code)).toEqual([]);
   });
 
   it('leaves the classifier and the offline tools their imports', async () => {

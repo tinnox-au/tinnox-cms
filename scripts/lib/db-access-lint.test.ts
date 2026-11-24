@@ -588,7 +588,7 @@ describe('re-exports of a gated name (CHK-6)', { timeout: 30_000 }, () => {
   });
 
   const BY_NAME =
-    /^Import a name the import rules hold to a list under its own name, and @tinnox\/db, @tinnox\/db\/migrate and the entry of the jobs \(apps\/api\/src\/jobs\.ts\) by name, not as a namespace \(CHK-6\): the re-export check reads the name of what a file exports/;
+    /^Import a name the import rules hold to a list under its own name, and @tinnox\/db, @tinnox\/db\/migrate and the entry of the jobs \(apps\/api\/src\/jobs\.ts\) by name with a static import, not as a namespace and not with import\(\) \(CHK-6\): the re-export check reads the name of what a file exports, and the import rules see only a static import/;
 
   // A selector cannot follow `export { alias }` back to its import, so the alias and the
   // namespace are refused where they are made.
@@ -612,6 +612,27 @@ describe('re-exports of a gated name (CHK-6)', { timeout: 30_000 }, () => {
     ],
   ])('flags the alias or namespace in %s: %s', async (path, code) => {
     expect(await flagged(path, code, SYNTAX)).toEqual([expect.stringMatching(BY_NAME)]);
+  });
+
+  // CHK-8 (group C review): the import rules' importNames see only a static import, so a dynamic
+  // one would carry the constraint reader or poolAsTx past them.
+  it.each([
+    [
+      'apps/api/src/routes/fixture.ts',
+      "const { violatedConstraint } = await import('@tinnox/db');",
+    ],
+    ['apps/api/src/alerts.ts', 'const { poolAsTx } = await import(`@tinnox/db`);'],
+    ['apps/api/src/media/pipeline.ts', "const jobs = await import('../jobs.ts');"],
+    ['scripts/lib/provision.ts', "const { newOrgId } = await import('@tinnox/db/migrate');"],
+  ])('flags the dynamic import in %s: %s', async (path, code) => {
+    expect(await flagged(path, code, SYNTAX)).toEqual([expect.stringMatching(BY_NAME)]);
+  });
+
+  it('leaves alone a dynamic import of another module', async () => {
+    const code = "const rows = await import('./rows.ts'); void rows;";
+    for (const path of ['apps/api/src/alerts.ts', 'scripts/lib/provision.ts']) {
+      expect(await flagged(path, code, SYNTAX), path).toEqual([]);
+    }
   });
 
   it('leaves alone an alias of another name and a namespace of another module', async () => {

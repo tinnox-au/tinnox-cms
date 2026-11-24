@@ -127,8 +127,9 @@ describe('the status of an HttpError (step 28, section 2.2)', () => {
   });
 
   it('cannot be given by the caller', () => {
-    // @ts-expect-error the status comes from the code; a call site passes none
-    const error = new HttpError(403, 'not_found', 'x');
+    // @ts-expect-error the status comes from the code; a call site passes none (one cause only,
+    // CHK-9 of the group C review: 403 is not a code, and the message is a string as it should be)
+    const error = new HttpError(403, 'Not yours.');
     expect(error).toBeInstanceOf(HttpError);
   });
 

@@ -71,6 +71,10 @@ describe(
       // The provisioning script as it was.
       "if (error instanceof CommitOutcomeUnknownError) console.error('outcome unknown');",
       'const unknown = error instanceof db.CommitOutcomeUnknownError;',
+      // CHK-3 (group C review): the class under another name, and a test of its name.
+      "import { CommitOutcomeUnknownError as E } from '@tinnox/db';",
+      "import { CommitOutcomeUnknownError } from '@tinnox/db';",
+      "if (error.name === 'CommitOutcomeUnknownError') keep = true;",
     ];
     for (const path of [...API_PATHS, ...SCRIPT_PATHS, ...DB_PATHS, 'apps/api/src/errors.ts']) {
       it.each(HAND_WRITTEN)(`flags %s in ${path}`, async (code) => {
@@ -100,6 +104,8 @@ describe(
         'if (error instanceof HttpError) throw error;',
         'if (ended.error instanceof RefusedError) report(ended.error);',
         "import { settle, type CommitOutcomeUnknownError, type TxEnd } from '@tinnox/db';",
+        "import type { CommitOutcomeUnknownError } from '@tinnox/db';",
+        "const said = 'the CommitOutcomeUnknownError of a lost COMMIT';",
       ]) {
         expect(await flagged('apps/api/src/routes/fixture.ts', code), code).toEqual([]);
         expect(await flagged('scripts/provision-member.ts', code), code).toEqual([]);
@@ -117,6 +123,9 @@ describe(
       "import { classifyDbError, isCommitOutcomeUnknown } from '@tinnox/db';",
       // An alias is the same import.
       "import { isCommitOutcomeUnknown as unknownOutcome } from '@tinnox/db';",
+      // CHK-3 (group C review): a re-export under another name hands it to files that import
+      // that name.
+      "export { isCommitOutcomeUnknown as isUnknown } from '@tinnox/db';",
     ];
     for (const path of [...API_PATHS, ...SCRIPT_PATHS]) {
       it.each(IMPORTS)(`flags %s in ${path}`, async (code) => {
@@ -126,13 +135,22 @@ describe(
       });
     }
 
-    it('leaves the namespace import of @tinnox/db to the CHK-6 rule, which refuses it', async () => {
-      const code =
-        "import * as db from '@tinnox/db'; if (!db.isCommitOutcomeUnknown(error)) await discard();";
+    // The CHK-6 rule refuses the namespace and the dynamic import themselves; the name is refused
+    // where it is taken from them (CHK-3 of the group C review).
+    it.each([
+      "import * as db from '@tinnox/db'; if (!db.isCommitOutcomeUnknown(error)) await discard();",
+      "const { isCommitOutcomeUnknown: p } = await import('@tinnox/db'); if (!p(error)) await discard();",
+      "if (!(await import('@tinnox/db')).isCommitOutcomeUnknown(error)) await discard();",
+    ])('flags the name taken from a namespace or a dynamic import: %s', async (code) => {
       for (const path of [...API_PATHS, ...SCRIPT_PATHS]) {
         const messages = await flagged(path, code);
-        expect(messages, path).toHaveLength(1);
-        expect(messages[0], path).toMatch(/not as a namespace \(CHK-6\)/);
+        expect(messages, path).toHaveLength(2);
+        expect(messages, path).toEqual(
+          expect.arrayContaining([
+            expect.stringMatching(/not as a namespace and not with import\(\) \(CHK-6\)/),
+            expect.stringMatching(PREDICATE),
+          ]),
+        );
       }
     });
 

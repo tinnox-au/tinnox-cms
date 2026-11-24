@@ -1,6 +1,7 @@
 // The step 28 rules of eslint.config.js (adoption plan section 2.2 item 4, D1, D20), run against
 // fixture text: no API file outside the three of API_403_BUILDERS (all in apps/api/src/auth/)
-// builds a 403, and a route file imports no role refusal, except the two files of
+// builds a 403, no API file sets an error status on the reply, and no API file outside
+// apps/api/src/auth/ imports a role refusal, except the two route files of
 // ROUTE_REFUSAL_IMPORTERS, each for its one refusal. Each case takes the rules
 // eslint.config.js resolves for a real path, so the file globs are tested with the selectors: a
 // later block that took the rule away from a route file, or the API's list from one, fails here.
@@ -35,9 +36,16 @@ async function flagged(path: string, code: string): Promise<string[]> {
 
 const ROUTE_403 =
   /^Only apps\/api\/src\/auth\/ builds a 403 \(step 28, D1\): .*found\(row, 'The thing'\)/;
-const ROLE_REFUSAL = /^A route file does not refuse by role itself \(step 28, D20\): /;
+const ROLE_REFUSAL =
+  /^An API file outside apps\/api\/src\/auth\/ does not refuse by role itself \(step 28, D20\): /;
 const BY_NAME =
-  /^A route file imports apps\/api\/src\/auth\/permissions\.ts by name \(step 28, D20\): /;
+  /^An API file outside apps\/api\/src\/auth\/ imports apps\/api\/src\/auth\/permissions\.ts by name \(step 28, D20\): /;
+const ALIAS =
+  /^Import and re-export HttpError under its own name \(step 28, D1\): import \{ HttpError \} from '\.\.\/errors\.ts'/;
+const NO_CONSTRUCTOR =
+  /^Give a subclass of HttpError a constructor that calls super\(code, message\) \(step 28, D1\), so the lint can read its code; RefusedConflict in apps\/api\/src\/routes\/members\.ts is one\. Only apps\/api\/src\/auth\/ builds a 403/;
+const REPLY_STATUS =
+  /^Do not set an error status on the reply \(SEC-5 of the group C review\): throw new HttpError\(code, message\) from apps\/api\/src\/errors\.ts/;
 const SQLSTATE = /^Do not read a SQLSTATE code here \(step 26\)/;
 
 // The codes the rule refuses come from STATUS_OF, as the config reads them.
@@ -60,6 +68,18 @@ const API_PATHS = [
   'apps/api/src/media/fixture.ts',
   'apps/api/src/errors.ts',
   'apps/api/src/auth/fixture.ts',
+] as const;
+// SEC-2 (group C review): every API file outside auth/ refuses an import of the role refusals,
+// whichever block sets its list: a route file, a module a route calls (D6: tags.ts), the files
+// excused from another rule (errors.ts, config.ts), an entry point and a reviewed client.
+const IMPORT_BAN_PATHS = [
+  ...ROUTE_PATHS,
+  'apps/api/src/tags.ts',
+  'apps/api/src/media/fixture.ts',
+  'apps/api/src/errors.ts',
+  'apps/api/src/config.ts',
+  'apps/api/src/main.ts',
+  'apps/api/src/mail.ts',
 ] as const;
 
 const importOf = (name: string): string =>
@@ -91,6 +111,11 @@ describe(
       it.each([
         // A template literal with no substitution is the same code.
         'throw new HttpError(`forbidden`, `No.`);',
+        // CHK-1 (group C review): the code under `as` or `satisfies`, and a 403 by statusCode.
+        "throw new HttpError('forbidden' as const, 'No.');",
+        "throw new HttpError('csrf_failed' satisfies ApiErrorCode, 'No.');",
+        "class Refusal extends HttpError { constructor() { super('url_expired' as const, 'No.'); } }",
+        'throw Object.assign(new Error(), { statusCode: 403 });',
         "class Refusal extends HttpError { constructor() { super('url_expired', 'No.'); } }",
         'class Refusal extends HttpError { constructor() { super(`url_expired`, `No.`); } }',
         "export const Refusal = class extends HttpError { constructor() { super('forbidden', 'No.'); } };",
@@ -109,6 +134,33 @@ describe(
       });
     }
 
+    for (const path of API_PATHS) {
+      it.each([
+        "import { HttpError as E } from '../errors.ts';\nthrow new E('forbidden', 'No.');",
+        // A re-export under another name, which another file imports by that name.
+        "export { HttpError as Answer } from '../errors.ts';",
+        "export { HttpError as 'Answer' } from '../errors.ts';",
+        // A default export, which the importer names as it likes (`import Answer from`).
+        "import { HttpError } from '../errors.ts';\nexport default HttpError;",
+        "export { HttpError as default } from '../errors.ts';",
+      ])(`flags HttpError under another name, %s, in ${path}`, async (code) => {
+        const messages = await flagged(path, code);
+        expect(messages).toHaveLength(1);
+        expect(messages[0]).toMatch(ALIAS);
+      });
+
+      // A subclass with no constructor inherits HttpError's, so `new Refusal('forbidden', ...)`
+      // passes the code to no super() the lint can read.
+      it.each([
+        "class Refusal extends HttpError {}\nthrow new Refusal('forbidden', 'Not yours.');",
+        'export const Refusal = class extends HttpError { readonly extra = 1; };',
+      ])(`flags a subclass of HttpError with no constructor, %s, in ${path}`, async (code) => {
+        const messages = await flagged(path, code);
+        expect(messages).toHaveLength(1);
+        expect(messages[0]).toMatch(NO_CONSTRUCTOR);
+      });
+    }
+
     it.each(OTHER_CODES)("leaves new HttpError('%s') alone in a route file", async (code) => {
       expect(
         await flagged('apps/api/src/routes/fixture.ts', `throw new HttpError('${code}', 'No.');`),
@@ -119,6 +171,13 @@ describe(
       const code = [
         'throw new HttpError(`${code}`, `No.`);',
         'export const n = STATUS_OF.forbidden + counts.forbidden;',
+        "throw new HttpError('not_found' as const, 'No.');",
+        'export const s = { statusCode: reply.statusCode };',
+        "import { HttpError } from '../errors.ts';",
+        "export { HttpError } from '../errors.ts';",
+        'export default routes;',
+        "class Conflict extends HttpError { constructor() { super('conflict', 'No.'); } }",
+        'class Other extends Error {}',
       ].join('\n');
       expect(await flagged('apps/api/src/routes/fixture.ts', code)).toEqual([]);
     });
@@ -138,13 +197,55 @@ describe(
   },
 );
 
-describe('no role refusal imported into a route file (step 28, D20)', { timeout: 30_000 }, () => {
+// SEC-5 (group C review): an answer whose status is set on the reply bypasses HttpError, so
+// nothing ties its status to its code. Every API file, auth/ and the handler included.
+describe('no error status set on the reply (SEC-5)', { timeout: 30_000 }, () => {
+  for (const path of [
+    ...API_PATHS,
+    'apps/api/src/auth/permissions.ts',
+    'apps/api/src/auth/session.ts',
+    'apps/api/src/main.ts',
+  ]) {
+    it.each([
+      "return reply.code(403).send(apiError('forbidden', 'Not yours.'));",
+      "return reply.status(404).send(apiError('not_found', 'x'));",
+      'void reply.code(503);',
+      // The status under `as` or `satisfies`, and one assigned to statusCode.
+      'void reply.code(403 as const);',
+      'void reply.status(404 satisfies number);',
+      'reply.statusCode = 403;',
+      'reply.statusCode = 500 as const;',
+    ])(`flags %s in ${path}`, async (code) => {
+      const messages = await flagged(path, code);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatch(REPLY_STATUS);
+    });
+  }
+
+  it('leaves a success, a redirect, a computed status and the handler alone', async () => {
+    const code = [
+      'void reply.code(201);',
+      'return reply.code(204).send();',
+      'return reply.code(304).send();',
+      "void reply.code(ready ? 200 : 503).header('cache-control', 'no-store');",
+      'return reply.code(statusCode).send(body);',
+      'void reply.code(201 as const);',
+      'reply.statusCode = 200;',
+      'this.statusCode = STATUS_OF[code];',
+    ].join('\n');
+    for (const path of ['apps/api/src/routes/fixture.ts', 'apps/api/src/errors.ts']) {
+      expect(await flagged(path, code), path).toEqual([]);
+    }
+  });
+});
+
+describe('no role refusal imported outside auth/ (step 28, D20)', { timeout: 30_000 }, () => {
   const ALLOWED: Readonly<Record<string, string>> = {
     'apps/api/src/routes/members.ts': 'PermissionDeniedError',
     'apps/api/src/routes/audit.ts': 'forbidden',
   };
 
-  for (const path of ROUTE_PATHS) {
+  for (const path of IMPORT_BAN_PATHS) {
     it.each(['forbidden', 'requirePermission', 'PermissionDeniedError'])(
       `flags %s in ${path} unless the file is named for it`,
       async (name) => {
@@ -167,13 +268,16 @@ describe('no role refusal imported into a route file (step 28, D20)', { timeout:
   });
 
   // A name taken from a namespace, an `export *` or a dynamic import is not seen, so the import
-  // itself is refused, in every route file, the two named ones included.
-  for (const path of ROUTE_PATHS) {
+  // itself is refused, in every API file outside auth/, the two named route files included.
+  for (const path of IMPORT_BAN_PATHS) {
     it.each([
       "import * as permissions from '../auth/permissions.ts';\nthrow permissions.forbidden();",
       "export * from '../auth/permissions.ts';",
       "const { forbidden: f } = await import('../auth/permissions.ts');\nthrow f();",
       "const p = await import('./auth/permissions');",
+      // CHK-5 (group C review): NodeNext resolves the .js spelling to the .ts file.
+      "import * as permissions from '../auth/permissions.js';\nthrow permissions.forbidden();",
+      "export * from '../auth/permissions.mjs';",
     ])(`flags %s in ${path}`, async (code) => {
       const messages = await flagged(path, code);
       expect(messages).toHaveLength(1);
@@ -185,6 +289,21 @@ describe('no role refusal imported into a route file (step 28, D20)', { timeout:
     const code =
       "import { changeAsOperator, parseRole, type ConstraintAnswers } from '../auth/permissions.ts';";
     expect(await flagged('apps/api/src/routes/fixture.ts', code)).toEqual([]);
+    expect(await flagged('apps/api/src/tags.ts', code)).toEqual([]);
+  });
+
+  // auth/ defines the refusals and the guard that uses them: its files, whichever block sets
+  // their list (a 403 builder, a reviewed client, any other), may import them.
+  it.each([
+    'apps/api/src/auth/fixture.ts',
+    'apps/api/src/auth/permission-audit.ts',
+    'apps/api/src/auth/permissions.ts',
+    'apps/api/src/auth/oidc.ts',
+  ])('leaves an import of the role refusals alone in %s', async (path) => {
+    for (const name of ['forbidden', 'requirePermission', 'PermissionDeniedError']) {
+      expect(await flagged(path, importOf(name)), name).toEqual([]);
+    }
+    expect(await flagged(path, "import * as permissions from './permissions.ts';")).toEqual([]);
   });
 
   // Each entry of ROUTE_REFUSAL_IMPORTERS is still needed, and is all the file needs: its own

@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   addMember,
   appClient,
+  asMigratorIn,
   checkAlerts,
   createDisplay,
   createLayout,
@@ -1202,9 +1203,18 @@ describe('organisation isolation through the API', () => {
             `${what}: another organisation's id answered ${JSON.stringify(real)}, an unknown id ${JSON.stringify(none)}`,
           );
         }
-        const error = (real.body as { error?: { code?: string; details?: Detail[] } }).error;
+        const error = (
+          real.body as {
+            error?: { code?: string; message?: string; details?: Detail[] };
+          }
+        ).error;
         if (real.status !== ERROR_STATUS[code] || error?.code !== code) {
           wrong.push(`${what}: answered ${real.status} ${String(error?.code)}, expected ${code}`);
+        }
+        // A path that matches no route answers the same 404 for both ids, and tests nothing
+        // (CHK-6 of the group C review): the not-found handler's message (apps/api/src/errors.ts).
+        if (error?.message === 'There is nothing at this address.') {
+          wrong.push(`${what}: reached no route`);
         }
         if (details !== undefined) {
           // Each expected detail names the keys it checks; the answer carries those and no more.
@@ -1222,11 +1232,25 @@ describe('organisation isolation through the API', () => {
     expect(wrong).toEqual([]);
     expect(probed).toBeGreaterThan(60);
 
-    // Nothing of A's was changed by the probes, and A's pairing is still waiting for its player.
+    // A's display and player still answer. The one probe that changes something of A's is B's
+    // poll of A's claimed pairing with its own polling token: a counted wrong attempt
+    // (routes/player.ts), one of the five before a lock, so A's pairing is still waiting for its
+    // player (SEC-6 of the group C review).
     expect((await alice.fetch(`/api/displays/${a.displayId}`)).status).toBe(200);
     expect((await fetch(`${t.url}/player/manifest`, { headers: a.player.headers })).status).toBe(
       200,
     );
+    let pairing: unknown;
+    await asMigratorIn(orgA.orgId, async (client) => {
+      // Pairing sessions are read before the organisation is known, by sec.* only.
+      await client.query('SET LOCAL ROLE tinnox_definer');
+      const { rows } = await client.query(
+        'SELECT status, failed_attempts FROM pairing_session WHERE id = $1',
+        [claimedByA.pairingId],
+      );
+      pairing = rows[0];
+    });
+    expect(pairing).toEqual({ status: 'claimed', failed_attempts: 1 });
   });
 
   it('holds at the database: the runtime role sees nothing without a context and only its own rows with one', async () => {

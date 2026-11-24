@@ -73,22 +73,39 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
   const { db, config } = ctx;
   const limits = config.limits;
 
-  /** The audit row of an upload refused before any row was written, in its own transaction. */
+  /**
+   * The audit row of an upload refused before any row was written, in its own transaction. A
+   * COMMIT of the row that did not confirm is logged and the caller's refusal stands, as the
+   * guards' refusal rows do (auth/permission-audit.ts): nothing of the upload can have been
+   * saved, and answering `commit_outcome_unknown` would say it may have been. A rollback is
+   * rethrown, as before.
+   */
   async function recordUploadRefusal(
     request: FastifyRequest,
     session: OperatorSession,
     result: 'failure' | 'denied',
     detail: UploadRefusal,
   ): Promise<void> {
-    await recordRefusal(ctx, request, session, {
-      actorType: 'operator',
-      actorId: session.membershipId,
-      action: 'media.upload',
-      objectType: 'media',
-      objectId: null,
-      result,
-      detail,
-    });
+    const ended = await settle(
+      recordRefusal(ctx, request, session, {
+        actorType: 'operator',
+        actorId: session.membershipId,
+        action: 'media.upload',
+        objectType: 'media',
+        objectId: null,
+        result,
+        detail,
+      }),
+    );
+    switch (ended.end) {
+      case 'committed':
+        return;
+      case 'rolled_back':
+        throw ended.error;
+      case 'unknown':
+        request.log.error({ err: ended.unconfirmed }, 'failed to record upload refusal');
+        return;
+    }
   }
 
   app.get(ROUTES.media, async (request): Promise<MediaListResponse> => {
