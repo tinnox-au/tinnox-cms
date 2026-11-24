@@ -24,18 +24,8 @@
  *     with it only leaves the media without a thumbnail.
  */
 import { createHash, randomUUID } from 'node:crypto';
-import { constants as fsConstants, createWriteStream } from 'node:fs';
-import {
-  chmod,
-  lstat,
-  mkdir,
-  open,
-  readdir,
-  rename,
-  rm,
-  unlink,
-  writeFile,
-} from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { lstat, open, readdir, rename, rm, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Transform, type Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -62,6 +52,13 @@ import {
 } from '@tinnox/db';
 import { newObjectKey, type ObjectStorage } from '@tinnox/storage';
 import { changeAsJob } from '../jobs.ts';
+import {
+  createExchangeWriteStream,
+  makeExchangeDir,
+  publishExchangeFile,
+  shareExchangeFile,
+  writeExchangeFile,
+} from './exchange-file.ts';
 import { SNIFF_BYTES, sniffMediaType } from './sniff.ts';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -186,11 +183,8 @@ export class MediaPipeline {
 
   /** Creates the exchange directories. The worker (another uid) reads inbox and writes outbox. */
   async prepare(): Promise<void> {
-    await mkdir(this.#inbox, { recursive: true, mode: 0o755 });
-    await mkdir(this.#outbox, { recursive: true, mode: 0o1777 });
-    // mkdir's mode is reduced by the umask; set the intended modes explicitly.
-    await chmod(this.#inbox, 0o755);
-    await chmod(this.#outbox, 0o1777);
+    await makeExchangeDir(this.#inbox, 0o755);
+    await makeExchangeDir(this.#outbox, 0o1777);
     this.#startedAt = this.#now();
   }
 
@@ -263,7 +257,7 @@ export class MediaPipeline {
       meter.destroy(new Error('upload exceeds the byte limit'));
     });
     try {
-      await pipeline(source, meter, createWriteStream(partPath, { flags: 'wx', mode: 0o644 }));
+      await pipeline(source, meter, createExchangeWriteStream(partPath));
     } catch (error) {
       await removeIfPresent(partPath).catch(() => undefined);
       this.#inFlight.delete(jobId);
@@ -301,7 +295,7 @@ export class MediaPipeline {
     const bytesPath = this.#path(this.#inbox, jobId);
     const partPath = this.#path(this.#inbox, jobId, '.part');
     if (await exists(partPath)) await rename(partPath, bytesPath);
-    await chmod(bytesPath, 0o644);
+    await shareExchangeFile(bytesPath);
     const spec: MediaJobSpec = {
       schemaVersion: 1,
       jobId,
@@ -317,10 +311,7 @@ export class MediaPipeline {
     };
     const specPath = this.#path(this.#inbox, jobId, '.json');
     const tempPath = `${specPath}.tmp`;
-    await writeFile(tempPath, JSON.stringify(spec), { mode: 0o644, flag: 'w' });
-    // writeFile's mode is reduced by the umask; the worker (another uid) must be able to read it.
-    await chmod(tempPath, 0o644);
-    await rename(tempPath, specPath);
+    await publishExchangeFile(tempPath, specPath, JSON.stringify(spec));
     this.#inFlight.delete(jobId);
   }
 
@@ -337,7 +328,7 @@ export class MediaPipeline {
   /** Verifies the exchange directories are usable (for /readyz). */
   async check(): Promise<void> {
     const probe = join(this.#inbox, `.probe-${randomUUID()}`);
-    await writeFile(probe, '', { flag: 'wx', mode: 0o600 });
+    await writeExchangeFile(probe, '', { exclusive: true, private: true });
     await unlink(probe);
     const info = await lstat(this.#outbox);
     if (!info.isDirectory()) throw new Error('outbox is not a directory');

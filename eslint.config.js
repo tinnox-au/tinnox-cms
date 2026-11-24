@@ -1798,6 +1798,23 @@ export default tseslint.config(
     },
   })),
   {
+    // CU-02: the job directory is a contract between two uids, so what is written there gets its
+    // mode from the exchange-file helpers, not from a `mode` option the umask reduces
+    // (scripts/eslint-rules/exchange-files.ts). The API's media folder and the media worker; the
+    // two helpers are the one place that writes. A rule of its own, so no other block replaces
+    // its options.
+    files: ['apps/api/src/media/**/*.ts', 'apps/media-worker/src/**/*.ts'],
+    ignores: [
+      ...TEST_FILES,
+      'apps/api/src/media/exchange-file.ts',
+      'apps/media-worker/src/exchange-file.ts',
+    ],
+    plugins: { tinnox },
+    rules: {
+      'tinnox/exchange-files': 'error',
+    },
+  },
+  {
     // AG-3.1, SCR-34 (adoption plan steps 19 and 20): no legacy transaction API in the API's
     // source and the offline tools, with no file excepted
     // (scripts/eslint-rules/no-legacy-transaction.ts). packages/db/src builds the new API on it,

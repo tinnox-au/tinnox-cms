@@ -17,11 +17,12 @@
  * worker twice is rejected instead of being tried again in a loop (attempts.ts).
  */
 import { constants as fsConstants } from 'node:fs';
-import { lstat, open, readdir, rename, utimes, writeFile } from 'node:fs/promises';
+import { lstat, open, readdir, utimes } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { MediaJobSpecSchema, type MediaJobResult } from '@tinnox/contracts';
 import { decideAttempt } from './attempts.ts';
+import { publishExchangeFile, writeExchangeFile } from './exchange-file.ts';
 import { inspectFile, type Inspection } from './inspect.ts';
 
 const JOB_FILE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.json$/;
@@ -53,16 +54,14 @@ async function isFile(path: string): Promise<boolean> {
 async function writeResult(result: MediaJobResult): Promise<void> {
   const finalPath = join(outbox, `${result.jobId}.json`);
   const tempPath = join(outbox, `.${result.jobId}.tmp`);
-  await writeFile(tempPath, JSON.stringify(result), { mode: 0o644, flag: 'w' });
-  await rename(tempPath, finalPath);
+  await publishExchangeFile(tempPath, finalPath, JSON.stringify(result));
 }
 
 /** Best effort: a missing thumbnail never fails the media; the API serves the original. */
 async function writeThumbnail(jobId: string, thumbnail: Buffer): Promise<boolean> {
   const tempPath = join(outbox, `${jobId}.thumb.tmp`);
   try {
-    await writeFile(tempPath, thumbnail, { mode: 0o644, flag: 'w' });
-    await rename(tempPath, join(outbox, `${jobId}.thumb.jpg`));
+    await publishExchangeFile(tempPath, join(outbox, `${jobId}.thumb.jpg`), thumbnail);
     return true;
   } catch (error) {
     log('thumbnail_write_failed', {
@@ -182,7 +181,7 @@ async function processJob(jobId: string): Promise<void> {
   const limits = spec.data.limits;
   const timeoutMs = Math.min(limits.timeoutMs, MAX_TIMEOUT_MS);
 
-  await writeFile(marker, String(decision.attempt), { mode: 0o644, flag: 'w' });
+  await writeExchangeFile(marker, String(decision.attempt));
 
   let timer: NodeJS.Timeout | undefined;
   const timedOut = new Promise<'timeout'>((resolve) => {
@@ -265,7 +264,7 @@ async function touchAlive(): Promise<void> {
   try {
     await utimes(path, now, now);
   } catch {
-    await writeFile(path, '', { mode: 0o644, flag: 'w' });
+    await writeExchangeFile(path, '');
   }
 }
 

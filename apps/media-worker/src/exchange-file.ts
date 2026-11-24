@@ -1,0 +1,27 @@
+// CU-02: the job directory is a contract between two uids (the API and this worker), and the
+// mode a file gets there must not depend on the container's umask: writeFile's `mode` is
+// reduced by it, so each helper here sets the mode again with chmod. Every file the worker
+// writes in the job directory goes through this file, and tinnox/exchange-files refuses a
+// `mode` option or a direct write anywhere else in apps/media-worker/src. The API has its own
+// copy (apps/api/src/media/exchange-file.ts): the two cannot share code.
+import { chmod, rename, writeFile } from 'node:fs/promises';
+
+/** What the API needs to read a file: the worker writes, everybody reads. */
+export const EXCHANGE_FILE_MODE = 0o644;
+
+/** Temp file, explicit mode, then rename: the API sees either no file or a complete one. */
+export async function publishExchangeFile(
+  tempPath: string,
+  finalPath: string,
+  data: string | Buffer,
+): Promise<void> {
+  await writeFile(tempPath, data, { mode: EXCHANGE_FILE_MODE, flag: 'w' });
+  await chmod(tempPath, EXCHANGE_FILE_MODE);
+  await rename(tempPath, finalPath);
+}
+
+/** A file written in place, with no rename (the attempt marker and the liveness file). */
+export async function writeExchangeFile(path: string, data: string | Buffer): Promise<void> {
+  await writeFile(path, data, { mode: EXCHANGE_FILE_MODE, flag: 'w' });
+  await chmod(path, EXCHANGE_FILE_MODE);
+}
