@@ -12,11 +12,9 @@ import {
   readRuntimeRole,
   RuntimeRoleError,
   runtimeRoleProblems,
-  withOrg,
-  withoutOrg,
-  withResolvedOrg,
   type Pool,
 } from '../src/index.ts';
+import { withOrg, withoutOrg, withResolvedOrg } from '../src/testing.ts';
 import {
   actingAs,
   appPool,
@@ -27,6 +25,8 @@ import {
   pgCode,
   pgViolation,
   superuserUrl,
+  testOrgId,
+  withNoOrgSet,
   type TestOrg,
 } from './support.ts';
 
@@ -86,7 +86,7 @@ let a: TestOrg;
 let b: TestOrg;
 
 beforeAll(async () => {
-  pool = appPool();
+  pool = appPool('tries row-level security and grants as the runtime role');
   migrator = await migratorClient();
   a = await createOrg(migrator, 'Org A');
   b = await createOrg(migrator, 'Org B');
@@ -224,7 +224,7 @@ describe('the runtime role itself', () => {
         await plain.end();
       }
       // ...but the API's pool sets its own values when it connects, and they win.
-      const fresh = appPool(1);
+      const fresh = appPool('tries row-level security and grants as the runtime role', 1);
       try {
         const { rows } = await fresh.query<Record<string, string>>(
           `SELECT current_setting('statement_timeout') AS statement,
@@ -256,7 +256,7 @@ describe('the runtime role itself', () => {
 describe('createPool serves tinnox_app only (AG-1.2)', () => {
   // The refusal must also say what to use instead (plan section 3.4), not only what it found.
   const REFUSED =
-    /createPool serves role tinnox_app only, but the connection logs in as .+; use the tinnox_app connection string \(DATABASE_URL\) without a role setting, and connectMigrator \(@tinnox\/db\) for an offline tool that needs tinnox_migrator/;
+    /createPool serves role tinnox_app only, but the connection logs in as .+; use the tinnox_app connection string \(DATABASE_URL\) without a role setting, and connectMigrator \(@tinnox\/db\/migrate\) for an offline tool that needs tinnox_migrator/;
   // pg takes ?user= and ?password= over the URL's username, so this URL names tinnox_app,
   // passes the start-up check assertConnectionRole (which reads the username only), and still
   // logs in as the migrator. This check is what refuses it, also inside assertRuntimeRole.
@@ -278,7 +278,7 @@ describe('createPool serves tinnox_app only (AG-1.2)', () => {
   ];
 
   it('hands out connections that log in and act as tinnox_app', async () => {
-    const fresh = appPool(3);
+    const fresh = appPool('tries row-level security and grants as the runtime role', 3);
     const clients = await Promise.all([fresh.connect(), fresh.connect(), fresh.connect()]);
     try {
       for (const client of clients) {
@@ -506,7 +506,8 @@ describe('with no organisation context', () => {
       expect(await count(pool, table), table).toBe(0);
     }
     await withoutOrg(pool, async (tx) => {
-      for (const table of TENANT_TABLES) expect(await count(tx as never, table), table).toBe(0);
+      const raw = withNoOrgSet(tx);
+      for (const table of TENANT_TABLES) expect(await count(raw, table), table).toBe(0);
     });
   });
 
@@ -530,19 +531,26 @@ describe('with no organisation context', () => {
   });
 
   it('treats an empty or malformed context as no access', async () => {
+    // A PreOrgTx takes no statement of the caller's own; withNoOrgSet is the tests' way in.
     await withoutOrg(pool, async (tx) => {
-      await tx.query("SELECT set_config('app.org_id', '', true)");
-      expect(await count(tx as never, 'media')).toBe(0);
+      const raw = withNoOrgSet(tx);
+      await raw.query("SELECT set_config('app.org_id', '', true)");
+      expect(await count(raw, 'media')).toBe(0);
     });
     const malformed = withoutOrg(pool, async (tx) => {
-      await tx.query("SELECT set_config('app.org_id', 'not-a-uuid', true)");
-      await tx.query('SELECT * FROM media');
+      const raw = withNoOrgSet(tx);
+      await raw.query("SELECT set_config('app.org_id', 'not-a-uuid', true)");
+      await raw.query('SELECT * FROM media');
     });
     expect(await pgCode(malformed)).toBe(PG.invalidText);
-    await expect(withOrg(pool, "x' OR '1'='1", async () => undefined)).rejects.toThrow(/UUID/);
-    await expect(withOrg(pool, a.orgId.toUpperCase(), async () => undefined)).rejects.toThrow(
+    // The type already refuses a plain string; the check at run time is for a value that got
+    // the type without being an organisation's id.
+    await expect(withOrg(pool, testOrgId("x' OR '1'='1"), async () => undefined)).rejects.toThrow(
       /UUID/,
     );
+    await expect(
+      withOrg(pool, testOrgId(a.orgId.toUpperCase()), async () => undefined),
+    ).rejects.toThrow(/UUID/);
   });
 });
 
@@ -550,7 +558,7 @@ describe('with organisation A as context', () => {
   it('sees exactly its own rows in every tenant table', async () => {
     await withOrg(pool, a.orgId, async (tx) => {
       for (const table of TENANT_TABLES) {
-        expect(await count(tx as never, table), table).toBe(ROWS_PER_ORG[table] ?? 1);
+        expect(await count(tx, table), table).toBe(ROWS_PER_ORG[table] ?? 1);
       }
       const org = await tx.query<{ id: string }>('SELECT id FROM organization');
       expect(org.rows).toEqual([{ id: a.orgId }]);
@@ -1012,10 +1020,10 @@ describe('with organisation A as context', () => {
 
 describe('transaction-scoped context on pooled connections', () => {
   it('does not leak to the next user of the same connection', async () => {
-    const single = appPool(1);
+    const single = appPool('tries row-level security and grants as the runtime role', 1);
     try {
       const pidInside = await withOrg(single, a.orgId, async (tx) => {
-        expect(await count(tx as never, 'media')).toBe(1);
+        expect(await count(tx, 'media')).toBe(1);
         return (await tx.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]?.pid;
       });
       const after = await single.query<{ pid: number; setting: string | null; n: string }>(
@@ -1034,7 +1042,7 @@ describe('transaction-scoped context on pooled connections', () => {
   });
 
   it('rolls back and clears the context when the work throws', async () => {
-    const single = appPool(1);
+    const single = appPool('tries row-level security and grants as the runtime role', 1);
     try {
       const name = `rollback-${randomUUID()}`;
       await expect(
@@ -1053,7 +1061,7 @@ describe('transaction-scoped context on pooled connections', () => {
   });
 
   it('replaces a connection that was lost in the middle of a transaction', async () => {
-    const single = appPool(1);
+    const single = appPool('tries row-level security and grants as the runtime role', 1);
     try {
       let lost: number | undefined;
       await expect(
@@ -1076,21 +1084,21 @@ describe('transaction-scoped context on pooled connections', () => {
   });
 
   it('enters an organisation part-way through a transaction, and only for that transaction', async () => {
-    const single = appPool(1);
+    const single = appPool('tries row-level security and grants as the runtime role', 1);
     try {
       await withResolvedOrg(single, async (tx, enterOrg) => {
-        expect(await count(tx as never, 'media')).toBe(0);
-        await enterOrg(a.orgId);
-        const ids = await tx.query<{ id: string }>('SELECT id FROM media');
+        expect(await count(withNoOrgSet(tx), 'media')).toBe(0);
+        const inOrg = await enterOrg(a.orgId);
+        const ids = await inOrg.query<{ id: string }>('SELECT id FROM media');
         expect(ids.rows).toEqual([{ id: a.mediaId }]);
       });
       expect(await count(single, 'media')).toBe(0);
       // A failure after entering rolls back what was written before and after it.
       const name = `resolved-${randomUUID()}`;
       await expect(
-        withResolvedOrg(single, async (tx, enterOrg) => {
-          await enterOrg(a.orgId);
-          await tx.query('INSERT INTO playlist (org_id, name) VALUES ($1, $2)', [a.orgId, name]);
+        withResolvedOrg(single, async (_tx, enterOrg) => {
+          const inOrg = await enterOrg(a.orgId);
+          await inOrg.query('INSERT INTO playlist (org_id, name) VALUES ($1, $2)', [a.orgId, name]);
           throw new Error('boom');
         }),
       ).rejects.toThrow('boom');
@@ -1098,7 +1106,7 @@ describe('transaction-scoped context on pooled connections', () => {
         expect((await tx.query('SELECT 1 FROM playlist WHERE name = $1', [name])).rowCount).toBe(0);
       });
       await expect(
-        withResolvedOrg(single, (_tx, enterOrg) => enterOrg("x' OR '1'='1")),
+        withResolvedOrg(single, (_tx, enterOrg) => enterOrg(testOrgId("x' OR '1'='1"))),
       ).rejects.toThrow(/UUID/);
     } finally {
       await single.end();
@@ -1178,7 +1186,7 @@ describe('immutable publications and append-only audit', () => {
         "INSERT INTO audit_event (org_id, actor_type, actor_id, action, result, detail) VALUES ($1, 'operator', $2, 'media.upload', 'success', $3)",
         [a.orgId, a.membershipId, JSON.stringify({ bytes: 10 })],
       );
-      expect(await count(tx as never, 'audit_event')).toBe(2);
+      expect(await count(tx, 'audit_event')).toBe(2);
     });
     for (const sql of [
       "UPDATE audit_event SET result = 'failure'",

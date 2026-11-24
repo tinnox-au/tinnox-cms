@@ -2,7 +2,10 @@
  * The organisation's alert addresses (CMS-15, docs/portal-v2/stage-c-alerts.md section 4). The
  * list routes need `alerts.manage` (Admin and up): the list holds personal data. The confirm
  * route is public: the link is opened by the address's owner, who has no session.
- * Audit rows carry the recipient id, never the address.
+ * Audit rows carry the recipient id, never the address. The list runs inside readOrg and the
+ * two writes inside changeAsOperator, which checks the member's role again first; the
+ * confirmation learns its organisation from the token, inside changePreOrg. Each change returns
+ * its audit event, and the wrapper writes it on the change's transaction.
  */
 import {
   ALERT_CONFIRM_TTL_DAYS,
@@ -15,20 +18,15 @@ import {
   type AlertRecipientDto,
   type AlertRecipientListResponse,
 } from '@tinnox/contracts';
-import {
-  alertRecipientByTokenHash,
-  auditScoped,
-  sha256,
-  withOrg,
-  withResolvedOrg,
-} from '@tinnox/db';
+import { alertRecipientByTokenHash, changePreOrg, readOrg, sha256, unaudited } from '@tinnox/db';
 import type { FastifyInstance } from 'fastify';
 import { confirmationEmail, mailErrorCode } from '../alerts.ts';
-import { lockTimeoutAsUnavailable, withOrgAllowed } from '../auth/permissions.ts';
+import { changeAsOperator, lockTimeoutAsUnavailable } from '../auth/permissions.ts';
 import { operatorOf } from '../auth/session.ts';
 import { perMinute, type AppContext } from '../context.ts';
 import { iso } from '../db-helpers.ts';
 import { HttpError, notFound, parseInput } from '../errors.ts';
+import { routeStatement } from '../route-audit.ts';
 import { randomToken } from '../security.ts';
 
 interface RecipientRow {
@@ -76,7 +74,7 @@ export function registerAlertRecipientRoutes(app: FastifyInstance, ctx: AppConte
 
   app.get(ROUTES.alertRecipients, async (request): Promise<AlertRecipientListResponse> => {
     const session = operatorOf(request);
-    return withOrg(ctx.pool, session.orgId, async (tx) => {
+    return readOrg(ctx.pool, session.orgId, async (tx) => {
       const { rows } = await tx.query<RecipientRow>(
         `SELECT ${RECIPIENT_COLUMNS} FROM alert_recipient
          WHERE org_id = app_org_id() ORDER BY created_at, id LIMIT $1`,
@@ -101,7 +99,7 @@ export function registerAlertRecipientRoutes(app: FastifyInstance, ctx: AppConte
         );
       }
       const token = randomToken();
-      const { recipient, orgName } = await withOrgAllowed(ctx, request, async (tx) => {
+      const { recipient, orgName } = await changeAsOperator(ctx, request, async (tx) => {
         // Serialises additions per organisation, so the count and the duplicate check hold.
         await tx.query(
           "SELECT pg_advisory_xact_lock(hashtextextended('tinnox.alert_recipient_count:' || app_org_id()::text, 0))",
@@ -131,19 +129,21 @@ export function registerAlertRecipientRoutes(app: FastifyInstance, ctx: AppConte
         );
         const row = inserted.rows[0];
         if (row === undefined) throw new Error('alert recipient insert returned no row');
-        await auditScoped(tx, {
-          actorType: 'operator',
-          actorId: session.membershipId,
-          action: 'alert_recipient.add',
-          objectType: 'alert_recipient',
-          objectId: row.id,
-          result: 'success',
-          detail: null,
-        });
         const org = await tx.query<{ name: string }>(
           'SELECT name FROM organization WHERE id = app_org_id()',
         );
-        return { recipient: toDto(row), orgName: org.rows[0]?.name ?? '' };
+        return {
+          value: { recipient: toDto(row), orgName: org.rows[0]?.name ?? '' },
+          audit: {
+            actorType: 'operator',
+            actorId: session.membershipId,
+            action: 'alert_recipient.add',
+            objectType: 'alert_recipient',
+            objectId: row.id,
+            result: 'success',
+            detail: null,
+          },
+        };
       });
       try {
         await mail.send({
@@ -166,21 +166,24 @@ export function registerAlertRecipientRoutes(app: FastifyInstance, ctx: AppConte
   app.delete(ROUTES.alertRecipientPattern, writeLimit, async (request, reply) => {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
-    await withOrgAllowed(ctx, request, async (tx) => {
+    await changeAsOperator(ctx, request, async (tx) => {
       const deleted = await tx.query(
         'DELETE FROM alert_recipient WHERE id = $1 AND org_id = app_org_id() RETURNING id',
         [id],
       );
       if (deleted.rowCount !== 1) throw notFound('The address');
-      await auditScoped(tx, {
-        actorType: 'operator',
-        actorId: session.membershipId,
-        action: 'alert_recipient.remove',
-        objectType: 'alert_recipient',
-        objectId: id,
-        result: 'success',
-        detail: null,
-      });
+      return {
+        value: undefined,
+        audit: {
+          actorType: 'operator',
+          actorId: session.membershipId,
+          action: 'alert_recipient.remove',
+          objectType: 'alert_recipient',
+          objectId: id,
+          result: 'success',
+          detail: null,
+        },
+      };
     });
     return reply.code(204).send();
   });
@@ -200,11 +203,14 @@ export function registerAlertConfirmRoute(app: FastifyInstance, ctx: AppContext)
       const { token } = parseInput(AlertRecipientConfirmSchema, request.body, 'link');
       const tokenHash = sha256(token);
       // A member change that holds the adder's member row past lock_timeout answers 503, as
-      // every write does; nothing was confirmed or audited (SEC-3, BEH-3).
-      const confirmed = await withResolvedOrg(ctx.pool, async (tx, enterOrg) => {
-        const found = await alertRecipientByTokenHash(tx, tokenHash);
-        if (found === null) return false;
-        await enterOrg(found.orgId);
+      // every write does; nothing was confirmed or audited (SEC-3, BEH-3). The change is held
+      // to the route's entry in OTHER_ROUTE_AUDIT: alert_recipient.confirm, or nothing.
+      const statement = routeStatement(request);
+      const confirmed = await changePreOrg(ctx.pool, statement, async (pre, enterOrg) => {
+        const found = await alertRecipientByTokenHash(pre, tokenHash);
+        // A link that matched nothing changed nothing, and answers the same 404 below.
+        if (found === null) return { value: false, audit: unaudited('nothing_changed') };
+        const tx = await enterOrg(found.orgId);
         // The recipient row, then the adder's member row: a member change never locks a
         // recipient row, so the order has no cycle. FOR SHARE waits for a removal or a cut-off
         // that is committing, and the UPDATE, a later statement, then reads it and refuses
@@ -227,17 +233,19 @@ export function registerAlertConfirmRoute(app: FastifyInstance, ctx: AppContext)
            RETURNING id`,
           [found.recipientId, tokenHash],
         );
-        if (updated.rowCount !== 1) return false;
-        await auditScoped(tx, {
-          actorType: 'anonymous',
-          actorId: null,
-          action: 'alert_recipient.confirm',
-          objectType: 'alert_recipient',
-          objectId: found.recipientId,
-          result: 'success',
-          detail: null,
-        });
-        return true;
+        if (updated.rowCount !== 1) return { value: false, audit: unaudited('nothing_changed') };
+        return {
+          value: true,
+          audit: {
+            actorType: 'anonymous',
+            actorId: null,
+            action: 'alert_recipient.confirm',
+            objectType: 'alert_recipient',
+            objectId: found.recipientId,
+            result: 'success',
+            detail: null,
+          },
+        };
       }).catch((error: unknown) => {
         throw lockTimeoutAsUnavailable(request, error);
       });

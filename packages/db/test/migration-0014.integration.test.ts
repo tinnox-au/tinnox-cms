@@ -16,16 +16,9 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import {
-  alertRecipientByTokenHash,
-  displayAlertOrgs,
-  poolAsTx,
-  resetTestDatabase,
-  runMigrations,
-  withOrg,
-  type MigrationResult,
-  type Pool,
-} from '../src/index.ts';
+import { alertRecipientByTokenHash, displayAlertOrgs, poolAsTx, type Pool } from '../src/index.ts';
+import { withOrg } from '../src/testing.ts';
+import { resetTestDatabase, runMigrations, type MigrationResult } from '../src/migrate.ts';
 import { appPool, createOrg, migratorClient, migratorUrl, type TestOrg } from './support.ts';
 
 const MIGRATIONS = join(
@@ -59,7 +52,7 @@ beforeAll(async () => {
   a = await createOrg(migrator, 'Before alerts A');
   b = await createOrg(migrator, 'Before alerts B');
   upgrade = await runMigrations({ connectionString: migratorUrl(), directory: MIGRATIONS });
-  pool = appPool(2);
+  pool = appPool('tries the upgraded schema as the runtime role', 2);
 });
 
 afterAll(async () => {

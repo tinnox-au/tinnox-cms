@@ -40,7 +40,7 @@ Allow **about 3 hours** for the whole plan. Sections 1 to 10 are the core journe
 
 **What you need**
 
-- A Mac or Linux computer with **Docker Desktop running**, **Node.js 22.13 or newer** and **Google Chrome** (or Chromium).
+- A Mac or Linux computer with **Docker Desktop running**, **Node.js 22.18 or newer** and **Google Chrome** (or Chromium).
 - The repository checked out on `main`, with a terminal open at its root folder.
 - Free local ports 4000, 5173, 5174, 8080, 1025, 8025 and 54329 (or 54330).
 - About 15 minutes for this section the first time.

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { withOrg } from '@tinnox/db';
+import { withOrg } from '@tinnox/db/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   CLOCK,

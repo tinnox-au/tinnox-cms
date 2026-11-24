@@ -86,7 +86,6 @@ interface Wording {
 const WORDING: { readonly [K in AuditAction]: Wording } = {
   'auth.login': { done: 'Person signed in', attempt: 'Sign-in', icon: 'account' },
   'auth.logout': { done: 'Person signed out', attempt: 'Sign-out', icon: 'account' },
-  'auth.session_expired': { done: 'Session expired', attempt: 'Session expiry', icon: 'account' },
   'display.create': { done: 'Screen added', attempt: 'Adding a screen', icon: 'screen' },
   'display.update': { done: 'Screen updated', attempt: 'Screen update', icon: 'screen' },
   // The recorded transition, not delivery: the row is written before any e-mail goes out (DEC-33).
@@ -194,11 +193,6 @@ const WORDING: { readonly [K in AuditAction]: Wording } = {
     done: 'Alert address confirmed by its owner',
     attempt: 'Alert address confirmation',
     icon: 'account',
-  },
-  'security.cross_org_denied': {
-    done: 'Cross-organisation request recorded',
-    attempt: 'Access to another organisation’s data',
-    icon: 'security',
   },
   'security.csrf_rejected': {
     done: 'Security token check recorded',
@@ -495,7 +489,6 @@ export function describeActivity(event: AuditEventDto): ActivityDescription {
     case 'app.update':
     case 'auth.login':
     case 'auth.logout':
-    case 'auth.session_expired':
     case 'display.create':
     case 'folder.create':
     case 'folder.delete':
@@ -525,7 +518,6 @@ export function describeActivity(event: AuditEventDto): ActivityDescription {
     case 'schedule.create':
     case 'schedule.delete':
     case 'schedule.update':
-    case 'security.cross_org_denied':
     case 'security.csrf_rejected':
     case 'security.permission_denied':
     case 'tag.update':

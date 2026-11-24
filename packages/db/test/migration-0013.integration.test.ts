@@ -31,25 +31,24 @@ import {
   pairingComplete,
   pairingCreate,
   poolAsTx,
-  resetTestDatabase,
-  runMigrations,
   sessionByIdHash,
   sessionCreate,
   sessionRevokeMembership,
   sha256,
-  withOrg,
-  withoutOrg,
-  type MigrationResult,
+  type Autocommit,
+  type OrgId,
   type Pool,
   type SessionCreateResult,
-  type Tx,
 } from '../src/index.ts';
+import { withOrg, withoutOrg } from '../src/testing.ts';
+import { resetTestDatabase, runMigrations, type MigrationResult } from '../src/migrate.ts';
 import {
   appPool,
   asDefiner,
   asSuperuser,
   createOrg,
   hash,
+  inTx,
   migratorClient,
   migratorUrl,
   pairingCode,
@@ -58,6 +57,7 @@ import {
   pgViolation,
   stillWaiting,
   twoTransactions,
+  withNoOrgSet,
   type TestOrg,
 } from './support.ts';
 
@@ -85,7 +85,7 @@ interface Member {
 let scratch: string | undefined;
 let migrator: pg.Client | undefined;
 let pool: Pool | undefined;
-let db: Tx;
+let db: Autocommit;
 let upgrade: MigrationResult;
 /** Two members, as the code before 0013 created them. */
 let legacyA: Legacy;
@@ -123,7 +123,7 @@ async function asMigratorIn<T>(orgId: string, work: (client: pg.Client) => Promi
 }
 
 /** One statement as tinnox_app inside `withOrg`. */
-const asApp = (orgId: string, text: string, values: readonly unknown[] = []) =>
+const asApp = (orgId: OrgId, text: string, values: readonly unknown[] = []) =>
   withOrg(clients().pool, orgId, (tx) => tx.query(text, values));
 
 /** One statement as the owner of the sec.* functions (BYPASSRLS). */
@@ -206,14 +206,16 @@ async function signIn(
   authTime: Date | null = new Date(),
   idHash: Buffer = sha256(`cookie-${randomUUID()}`),
 ): Promise<SessionCreateResult & { idHash: Buffer }> {
-  const result = await sessionCreate(db, {
-    idHash,
-    oidcSub,
-    csrfToken: 'c'.repeat(43),
-    ttlSeconds: 3600,
-    idToken: null,
-    authTime,
-  });
+  const result = await inTx(clients().pool, (tx) =>
+    sessionCreate(tx, {
+      idHash,
+      oidcSub,
+      csrfToken: 'c'.repeat(43),
+      ttlSeconds: 3600,
+      idToken: null,
+      authTime,
+    }),
+  );
   return { ...result, idHash };
 }
 
@@ -238,7 +240,7 @@ beforeAll(async () => {
   await runMigrations({ connectionString: migratorUrl(), directory: scratch });
 
   migrator = await migratorClient();
-  pool = appPool(4);
+  pool = appPool('tries the upgraded schema as the runtime role', 4);
   db = poolAsTx(pool);
   legacyA = await legacyOrg('Legacy A', 2);
   legacyB = await legacyOrg('Legacy B', 1);
@@ -835,8 +837,14 @@ describe('sessions and the cut-off', () => {
         withOrg(clients().pool, other.orgId, (tx) => sessionRevokeMembership(tx, colleague.id)),
       ),
     ).toBe(PG.insufficientPrivilege);
+    // sessionRevokeMembership takes an OrgTx, so it cannot be called with no organisation any
+    // more. The function's own refusal is still what is tested: the same statement, sent raw.
     expect(
-      await pgCode(withoutOrg(clients().pool, (tx) => sessionRevokeMembership(tx, colleague.id))),
+      await pgCode(
+        withoutOrg(clients().pool, (tx) =>
+          withNoOrgSet(tx).query('SELECT sec.session_revoke_membership($1) AS n', [colleague.id]),
+        ),
+      ),
     ).toBe(PG.insufficientPrivilege);
     expect(await sessionByIdHash(db, theirs.idHash, 1800)).not.toBeNull();
     expect(await memberColumn(colleague.id, 'sessions_valid_after')).toBeNull();
@@ -857,14 +865,16 @@ describe('pairing by a removed member, or one whose sessions were ended', () => 
   async function newPairing(): Promise<Pairing> {
     const pollingTokenHash = hash();
     const code = pairingCode();
-    const created = await pairingCreate(db, {
-      code,
-      pollingTokenHash,
-      clientKey: `client-${code}`,
-      ttlSeconds: 600,
-      maxSessionsPerClient: 10,
-      windowSeconds: 600,
-    });
+    const created = await inTx(clients().pool, (tx) =>
+      pairingCreate(tx, {
+        code,
+        pollingTokenHash,
+        clientKey: `client-${code}`,
+        ttlSeconds: 600,
+        maxSessionsPerClient: 10,
+        windowSeconds: 600,
+      }),
+    );
     if (created.outcome !== 'created') throw new Error(`pairing not created: ${created.outcome}`);
     return { code, pollingTokenHash, pairingId: created.pairingId };
   }
@@ -879,11 +889,13 @@ describe('pairing by a removed member, or one whose sessions were ended', () => 
       }),
     );
   const collect = (p: Pairing) =>
-    pairingComplete(db, {
-      pairingId: p.pairingId,
-      pollingTokenHash: p.pollingTokenHash,
-      deviceTokenHash: hash(),
-    });
+    inTx(clients().pool, (tx) =>
+      pairingComplete(tx, {
+        pairingId: p.pairingId,
+        pollingTokenHash: p.pollingTokenHash,
+        deviceTokenHash: hash(),
+      }),
+    );
   /** The collection is refused for good: the claim is spent and the display has no player. */
   async function expectRefused(p: Pairing): Promise<void> {
     expect(await collect(p)).toEqual({ outcome: 'not_claimable' });
@@ -988,7 +1000,7 @@ describe('member_invite', () => {
   const values = (i: Invite) => [i.id, i.role, i.name, i.email, i.invitedBy, i.expiresIn, i.status];
   const insertAsMigrator = (orgId: string, i: Invite) =>
     asMigratorIn(orgId, (client) => client.query(INSERT_INVITE, values(i)));
-  const insertAsApp = (orgId: string, i: Invite) => asApp(orgId, INSERT_INVITE, values(i));
+  const insertAsApp = (orgId: OrgId, i: Invite) => asApp(orgId, INSERT_INVITE, values(i));
   const updateAsMigrator = (orgId: string, sql: string, params: readonly unknown[]) =>
     asMigratorIn(orgId, (client) => client.query(sql, [...params]));
   const guard = { code: PG.restrict, constraint: 'member_invite_guard' };
@@ -1159,9 +1171,14 @@ describe('the shared member SQL (packages/db/src/members.ts)', () => {
   it('lockOrgMembership takes the lock the trigger takes, and refuses without an organisation', async () => {
     const org = await createOrg(clients().migrator, 'Membership lock');
     const second = await addMember(org.orgId, 'owner');
-    await expect(withoutOrg(clients().pool, (tx) => lockOrgMembership(tx))).rejects.toThrow(
-      /organisation context/,
-    );
+    // lockOrgMembership takes an OrgTx, so the handle of withoutOrg no longer compiles. Its own
+    // check is for a transaction whose organisation was cleared in SQL.
+    await expect(
+      withOrg(clients().pool, org.orgId, async (tx) => {
+        await tx.query("SELECT set_config('app.org_id', '', true)");
+        await lockOrgMembership(tx);
+      }),
+    ).rejects.toThrow(/organisation context/);
 
     let release = (): void => undefined;
     const held = new Promise<void>((resolve) => {
@@ -1191,7 +1208,7 @@ describe('the shared member SQL (packages/db/src/members.ts)', () => {
     const { idHash } = await signIn(member.oidcSub);
     const session = await sessionByIdHash(db, idHash, 1800);
     if (session === null) throw new Error('no session');
-    const check = (orgId: string) =>
+    const check = (orgId: OrgId) =>
       withOrg(clients().pool, orgId, (tx) => membershipForCheck(tx, member.id, session.createdAt));
 
     expect(await check(org.orgId)).toEqual({ role: 'editor', removedAt: null, cutOff: false });

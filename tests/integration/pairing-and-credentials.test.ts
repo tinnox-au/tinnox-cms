@@ -6,6 +6,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   arrangeAsDefiner,
+  asMigratorIn,
   createDisplay,
   createOrg,
   heartbeatBody,
@@ -82,6 +83,9 @@ describe('pairing codes and device credentials', () => {
     const late = await claim(alice, display.id, pairing.code);
     expect(late.status).toBeGreaterThanOrEqual(400);
     expect(late.status).toBeLessThan(500);
+    // The poll marks the session expired and writes no audit row, as today: the step 20 ruling
+    // names it pairing_expired_by_time, and the audit-debt guard lets that shape through
+    // (EXEMPT_SHAPES; whether it is audited is open, CMS-36).
     const poll = await pollPairing(t, pairing);
     expect(((await poll.json()) as { status: string }).status).toBe('expired');
     const after = (await (await alice.fetch(`/api/displays/${display.id}`)).json()) as {
@@ -315,6 +319,53 @@ describe('pairing codes and device credentials', () => {
         item.detail['displayId'] === display.id,
     );
     expect(revocation?.detail?.['cancelledPairingIds']).toEqual([dormant.pairingId]);
+  });
+
+  it('a claim that replaces an active player writes pairing.claim and player.revoke (replaced) in its own transaction', async () => {
+    const display = await createDisplay(alice, orgA, 'Replaced screen');
+    const first = await pairPlayer(t, alice, display.id);
+    const next = await newPairing(t);
+    const claimed = await claim(alice, display.id, next.code);
+    expect(claimed.status).toBe(200);
+    expect(
+      ((await claimed.json()) as { replacedRegistrationId: string | null }).replacedRegistrationId,
+    ).toBe(first.registrationId);
+
+    // Read as the schema owner so the inserting transaction (xmin) of each row is visible.
+    let rows: {
+      action: string;
+      result: string;
+      actor_id: string | null;
+      object_type: string | null;
+      object_id: string | null;
+      detail: Record<string, unknown> | null;
+      tx: string;
+    }[] = [];
+    await asMigratorIn(orgA.orgId, async (client) => {
+      const found = await client.query<(typeof rows)[number]>(
+        `SELECT action, result, actor_id, object_type, object_id, detail, xmin::text AS tx
+           FROM audit_event
+          WHERE (action = 'pairing.claim' AND object_id = $1)
+             OR (action = 'player.revoke' AND object_id = $2)
+          ORDER BY id`,
+        [display.id, first.registrationId],
+      );
+      rows = found.rows;
+    });
+    const fromNextClaim = rows.filter(
+      (row) => row.action === 'player.revoke' || row.detail?.['pairingId'] === next.pairingId,
+    );
+    expect(fromNextClaim.map((row) => [row.action, row.result])).toEqual([
+      ['pairing.claim', 'success'],
+      ['player.revoke', 'success'],
+    ]);
+    expect(fromNextClaim[1]).toMatchObject({
+      actor_id: orgA.membershipId,
+      object_type: 'player_registration',
+      object_id: first.registrationId,
+      detail: { reason: 'replaced', displayId: display.id },
+    });
+    expect(fromNextClaim[0]?.tx).toBe(fromNextClaim[1]?.tx);
   });
 
   it('a player that is reset and paired with another organisation gets nothing of the first', async () => {

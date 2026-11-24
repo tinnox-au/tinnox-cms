@@ -34,7 +34,7 @@ import {
   isMediaItem,
   isPushPending,
 } from '@tinnox/contracts';
-import { auditScoped, type Tx } from '@tinnox/db';
+import { sql, type AuditInput, type Change, type OrgReadTx, type OrgTx } from '@tinnox/db';
 import {
   buildManifest,
   decidePushState,
@@ -94,6 +94,19 @@ export interface PublicationRow {
 }
 
 const PUBLICATION_COLUMNS = 'id, display_id, playlist_id, manifest, created_at';
+
+/**
+ * Whether a loader may be asked to lock what it reads, by the handle it is given: yes inside a
+ * change (an `OrgTx`), never on the read-only handle of `readOrg` (an `OrgReadTx`), where the
+ * database refuses a row lock with SQLSTATE 25006 (SCR-34). So a read handler passes `false`,
+ * and `true` there does not compile.
+ */
+export type LockOn<T extends OrgReadTx> = T extends OrgTx ? boolean : false;
+
+// The row lock a read takes when its caller asks for one, and the text when it asks for none.
+const FOR_SHARE = sql`FOR SHARE`;
+const FOR_KEY_SHARE = sql`FOR KEY SHARE`;
+const NO_LOCK = sql``;
 
 /** A live playlist as publishing sees it: its items in play order. */
 export interface PlaylistDraft {
@@ -218,7 +231,7 @@ export function idempotencyKeyOf(request: FastifyRequest, action: string): strin
  * Serialises every attempt to publish to one display under one Idempotency-Key
  * until the transaction ends, so exactly one of them creates the publication.
  */
-export async function lockPublishKey(tx: Tx, displayId: string, key: string): Promise<void> {
+export async function lockPublishKey(tx: OrgTx, displayId: string, key: string): Promise<void> {
   await tx.query(
     "SELECT pg_advisory_xact_lock(hashtextextended('tinnox.publish:' || $1 || ':' || $2, 0))",
     [displayId.toLowerCase(), key],
@@ -227,7 +240,7 @@ export async function lockPublishKey(tx: Tx, displayId: string, key: string): Pr
 
 /** The publication already made for this display under this key, if any. */
 export async function findPublicationByKey(
-  tx: Tx,
+  tx: OrgReadTx,
   displayId: string,
   key: string,
 ): Promise<PublicationRow | null> {
@@ -247,7 +260,7 @@ export async function findPublicationByKey(
  * up rows that merely reference the display (heartbeats, registrations).
  */
 export async function lockDisplayForPublish(
-  tx: Tx,
+  tx: OrgTx,
   displayId: string,
 ): Promise<DisplayPlanRow | null> {
   const { rows } = await tx.query<DisplayPlanRow>(
@@ -263,10 +276,10 @@ export async function lockDisplayForPublish(
  * for any number of playlists. With `lock`, the playlists cannot be edited or
  * deleted until the transaction ends.
  */
-export async function loadPlaylistDrafts(
-  tx: Tx,
+export async function loadPlaylistDrafts<T extends OrgReadTx>(
+  tx: T,
   playlistIds: readonly string[],
-  lock: boolean,
+  lock: LockOn<T>,
 ): Promise<Map<string, PlaylistDraft>> {
   const drafts = new Map<string, PlaylistDraft>();
   const ids = [...new Set(playlistIds.map((id) => id.toLowerCase()))];
@@ -279,7 +292,7 @@ export async function loadPlaylistDrafts(
   }>(
     `SELECT id, name, transition, shuffle FROM playlist
      WHERE org_id = app_org_id() AND deleted_at IS NULL AND id = ANY($1::uuid[])
-     ${lock ? 'FOR SHARE' : ''}`,
+     ${lock ? FOR_SHARE : NO_LOCK}`,
     [ids],
   );
   const itemsByPlaylist = new Map<string, DraftItem[]>();
@@ -322,7 +335,7 @@ export async function loadPlaylistDrafts(
  * Schedules with their events, keyed by id. With `lock`, the schedules cannot be
  * edited or deleted until the transaction ends.
  *
- * Two statements when locking, as `loadPlaylistDrafts` does. `withOrg` runs at
+ * Two statements when locking, as `loadPlaylistDrafts` does. `changeOrg` runs at
  * READ COMMITTED: one `FOR SHARE OF s` join that waits for an edit took its
  * snapshot before that edit, and after the wait PostgreSQL re-reads only the
  * locked schedule row, so the events would still be the old ones. With the lock
@@ -330,10 +343,10 @@ export async function loadPlaylistDrafts(
  * and an edit or a delete locks the schedule row before it touches the events.
  * Without `lock` (the push plan) the one statement is one snapshot.
  */
-export async function loadScheduleDrafts(
-  tx: Tx,
+export async function loadScheduleDrafts<T extends OrgReadTx>(
+  tx: T,
   scheduleIds: readonly string[],
-  lock: boolean,
+  lock: LockOn<T>,
 ): Promise<Map<string, ScheduleDraft>> {
   const drafts = new Map<string, ScheduleDraft>();
   const ids = [...new Set(scheduleIds.map((id) => id.toLowerCase()))];
@@ -395,7 +408,7 @@ export async function loadScheduleDrafts(
  * Layouts with their zones, keyed by id. With `lock`, the layouts cannot be edited or
  * deleted until the transaction ends.
  *
- * Two statements when locking, as `loadScheduleDrafts` does. `withOrg` runs at READ
+ * Two statements when locking, as `loadScheduleDrafts` does. `changeOrg` runs at READ
  * COMMITTED: one `FOR SHARE OF l` join that waits for a PUT's `FOR UPDATE` took its
  * snapshot before the PUT, and after the wait PostgreSQL re-reads only the locked layout
  * row, so the zones (child rows) would still be the old ones. With the lock taken first,
@@ -403,10 +416,10 @@ export async function loadScheduleDrafts(
  * delete locks the layout row before it touches the zones. Without `lock` (the push plan)
  * the second statement alone is one snapshot.
  */
-export async function loadLayoutDrafts(
-  tx: Tx,
+export async function loadLayoutDrafts<T extends OrgReadTx>(
+  tx: T,
   layoutIds: readonly string[],
-  lock: boolean,
+  lock: LockOn<T>,
 ): Promise<Map<string, LayoutDraft>> {
   const drafts = new Map<string, LayoutDraft>();
   const ids = [...new Set(layoutIds.map((id) => id.toLowerCase()))];
@@ -472,10 +485,10 @@ interface MediaRecordRow {
  * id. Deleted media is left out, so the rules report it as missing. With
  * `lock`, the rows cannot be deleted until the transaction ends.
  */
-export async function loadMediaRecords(
-  tx: Tx,
+export async function loadMediaRecords<T extends OrgReadTx>(
+  tx: T,
   ids: readonly string[],
-  lock: boolean,
+  lock: LockOn<T>,
 ): Promise<Map<string, MediaRecord>> {
   const byId = new Map<string, MediaRecord>();
   if (ids.length === 0) return byId;
@@ -484,7 +497,7 @@ export async function loadMediaRecords(
             m.duration_ms, m.codec, ${MEDIA_WINDOW_COLUMNS}
      FROM media m
      WHERE m.org_id = app_org_id() AND m.deleted_at IS NULL AND m.id = ANY($1::uuid[])
-     ${lock ? 'FOR KEY SHARE' : ''}`,
+     ${lock ? FOR_KEY_SHARE : NO_LOCK}`,
     [[...new Set(ids)]],
   );
   for (const row of rows) {
@@ -524,17 +537,17 @@ export function itemRefs(items: readonly DraftItem[]): { mediaIds: string[]; app
  * rather than failing the whole push plan. With `lock`, the rows cannot be
  * deleted until the transaction ends.
  */
-export async function loadAppRecords(
-  tx: Tx,
+export async function loadAppRecords<T extends OrgReadTx>(
+  tx: T,
   ids: readonly string[],
-  lock: boolean,
+  lock: LockOn<T>,
 ): Promise<Map<string, AppRecord>> {
   const byId = new Map<string, AppRecord>();
   if (ids.length === 0) return byId;
   const { rows } = await tx.query<{ id: string; type: string; settings: unknown }>(
     `SELECT id, type, settings FROM app
      WHERE org_id = app_org_id() AND id = ANY($1::uuid[])
-     ${lock ? 'FOR KEY SHARE' : ''}`,
+     ${lock ? FOR_KEY_SHARE : NO_LOCK}`,
     [[...new Set(ids)]],
   );
   for (const row of rows) {
@@ -577,7 +590,7 @@ export function planDraft(
  * The manifest (up to 1 MiB each) is fetched only for `manifestFor`.
  */
 async function loadCurrentPublications(
-  tx: Tx,
+  tx: OrgReadTx,
   displayIds: readonly string[],
   manifestFor: readonly string[],
 ): Promise<Map<string, LoadedPublication>> {
@@ -625,11 +638,11 @@ async function loadCurrentPublications(
  *   every issue. Without it (the push plan) neither a draft nor a manifest
  *   outlives its comparison, so memory does not grow with displays times items.
  */
-export async function assessDisplays(
-  tx: Tx,
+export async function assessDisplays<T extends OrgReadTx>(
+  tx: T,
   ctx: AppContext,
   displays: readonly DisplayPlanRow[],
-  options: { readonly lock: boolean; readonly keepDraft: boolean },
+  options: { readonly lock: LockOn<T>; readonly keepDraft: boolean },
 ): Promise<DisplayAssessment[]> {
   const schedules = await loadScheduleDrafts(
     tx,
@@ -777,7 +790,7 @@ export async function assessDisplays(
  * The push plan of the organisation: one assessment per display, in the order
  * of the display list. At most `ABSOLUTE.maxListItems` displays are assessed.
  */
-export async function loadPushPlan(tx: Tx, ctx: AppContext): Promise<DisplayAssessment[]> {
+export async function loadPushPlan(tx: OrgReadTx, ctx: AppContext): Promise<DisplayAssessment[]> {
   const { rows } = await tx.query<DisplayPlanRow>(
     `SELECT ${DISPLAY_PLAN_COLUMNS} FROM display d
      WHERE d.org_id = app_org_id()
@@ -814,14 +827,15 @@ export interface NewPublication {
 
 /**
  * Creates the immutable publication for an accepted plan and makes it the
- * display's desired one, with its audit event, in the caller's transaction.
+ * display's desired one, in the caller's transaction. Its audit event travels with the
+ * row, so the caller returns it as the audit of its change and it commits with the publication.
  * The caller holds the publish key lock and the display (see above).
  */
 export async function createPublication(
-  tx: Tx,
+  tx: OrgTx,
   ctx: AppContext,
   input: NewPublication,
-): Promise<PublicationRow> {
+): Promise<Change<PublicationRow>> {
   const { display, playlistId } = input;
   const publicationId = randomUUID();
   const createdAt = ctx.now();
@@ -864,53 +878,54 @@ export async function createPublication(
            desired_at = EXCLUDED.desired_at`,
     [display.id, publicationId, createdAt],
   );
-  await auditScoped(tx, {
-    actorType: 'operator',
-    actorId: input.membershipId,
-    action: 'publication.create',
-    objectType: 'publication',
-    objectId: publicationId,
-    result: 'success',
-    detail: {
-      displayId: display.id,
-      playlistId,
-      // A schedule has no column on the publication: it can be deleted, a publication cannot.
-      ...(input.scheduleId === null ? {} : { scheduleId: input.scheduleId }),
-      // A layout has none either, for the same reason.
-      ...(input.layoutId === null ? {} : { layoutId: input.layoutId }),
-      // Publishing a playlist takes the display's schedule or layout off it (not
-      // `scheduleId` or `layoutId`, which say what the publication was built from).
-      ...(input.via === 'publish' && display.assigned_schedule_id !== null
-        ? { assignedScheduleId: null }
-        : {}),
-      ...(input.via === 'publish' && display.assigned_layout_id !== null
-        ? { assignedLayoutId: null }
-        : {}),
-      items: manifest.assets.length,
-      route: display.route,
-      via: input.via,
+  return {
+    value: row,
+    audit: {
+      actorType: 'operator',
+      actorId: input.membershipId,
+      action: 'publication.create',
+      objectType: 'publication',
+      objectId: publicationId,
+      result: 'success',
+      detail: {
+        displayId: display.id,
+        playlistId,
+        // A schedule has no column on the publication: it can be deleted, a publication cannot.
+        ...(input.scheduleId === null ? {} : { scheduleId: input.scheduleId }),
+        // A layout has none either, for the same reason.
+        ...(input.layoutId === null ? {} : { layoutId: input.layoutId }),
+        // Publishing a playlist takes the display's schedule or layout off it (not
+        // `scheduleId` or `layoutId`, which say what the publication was built from).
+        ...(input.via === 'publish' && display.assigned_schedule_id !== null
+          ? { assignedScheduleId: null }
+          : {}),
+        ...(input.via === 'publish' && display.assigned_layout_id !== null
+          ? { assignedLayoutId: null }
+          : {}),
+        items: manifest.assets.length,
+        route: display.route,
+        via: input.via,
+      },
     },
-  });
-  return row;
+  };
 }
 
 /**
- * Records that a playlist, or a schedule or a layout (then the object of the event),
- * was refused for a display. Commits with the caller's transaction.
+ * The audit event of a playlist, or a schedule or a layout (then the object of the event),
+ * that was refused for a display. The caller returns it as the audit of its change, with the
+ * refusal as the value, so it commits with the caller's transaction (D3: a publishing attempt
+ * is audited whatever its result).
  */
-export async function auditRejectedPublication(
-  tx: Tx,
-  input: {
-    readonly membershipId: string;
-    readonly playlistId: string;
-    readonly scheduleId: string | null;
-    readonly layoutId: string | null;
-    readonly displayId: string;
-    readonly issues: readonly PublishIssue[];
-    readonly via: 'publish' | 'push';
-  },
-): Promise<void> {
-  await auditScoped(tx, {
+export function auditRejectedPublication(input: {
+  readonly membershipId: string;
+  readonly playlistId: string;
+  readonly scheduleId: string | null;
+  readonly layoutId: string | null;
+  readonly displayId: string;
+  readonly issues: readonly PublishIssue[];
+  readonly via: 'publish' | 'push';
+}): AuditInput {
+  return {
     actorType: 'operator',
     actorId: input.membershipId,
     action: 'publication.create',
@@ -923,5 +938,5 @@ export async function auditRejectedPublication(
       reasons: [...new Set(input.issues.map((issue) => issue.code))].slice(0, 20),
       via: input.via,
     },
-  });
+  };
 }

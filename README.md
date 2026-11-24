@@ -13,7 +13,7 @@ Everything runs on your own machine. Nothing is deployed and nothing contacts a 
 ### Prerequisites
 
 - macOS or Linux, with Docker Desktop (or Docker Engine with Compose v2) running.
-- Node.js 22.13 or newer (22.13 is the lowest Node 22 release that ESLint 10 supports) and npm 10 or newer. `.nvmrc` says 22. Every recorded test run so far used Node 23.10, which is outside the supported range of ESLint 10 and vitest 5 (they warn at install); no run on Node 22 has been recorded yet.
+- Node.js 22.18 or newer (the lowest Node 22 release that runs TypeScript files without a flag: `eslint.config.js` loads the lint rules in `scripts/eslint-rules/*.ts` and stops with a message on an older one) and npm 10 or newer. `.nvmrc` says 22. Every recorded test run so far used Node 23.10, which is outside the supported range of ESLint 10 and vitest 5 (they warn at install); no run on Node 22 has been recorded yet.
 - Free local ports: 4000 (API), 5173 (portal), 5174 (player), 8080 (Keycloak) and 54329 for PostgreSQL. If 54329 is taken, setup picks the next free port and writes it to `.env` (on the first development machine it is 54330).
 - Google Chrome or Chromium for the player. The end-to-end tests use Playwright's own Chromium (`npx playwright install chromium` once).
 

@@ -17,7 +17,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { MIGRATION_FILE_PATTERN, validateMigrationNames } from '@tinnox/db';
+import { MIGRATION_FILE_PATTERN, validateMigrationNames } from '@tinnox/db/migrate';
 
 export const MIGRATIONS_DIR = 'db/migrations';
 export const UPGRADE_TESTS_PATH = 'db/upgrade-tests.json';

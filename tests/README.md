@@ -81,6 +81,65 @@ file's first click or key failed with "Frame was detached".
 `npm run test:integration` also runs `packages/*/test/*.integration.test.ts` and
 `apps/api/test/*.integration.test.ts`. It rebuilds the database `tinnox_test` first.
 
+### The audit-debt guard
+
+The integration database carries a test-only guard (`packages/db/src/audit-debt-guard.ts`;
+poteto adoption plan section 2.1 C, decision D3). No migration creates it and it refuses any
+database whose name does not end in `_test`. A transaction of the runtime role `tinnox_app` that
+changes a table whose changes must be audited, and commits no `audit_event` row, fails at
+`COMMIT` with SQLSTATE `23U01` and a message that names the tables. So every route, and every run
+of the media pipeline or the alert check, that an integration test touches is checked for its
+audit row, whatever the test asserts. The global setup installs the guard after the migrations;
+`scripts/vitest-integration-file-setup.ts` puts it back before each file (a migration test
+rebuilds the schema, and the catalogue test removes the guard so that it reads only what the
+migrations made) and fails a test with the guard's message when a commit was refused while it
+ran, also when the route answered 500 or product code caught the error.
+
+- **Exempt, by D3**: the tables `heartbeat_log`, `display_delivery` and `login_state`; the columns
+  `session.last_seen_at` and `pairing_session.failed_attempts`; writes made inside the three
+  purge functions. The lists, with their reasons, are at the top of the guard's file.
+- **Exempt by shape, by the step 20 ruling** (DEC-38; whether they are audited is open, CMS-36):
+  a `DELETE` on `display_alert`, which is the alert check closing an offline episode without an
+  e-mail (`alert_closed_silently`); and an `UPDATE` of `pairing_session` that changes only its
+  `status`, from pending or claimed to expired, on a row whose time has passed, which is
+  `sec.pairing_create` or `sec.pairing_poll` marking it expired (`pairing_expired_by_time`).
+  Every other write on those two tables is judged. The list, `EXEMPT_SHAPES`, is in the
+  guard's file with its reasons.
+- **Not judged**: `tinnox_migrator` and the superuser, which is how test helpers arrange data,
+  and how the development seed writes (its `development_seed` reason has no backstop here).
+  A test that must write as `tinnox_app` itself (to try row-level security, a grant, a `sec.*`
+  function, or to arrange what only that role can) uses a connection named by
+  `unjudgedSql(why)`, and says what its SQL is: `appPool(why)` in `packages/db/test/support.ts`,
+  `appClient(why)` in `integration/support.ts`, and `t.testSql(why)` of the API harness. A
+  route's, job's or helper's own call never moves there to get past the guard. `t.pool` is the
+  application's own pool and is judged; reading on it is fine.
+- **One path is unaudited by decision**: the sign-out fallback (`sessionRevokeUnaudited`, the
+  CX-01 residual). Its test says so with `whileUnauditedAllowed(...)`, which lets one table
+  through for the length of one call.
+
+The browser suite's database (`tinnox_e2e_test`) does not get the guard.
+
+### Audit actions, one failure case each, and the row scan
+
+`integration/audit-failure.test.ts` (poteto adoption plan step 17, decision D3) has one case per
+audit action: its table is typed by `AuditAction`, so a new action without a case does not
+compile. A case names the route that writes the action (or the job, provisioning command or
+migration), the request that writes it and a read of what it changes. The harness makes every
+insert of that action fail in the database (`whileAuditFails` of `@tinnox/db/testing`, a trigger
+on `audit_event` that also counts the inserts it refused), requires that the attempt reached the
+audit write, that nothing of the change was kept, and that the same attempt goes through once
+the fault is gone. A refusal (nothing changes, and it is answered the same) and the sign-out
+(the session ends anyway, the CX-01 residual) say so in their case. `pairing.cancel`, which only
+migration 0012 writes, is failed in `packages/db/test/migration-0012.integration.test.ts`.
+`integration/provision-member.test.ts` does the same for every command of `PROVISION_COMMANDS`
+(`scripts/lib/provision.ts`) and each audit action a command declares (SCR-09).
+
+After each integration test file, `scripts/vitest-integration-file-setup.ts` reads every audit
+row the file wrote, as the database administrator, and fails the file when a row holds a URL, a
+query string, a token-shaped string or an e-mail address (`scripts/lib/audit-row-scan.ts`,
+AG-3.4). A short secret or a typed name has no shape the scan can see; the tests of the routes
+that take them check those by value.
+
 Before either suite: `npm run setup`, `npm run infra:up`, and for E2E also
 `npm run db:migrate` and `npm run db:seed -- --second-org`. For E2E the API (4000), the
 portal (5173) and the player (5174) must **not** be running: Playwright starts them.

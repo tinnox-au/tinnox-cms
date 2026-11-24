@@ -3,7 +3,14 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
-import { createPool, violatedConstraint, type Pool } from '../src/index.ts';
+import { createPool, violatedConstraint, type OrgId, type Pool } from '../src/index.ts';
+import { testOrgId, unjudgedSql } from '../src/testing.ts';
+
+// The helper that opens a real transaction for the wrappers and the audit writer that take a
+// `PreOrgTx` (D2), the one that names a test's organisation, and the one that lets a test send
+// its own statements where no organisation is set. They live in the package's testing entry, so
+// tests outside this package use the same ones.
+export { inTx, testOrgId, withNoOrgSet } from '../src/testing.ts';
 
 const envFile = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '.env');
 if (existsSync(envFile)) process.loadEnvFile(envFile);
@@ -15,11 +22,17 @@ function need(name: string): string {
   return value;
 }
 
-/** Pool connected as the runtime role tinnox_app to the integration-test database. */
-export function appPool(max = 4): Pool {
+/**
+ * Pool connected as the runtime role tinnox_app to the integration-test database, for the SQL
+ * these tests write themselves: they try what the role may and may not do (row-level security,
+ * grants, constraints, the sec.* functions), so most of their writes carry no audit row. The
+ * name tells the audit-debt guard that this is not product code (../src/audit-debt-guard.ts),
+ * and `why` says what the SQL is.
+ */
+export function appPool(why: string, max = 4): Pool {
   return createPool({
     connectionString: need('TEST_DATABASE_URL'),
-    applicationName: 'tinnox-test-app',
+    applicationName: unjudgedSql(why),
     max,
   });
 }
@@ -40,7 +53,7 @@ export async function migratorClient(): Promise<pg.Client> {
 }
 
 export interface TestOrg {
-  orgId: string;
+  orgId: OrgId;
   siteId: string;
   membershipId: string;
   oidcSub: string;
@@ -86,7 +99,7 @@ export async function createOrg(
   options: { role?: 'owner' | 'admin' | 'editor' | 'viewer' | 'operator' } = {},
 ): Promise<TestOrg> {
   const o: TestOrg = {
-    orgId: randomUUID(),
+    orgId: testOrgId(randomUUID()),
     siteId: randomUUID(),
     membershipId: randomUUID(),
     oidcSub: `test-sub-${randomUUID()}`,

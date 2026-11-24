@@ -3,22 +3,24 @@
  * and the lock order exist once (db/migrations/0013_roles_and_members.sql,
  * docs/portal-v2/stage-c.md section 6.8).
  */
-import type { Tx } from './tx.ts';
+import type { OrgTx } from './tx.ts';
 
 /**
- * Takes the per-organisation membership lock of the current withOrg transaction, the key the
+ * Takes the per-organisation membership lock of the current organisation transaction, the key the
  * 0013 trigger uses ('tinnox.membership:' || org). Every member-management transaction takes
- * it first. Throws when there is no organisation context (pg_advisory_xact_lock(NULL) would
- * silently take no lock). A lock timeout (55P03) is thrown as the pg error; the API's
- * wrappers map it.
+ * it first. It takes an `OrgTx`, so there is an organisation; the check below is kept for a
+ * handle whose organisation was cleared in SQL (pg_advisory_xact_lock(NULL) would silently take
+ * no lock). A lock timeout (55P03) is thrown as the pg error; the API's wrappers map it.
  */
-export async function lockOrgMembership(tx: Tx): Promise<void> {
+export async function lockOrgMembership(tx: OrgTx): Promise<void> {
   const { rows } = await tx.query<{ in_org: boolean }>(
     `SELECT app_org_id() IS NOT NULL AS in_org,
             pg_advisory_xact_lock(hashtextextended('tinnox.membership:' || app_org_id()::text, 0))`,
   );
   if (rows[0]?.in_org !== true) {
-    throw new Error('lockOrgMembership requires an organisation context (withOrg)');
+    throw new Error(
+      'lockOrgMembership requires an organisation context: in an API route, pass { lockMembership: true } to changeAsOperator(ctx, request, fn, options) from apps/api/src/auth/permissions.ts; in an offline tool, call it first on the tx of changeOrgAsMigrator (@tinnox/db/migrate), or on the one enterOrg returns inside changePreOrg',
+    );
   }
 }
 
@@ -40,7 +42,7 @@ export interface MembershipCheck {
  * refusing.
  */
 export async function membershipForCheck(
-  tx: Tx,
+  tx: OrgTx,
   membershipId: string,
   sessionCreatedAt: string,
 ): Promise<MembershipCheck | null> {

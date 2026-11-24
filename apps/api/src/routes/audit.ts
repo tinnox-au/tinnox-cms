@@ -5,7 +5,7 @@ import {
   ROUTES,
   type AuditListResponse,
 } from '@tinnox/contracts';
-import { withOrg } from '@tinnox/db';
+import { joinSql, readOrg, sql, sqlParameter, type SqlFragment } from '@tinnox/db';
 import { ACTIVITY_CATEGORIES, can } from '@tinnox/domain';
 import type { FastifyInstance } from 'fastify';
 import { forbidden, parseRole } from '../auth/permissions.ts';
@@ -54,18 +54,18 @@ export function registerAuditRoutes(app: FastifyInstance, ctx: AppContext): void
     // used as an index condition. Only fixed text and parameter numbers are put
     // into the statement; every value from the request is a parameter.
     const values: unknown[] = [query.limit + 1];
-    const conditions: string[] = [];
-    const parameter = (value: unknown): string => `$${values.push(value)}`;
-    if (query.before !== undefined) conditions.push(`id < ${parameter(query.before)}::bigint`);
+    const conditions: SqlFragment[] = [sql`org_id = app_org_id()`];
+    const parameter = (value: unknown): SqlFragment => sqlParameter(values.push(value));
+    if (query.before !== undefined) conditions.push(sql`id < ${parameter(query.before)}::bigint`);
     if (query.category !== undefined) {
-      conditions.push(`category = ${parameter(query.category)}`);
+      conditions.push(sql`category = ${parameter(query.category)}`);
     } else if (!fullLog) {
       // A plain column comparison, leakproof under row-level security (0005).
-      conditions.push(`category = ANY(${parameter([...ACTIVITY_CATEGORIES])}::text[])`);
+      conditions.push(sql`category = ANY(${parameter([...ACTIVITY_CATEGORIES])}::text[])`);
     }
-    if (query.result !== undefined) conditions.push(`result = ${parameter(query.result)}`);
-    const where = ['org_id = app_org_id()', ...conditions].join(' AND ');
-    return withOrg(ctx.pool, session.orgId, async (tx) => {
+    if (query.result !== undefined) conditions.push(sql`result = ${parameter(query.result)}`);
+    const where = joinSql(conditions, sql` AND `);
+    return readOrg(ctx.pool, session.orgId, async (tx) => {
       const { rows } = await tx.query<AuditRow>(
         `SELECT id, occurred_at, actor_type, actor_id, action, object_type, object_id, result, detail
          FROM audit_event

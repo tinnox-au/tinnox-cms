@@ -1,14 +1,44 @@
-import { createHash } from 'node:crypto';
+// The '@tinnox/db/migrate' entry: what only an offline tool that connects as tinnox_migrator may
+// use (the migration runner and the test reset, the development seed, provisioning, and tests).
+// It is not part of the runtime entry (./index.ts), and lint refuses it in the API's source
+// (AG-1.10; the db entries of eslint.config.js).
+import { createHash, randomUUID } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import pg from 'pg';
+import {
+  changeOrg,
+  issueAuditStatement,
+  issueWritePermit,
+  termsOfStatement,
+  type AuditStatement,
+  type Change,
+} from './change.ts';
 import { errorField } from './error-field.ts';
+import { mintOrgId } from './org-id.ts';
 import type { Pool } from './pool.ts';
 import {
   SchemaInvariantError,
   assertSchemaInvariants,
   schemaProblemsInTransaction,
 } from './schema-invariants.ts';
+import type { OrgId, OrgTx } from './tx.ts';
+
+// The definer switch belongs to this entry too: it needs the MigratorPool (D25). So does
+// auditedInSql, for the one statement that writes its own audit rows (provisioning's `pending`):
+// it is exported here and nowhere else, so the API cannot give it (AG-1.10).
+export { asDefiner, auditedInSql, type DefinerTx } from './definer.ts';
+
+/**
+ * The id of an organisation that is being created: a fresh one for provisioning's org-create,
+ * or the fixed one the development seed gives its synthetic organisations. For those two only
+ * (D25): lint refuses the name in every other script (NEW_ORG_ID_FILES in eslint.config.js),
+ * and this entry in the API. An organisation that already exists is never named this way: its
+ * id comes from a lookup of '@tinnox/db', or from a row asDefiner read.
+ */
+export function newOrgId(id: string = randomUUID()): OrgId {
+  return mintOrgId(id);
+}
 
 const MIGRATOR_ROLE = 'tinnox_migrator';
 
@@ -21,6 +51,9 @@ declare const migratorBrand: unique symbol;
  * and what that rule cannot see is left to review.
  */
 export type MigratorPool = Pool & { readonly [migratorBrand]: true };
+
+/** The pools connectMigrator returned, for what must not run on any other. */
+const checked = new WeakSet<Pool>();
 
 /**
  * The one way the offline tools connect as tinnox_migrator: the runner, the test reset, the
@@ -63,7 +96,67 @@ export async function connectMigrator(
     await pool.end().catch(() => undefined);
     throw error;
   }
+  checked.add(pool);
   return pool as MigratorPool;
+}
+
+/**
+ * The statement of the development seed (scripts/seed.ts): it names no audit action, because the
+ * seed writes no audit row, as today (the step 20 ruling, DEC-38). It is the one statement
+ * changeOrgAsMigrator grants unaudited('development_seed') to, and it grants nothing else. No
+ * table can grant that reason (issueAuditStatement refuses it), so a route, a job or a
+ * provisioning command, whose statements come from their tables, never can; and this entry,
+ * which the API cannot import (AG-1.10), hands it to the seed alone (only scripts/seed.ts names
+ * seedStatement, scripts/lib/legacy-transaction-lint.test.ts).
+ */
+const SEED_STATEMENT: AuditStatement = issueAuditStatement({
+  stated: { actions: [] },
+  statedIn: 'the statement of the development seed (seedStatement of @tinnox/db/migrate)',
+});
+
+/** The statement the development seed passes to changeOrgAsMigrator (see SEED_STATEMENT). */
+export function seedStatement(): AuditStatement {
+  return SEED_STATEMENT;
+}
+
+/**
+ * A change for an organisation by an offline tool, with its audit rows (adoption plan step 20;
+ * SCR-34): `changeOrg` of the runtime entry, with the permit this entry issues to the
+ * migrator's connection. A tool has no operator whose role could be read again, so what stands
+ * behind the change is the connection itself: `pool` is the one `connectMigrator` returned,
+ * which only a person on TINNOX's controlled host can open, and lint keeps this entry out of
+ * the API (AG-1.10). `orgId` is an organisation the tool is creating (`newOrgId`) or one whose
+ * row `asDefiner` read (D25).
+ *
+ * `statement` is what the tool says the change audits (for provisioning, `provisionStatement`
+ * of scripts/lib/provision.ts, the `audits` of the command's row in PROVISION_COMMANDS; for the
+ * seed, `seedStatement()`: a tool cannot write a statement in place), and the change is refused before COMMIT when it
+ * recorded an action the statement does not name. `fn` returns `{ value, audit }` and writes no
+ * audit row itself. A change under the seed's statement (`seedStatement`), and no other, may
+ * give `unaudited('development_seed')`.
+ */
+export async function changeOrgAsMigrator<T>(
+  pool: MigratorPool,
+  orgId: OrgId,
+  statement: AuditStatement,
+  fn: (tx: OrgTx) => Promise<Change<T>>,
+): Promise<T> {
+  // A pool that was cast to the type was never checked: say so before anything is sent.
+  if (!checked.has(pool)) {
+    throw new Error(
+      'changeOrgAsMigrator requires the pool that connectMigrator returned: call connectMigrator(connectionString, { applicationName }) from @tinnox/db/migrate and pass that pool. The API has no migrator connection: an operator route calls changeAsOperator(ctx, request, fn) (apps/api/src/auth/permissions.ts)',
+    );
+  }
+  const permit = issueWritePermit({
+    ...termsOfStatement('changeOrgAsMigrator', statement),
+    // The step 20 ruling (DEC-38) keeps the seed's synthetic data unaudited, as today, and
+    // names it development_seed. Only this permit grants it, and only to the seed's own
+    // statement, told by identity: a statement that merely looks like it gets nothing.
+    ...(statement === SEED_STATEMENT ? { grants: ['development_seed' as const] } : {}),
+    // Nothing to read again: the connection was checked when it was opened.
+    recheck: () => Promise.resolve(),
+  });
+  return changeOrg(pool, orgId, permit, (tx) => fn(tx));
 }
 
 export interface MigrationOptions {

@@ -13,7 +13,14 @@
 // this script creates the matching membership rows. A subject without a membership cannot
 // sign in. Customers' members come from scripts/provision-member.ts instead.
 import type { Role } from '@tinnox/contracts';
-import { connectMigrator, withOrg, type MigratorPool, type Tx } from '@tinnox/db';
+import { unaudited, type OrgId, type OrgTx } from '@tinnox/db';
+import {
+  changeOrgAsMigrator,
+  connectMigrator,
+  newOrgId,
+  seedStatement,
+  type MigratorPool,
+} from '@tinnox/db/migrate';
 import { loadEnv, requireEnv } from './lib/env.ts';
 
 loadEnv();
@@ -30,7 +37,7 @@ interface SeedMember {
 }
 
 interface SeedOrg {
-  readonly orgId: string;
+  readonly orgId: OrgId;
   readonly orgName: string;
   readonly siteId: string;
   readonly siteName: string;
@@ -38,10 +45,13 @@ interface SeedOrg {
   readonly members: readonly SeedMember[];
 }
 
-/** Fixed identifiers so documentation, tests and repeated runs agree. Synthetic data only. */
+/**
+ * Fixed identifiers so documentation, tests and repeated runs agree. Synthetic data only. The
+ * seed creates these organisations, so it names their ids itself (newOrgId, D25).
+ */
 export const SEED = {
   primary: {
-    orgId: '10000000-0000-4000-8000-000000000001',
+    orgId: newOrgId('10000000-0000-4000-8000-000000000001'),
     orgName: 'TINNOX Internal',
     siteId: '10000000-0000-4000-8000-000000000002',
     siteName: 'Melbourne Workshop',
@@ -54,7 +64,7 @@ export const SEED = {
     ],
   },
   second: {
-    orgId: '20000000-0000-4000-8000-000000000001',
+    orgId: newOrgId('20000000-0000-4000-8000-000000000001'),
     orgName: 'Isolation Test Organisation',
     siteId: '20000000-0000-4000-8000-000000000002',
     siteName: 'Isolation Test Site',
@@ -70,8 +80,8 @@ export const SEED = {
  * `npm run setup -- --force` (new subjects, old rows kept) never fails.
  */
 async function seedMember(
-  tx: Tx,
-  orgId: string,
+  tx: OrgTx,
+  orgId: OrgId,
   member: SeedMember,
   subject: string,
 ): Promise<string> {
@@ -102,8 +112,10 @@ async function seedMember(
 async function seedOrganisation(pool: MigratorPool, org: SeedOrg): Promise<string> {
   const subjects = org.members.map((member) => requireEnv(member.subjectEnv));
   // Row-level security is forced even for the table owner, so the seed sets the
-  // tenant context exactly like the application does: one withOrg transaction.
-  return withOrg(pool, org.orgId, async (tx) => {
+  // tenant context exactly like the application does: one transaction for the organisation.
+  // It writes no audit row, as today (development_seed, the step 20 ruling): the data is
+  // synthetic, and seedStatement() is the one statement changeOrgAsMigrator lets say so.
+  return changeOrgAsMigrator(pool, org.orgId, seedStatement(), async (tx) => {
     await tx.query(
       'INSERT INTO organization (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING',
       [org.orgId, org.orgName],
@@ -116,7 +128,10 @@ async function seedOrganisation(pool: MigratorPool, org: SeedOrg): Promise<strin
     for (const [index, member] of org.members.entries()) {
       notes.push(await seedMember(tx, org.orgId, member, subjects[index] ?? ''));
     }
-    return `${org.orgName}: site "${org.siteName}" (${org.timezone}); ${notes.join(', ')}`;
+    return {
+      value: `${org.orgName}: site "${org.siteName}" (${org.timezone}); ${notes.join(', ')}`,
+      audit: unaudited('development_seed'),
+    };
   });
 }
 

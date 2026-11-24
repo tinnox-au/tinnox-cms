@@ -326,3 +326,224 @@ describe('casts to MigratorPool (SEC-1, D4)', () => {
     ]);
   });
 });
+
+describe('casts to a transaction handle (D2, CX-01, AG-2.1)', { timeout: 30_000 }, () => {
+  const TX_CAST =
+    /^Do not cast to a transaction handle \(Tx, OrgTx, OrgReadTx, PreOrgTx, DefinerTx\): .*Use the tx that the callback of readOrg receives \(an OrgReadTx\) or of changeOrg \(an OrgTx; an operator route calls changeAsOperator\(ctx, request, fn\) from apps\/api\/src\/auth\/permissions\.ts\), or, before the organisation is known, the one the callback of changePreOrg receives \(a PreOrgTx, for the sec\.\* wrappers\) and the OrgTx its enterOrg returns, all from @tinnox\/db\. A test opens one with withOrg or inTx from @tinnox\/db\/testing\. .*auditStandalone\(pool, event\)\.$/;
+
+  it.each([
+    ['a plain cast', 'export const tx = poolAsTx(pool) as Tx;'],
+    ['a double cast', 'export const tx = pool as unknown as Tx;'],
+    ['an angle-bracket assertion', 'export const tx = <Tx>handle;'],
+    ['a union', 'export const tx = handle as Tx | undefined;'],
+    ['a generic argument', 'export const tx = open() as Promise<Tx>;'],
+    ['a wrapped handle', 'export const tx = handle as Readonly<Tx>;'],
+    ['a qualified name', 'export const tx = handle as db.Tx;'],
+    // Step 18: the handle with the organisation set, the one before it, and the definer's.
+    ['a cast to OrgTx', 'export const tx = pre as OrgTx;'],
+    ['a double cast to OrgTx', 'export const tx = pre as unknown as OrgTx;'],
+    ['a cast to PreOrgTx', 'export const tx = poolAsTx(pool) as PreOrgTx;'],
+    ['a cast to DefinerTx', 'export const tx = handle as DefinerTx;'],
+    ['a qualified OrgTx', 'export const tx = <db.OrgTx>handle;'],
+  ])('flags %s', async (_name, code) => {
+    const messages = await flagged('apps/api/src/routes/fixture.ts', code, [SYNTAX]);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatch(TX_CAST);
+  });
+
+  it.each([
+    'apps/api/src/fixture.ts',
+    'apps/api/src/main.ts',
+    'apps/api/src/mail.ts',
+    'apps/api/src/config.ts',
+    'apps/media-worker/src/fixture.ts',
+    // packages/db too: run() builds the handle with its mark, so nothing there needs the cast.
+    'packages/db/src/tx.ts',
+    'packages/db/src/sec.ts',
+    'packages/db/src/migrate.ts',
+    'packages/db/src/definer.ts',
+    'packages/db/src/pre-org.ts',
+    'packages/db/src/org-id.ts',
+    'packages/delivery/src/fixture.ts',
+    'apps/portal/src/features/fixture.tsx',
+    'apps/player-web/sw/sw.ts',
+    'scripts/seed.ts',
+    'scripts/lib/provision.ts',
+    'vitest.config.ts',
+    // Tests open a real transaction instead (inTx, withoutOrg).
+    'tests/integration/fixture.test.ts',
+    'packages/db/test/fixture.integration.test.ts',
+    'packages/db/test/support.ts',
+    'packages/db/src/fixture.test.ts',
+    'apps/api/test/support.ts',
+    'apps/api/src/fixture.test.ts',
+    'apps/portal/src/fixture.test.tsx',
+    'apps/portal/src/testFrame.test-support.ts',
+  ])('flags it in %s', async (path) => {
+    const code = 'export const tx = poolAsTx(pool) as Tx; export const o = pre as OrgTx;';
+    expect(await flagged(path, code, [SYNTAX])).toEqual([
+      expect.stringMatching(TX_CAST),
+      expect.stringMatching(TX_CAST),
+    ]);
+  });
+
+  it('leaves the types in annotations, the Autocommit handle and other casts alone', async () => {
+    const code = [
+      'export async function rename(tx: OrgTx, id: string): Promise<void> {}',
+      'export const run = (fn: (tx: PreOrgTx) => Promise<void>): Promise<void> => withoutOrg(pool, fn);',
+      'export const read = (definer: DefinerTx): Promise<unknown> => definer.query(TEXT);',
+      'export const unscoped: Autocommit = poolAsTx(pool);',
+      'export const p = handle as Autocommit;',
+      'export const kept: Tx[] = [];',
+    ].join('\n');
+    expect(await flagged('apps/api/src/fixture.ts', code, [SYNTAX])).toEqual([]);
+    expect(await flagged('packages/db/test/fixture.integration.test.ts', code, [SYNTAX])).toEqual(
+      [],
+    );
+  });
+
+  it('keeps the MigratorPool ban beside it in every list', async () => {
+    const code = 'export const tx = handle as Tx; export const p = pool as MigratorPool;';
+    for (const path of ['apps/api/src/fixture.ts', 'tests/integration/fixture.test.ts']) {
+      expect(await flagged(path, code, [SYNTAX])).toEqual([
+        expect.stringMatching(TX_CAST),
+        expect.stringMatching(/^Do not cast to MigratorPool: /),
+      ]);
+    }
+  });
+});
+
+// AG-2.3 (adoption plan step 18, D25): withOrg and enterOrg take an OrgId, and the type checker
+// refuses a string there (packages/db/src/tx.test.ts, apps/api/src/org-from-request.test.ts).
+// This is the other half: nothing outside packages/db/src/org-id.ts says that a value is one.
+describe(
+  'making an OrgId outside packages/db/src/org-id.ts (AG-2.3, D25)',
+  { timeout: 30_000 },
+  () => {
+    const FORGED =
+      /^Do not make an OrgId here \(AG-2\.3\): not by a cast, a type predicate, or a type argument of a call .* operatorOf\(request\)\.orgId, the device credential .* newOrgId\(\), .* asDefiner \(both from @tinnox\/db\/migrate\)\. A test names its organisation with testOrgId\(id\) from @tinnox\/db\/testing\.$/;
+
+    it.each([
+      ['a plain cast', 'export const org = request.params.id as OrgId;'],
+      ['a double cast', 'export const org = body as unknown as OrgId;'],
+      ['an angle-bracket assertion', 'export const org = <OrgId>id;'],
+      ['a union', 'export const org = id as OrgId | null;'],
+      ['a generic argument', 'export const org = read() as Promise<OrgId>;'],
+      ['a list', 'export const orgs = ids as OrgId[];'],
+      ['a qualified name', 'export const org = id as db.OrgId;'],
+      ['a type predicate', 'export const isOrg = (id: string): id is OrgId => true;'],
+      [
+        'an assertion signature',
+        'export function assertOrg(id: string): asserts id is OrgId { void id; }',
+      ],
+      [
+        'the row type of a query',
+        "export const found = await tx.query<{ org_id: OrgId }>('SELECT $1::uuid AS org_id', [id]);",
+      ],
+      ['a zod type taken on trust', 'export const Org = z.custom<OrgId>();'],
+      // Only expectTypeOf and its matchers are let through, not any method that starts with "to".
+      ['a method that takes the type on trust', 'export const org = input.toBranded<OrgId>();'],
+      [
+        "a route's Params type",
+        "app.get<{ Params: { tenant: OrgId } }>('/x/:tenant', (request) => withOrg(pool, request.params.tenant, read));",
+      ],
+    ])('flags %s', async (_name, code) => {
+      const messages = await flagged('apps/api/src/routes/fixture.ts', code, [SYNTAX]);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatch(FORGED);
+    });
+
+    it.each([
+      'apps/api/src/fixture.ts',
+      'apps/api/src/routes/fixture.ts',
+      'apps/api/src/main.ts',
+      'apps/api/src/mail.ts',
+      'apps/api/src/config.ts',
+      'apps/media-worker/src/fixture.ts',
+      // packages/db too, in every file but the one that makes it: the lookups call mintOrgId.
+      'packages/db/src/tx.ts',
+      'packages/db/src/sec.ts',
+      'packages/db/src/definer.ts',
+      'packages/db/src/migrate.ts',
+      'packages/db/src/testing.ts',
+      'packages/delivery/src/fixture.ts',
+      'apps/portal/src/features/fixture.tsx',
+      'apps/player-web/sw/sw.ts',
+      // D25: scripts are in scope, the two that may call newOrgId included.
+      'scripts/provision-member.ts',
+      'scripts/seed.ts',
+      'scripts/lib/provision.ts',
+      'scripts/lib/fixture.ts',
+      'vitest.config.ts',
+      // Tests too: testOrgId from '@tinnox/db/testing' is their way.
+      'tests/integration/fixture.test.ts',
+      'tests/e2e/support/database.ts',
+      'packages/db/test/fixture.integration.test.ts',
+      'packages/db/test/support.ts',
+      'packages/db/src/fixture.test.ts',
+      'apps/api/test/support.ts',
+      'apps/api/src/fixture.test.ts',
+      'scripts/lib/fixture.test.ts',
+      'apps/portal/src/fixture.test.tsx',
+      'apps/portal/src/testFrame.test-support.ts',
+    ])('flags a cast and a query row type in %s', async (path) => {
+      const code =
+        'export const org = id as OrgId; export const rows = await tx.query<{ org_id: OrgId }>(TEXT);';
+      expect(await flagged(path, code, [SYNTAX])).toEqual([
+        expect.stringMatching(FORGED),
+        expect.stringMatching(FORGED),
+      ]);
+    });
+
+    it('leaves the type in annotations, in a collection and in a type test alone', async () => {
+      const code = [
+        'export async function enter(pool: Pool, orgId: OrgId): Promise<void> {}',
+        'export interface Job { readonly orgId: OrgId }',
+        'export const byOrg = new Map<OrgId, string[]>();',
+        'export const first = (ids: readonly OrgId[]): OrgId | undefined => ids[0];',
+        'export const other = id as string;',
+        // The matchers of expectTypeOf only compare types (packages/db/src/sec.test.ts).
+        'expectTypeOf<OrgId>().toExtend<string>();',
+        'expectTypeOf(withOrg).parameter(1).toEqualTypeOf<OrgId>();',
+        'expectTypeOf<string>().not.toExtend<OrgId>();',
+      ].join('\n');
+      for (const path of [
+        'apps/api/src/fixture.ts',
+        'scripts/lib/fixture.ts',
+        'packages/db/src/fixture.test.ts',
+        'tests/integration/fixture.test.ts',
+      ]) {
+        expect(await flagged(path, code, [SYNTAX]), path).toEqual([]);
+      }
+    });
+
+    it('lets packages/db/src/org-id.ts make it, and keeps that file the rest of its list', async () => {
+      const path = 'packages/db/src/org-id.ts';
+      expect(await flagged(path, 'export const org = value as OrgId;', [SYNTAX])).toEqual([]);
+      const rest =
+        "export const v = a!; export const t = h as OrgTx; export const p = pool as MigratorPool; export const r = 'RESET ROLE';";
+      expect(await flagged(path, rest, [SYNTAX])).toEqual([
+        expect.stringMatching(/^Do not assert a value is not null/),
+        expect.stringMatching(/^Do not cast to a transaction handle/),
+        expect.stringMatching(/^Do not cast to MigratorPool: /),
+        expect.stringMatching(/^Do not switch the database role here/),
+      ]);
+    });
+
+    it('keeps the other brand bans beside it in every list', async () => {
+      const code =
+        'export const org = id as OrgId; export const tx = handle as OrgTx; export const p = pool as MigratorPool;';
+      for (const path of [
+        'apps/api/src/fixture.ts',
+        'scripts/lib/provision.ts',
+        'tests/integration/fixture.test.ts',
+      ]) {
+        expect(await flagged(path, code, [SYNTAX])).toEqual([
+          expect.stringMatching(FORGED),
+          expect.stringMatching(/^Do not cast to a transaction handle/),
+          expect.stringMatching(/^Do not cast to MigratorPool: /),
+        ]);
+      }
+    });
+  },
+);

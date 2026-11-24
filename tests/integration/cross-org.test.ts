@@ -738,7 +738,7 @@ describe('organisation isolation through the API', () => {
     } finally {
       t.advanceClock(-31 * 60 * 1000);
     }
-    const client = await appClient();
+    const client = await appClient('asks the database what the runtime role can read');
     try {
       const role = await client.query<{ current_user: string; bypass: boolean; super: boolean }>(
         'SELECT current_user, rolbypassrls AS bypass, rolsuper AS super FROM pg_roles WHERE rolname = current_user',

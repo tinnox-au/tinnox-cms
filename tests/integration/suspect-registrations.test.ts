@@ -129,7 +129,8 @@ describe('finding credentials handed out against a revocation, from before migra
         display_id: string;
         registration_id: string;
       }>(script);
-      const ours = rows.filter((row) => [org.orgId, other.orgId].includes(row.org_id));
+      const these: string[] = [org.orgId, other.orgId];
+      const ours = rows.filter((row) => these.includes(row.org_id));
       return { ours, afterRevoke, afterNewerCode };
     });
 

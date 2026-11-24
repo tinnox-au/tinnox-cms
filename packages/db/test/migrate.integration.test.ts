@@ -14,7 +14,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { afterAll, describe, expect, it } from 'vitest';
-import { connectMigrator, resetTestDatabase, runMigrations } from '../src/index.ts';
+import { connectMigrator, resetTestDatabase, runMigrations } from '../src/migrate.ts';
 import { actingAs, migratorClient, migratorUrl, superuserUrl } from './support.ts';
 
 const MIGRATIONS = join(

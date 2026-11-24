@@ -18,7 +18,7 @@ import {
   type MediaDto,
   type TagDto,
 } from '@tinnox/contracts';
-import { withOrg } from '@tinnox/db';
+import { withOrg } from '@tinnox/db/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   assignPlaylist,
@@ -731,7 +731,7 @@ describe('media details, tags and folders', () => {
     it('refuses the tag after the last one allowed, in either scope, for that organisation only', async () => {
       const full = await createOrg('Library full of tags');
       const carol = await signIn(t, full);
-      await withOrg(t.pool, full.orgId, async (tx) => {
+      await withOrg(t.testSql('fills the library to its tag ceiling'), full.orgId, async (tx) => {
         await tx.query(
           `INSERT INTO tag (org_id, scope, name, colour)
            SELECT app_org_id(), CASE WHEN g % 2 = 0 THEN 'media' ELSE 'display' END,
@@ -767,13 +767,17 @@ describe('media details, tags and folders', () => {
     it('refuses the folder after the last one allowed, for that organisation only', async () => {
       const full = await createOrg('Library full of folders');
       const dave = await signIn(t, full);
-      await withOrg(t.pool, full.orgId, async (tx) => {
-        await tx.query(
-          `INSERT INTO folder (org_id, name)
+      await withOrg(
+        t.testSql('fills the library to its folder ceiling'),
+        full.orgId,
+        async (tx) => {
+          await tx.query(
+            `INSERT INTO folder (org_id, name)
            SELECT app_org_id(), 'bulk ' || g FROM generate_series(1, $1::int) AS g`,
-          [ABSOLUTE.maxListItems - 1],
-        );
-      });
+            [ABSOLUTE.maxListItems - 1],
+          );
+        },
+      );
       const last = await createFolder(dave, unique('Last'));
       const refused = await dave.fetch('/api/folders', {
         method: 'POST',

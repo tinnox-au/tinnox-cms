@@ -4,20 +4,22 @@
  * uses. TINNOX staff run it from a controlled host, never from the API's host or container.
  *
  * Every command:
- * - runs only as tinnox_migrator: it takes the MigratorPool that connectMigrator (@tinnox/db)
- *   returns after checking current_user and session_user. The 0013 exemptions test session_user,
- *   and the superuser, whose writes they would not cover, is refused;
+ * - runs only as tinnox_migrator: it takes the MigratorPool that connectMigrator
+ *   (@tinnox/db/migrate) returns after checking current_user and session_user. The 0013
+ *   exemptions test session_user, and the superuser, whose writes they would not cover, is refused;
  * - reads the identity provider before BEGIN and checks the database facts again inside one
- *   transaction, which also holds its audit rows (actor 'system', no time passed);
- * - reads across organisations only between SET LOCAL ROLE tinnox_definer and RESET ROLE, and
- *   writes membership and member_invite as the migrator with app.org_id taken from a row, never
+ *   transaction, which also holds its audit rows (actor 'system', no time passed): the command
+ *   returns them as { value, audit }, and changePreOrg (or, for org-create, changeOrgAsMigrator)
+ *   writes them before COMMIT and holds them to the command's row in PROVISION_COMMANDS;
+ * - reads across organisations only inside asDefiner (@tinnox/db/migrate), which runs its work
+ *   between SET LOCAL ROLE tinnox_definer and RESET ROLE, and writes
+ *   membership and member_invite as the migrator with app.org_id taken from a row, never
  *   from an argument (both tables force row-level security on their owner). Exception: pending's
- *   expiry and its audit rows, which run as the definer;
+ *   expiry and its audit rows, which run as the definer, in one statement;
  * - except pending, takes the organisation's membership lock (lockOrgMembership) before it
  *   touches membership or member_invite, as the API's member changes do.
  * Output goes to the staff terminal only; only pending prints names and e-mail addresses.
  */
-import { randomUUID } from 'node:crypto';
 import { parseArgs, type ParseArgsOptionsConfig } from 'node:util';
 import {
   ABSOLUTE,
@@ -25,20 +27,29 @@ import {
   RoleSchema,
   inviteReference,
   labelSchema,
+  type AuditEventOf,
   type Role,
 } from '@tinnox/contracts';
 import {
   STAGE_C_CONSTRAINTS,
-  auditScoped,
+  changePreOrg,
+  issueAuditStatement,
   lockOrgMembership,
   sessionRevokeMembership,
+  sql,
+  unaudited,
   violatedConstraint,
-  withOrg,
-  withResolvedOrg,
-  withoutOrg,
-  type MigratorPool,
-  type Tx,
+  type AuditInput,
+  type AuditStatement,
+  type OrgId,
 } from '@tinnox/db';
+import {
+  asDefiner,
+  auditedInSql,
+  changeOrgAsMigrator,
+  newOrgId,
+  type MigratorPool,
+} from '@tinnox/db/migrate';
 import { ROLE_LABELS, grantableRoles } from '@tinnox/domain';
 import type { IdpAccount, IdpDirectory } from './idp.ts';
 
@@ -115,13 +126,20 @@ export type RestoreOwnerArgs = Approval &
     | { readonly mode: 'successor'; readonly successor: Person; readonly replaces: string }
   );
 
-export type Invocation =
-  | { readonly command: 'org-create'; readonly args: OrgCreateArgs }
-  | { readonly command: 'pending'; readonly args: PendingArgs }
-  | { readonly command: 'fulfil'; readonly args: FulfilArgs }
-  | { readonly command: 'set-name'; readonly args: SetNameArgs }
-  | { readonly command: 'mfa-reset'; readonly args: MfaResetArgs }
-  | { readonly command: 'restore-owner'; readonly args: RestoreOwnerArgs };
+/** The arguments of each command, as parseInvocation gives them. */
+interface CommandArgs {
+  readonly 'org-create': OrgCreateArgs;
+  readonly pending: PendingArgs;
+  readonly fulfil: FulfilArgs;
+  readonly 'set-name': SetNameArgs;
+  readonly 'mfa-reset': MfaResetArgs;
+  readonly 'restore-owner': RestoreOwnerArgs;
+}
+interface InvocationOf<C extends Command> {
+  readonly command: C;
+  readonly args: CommandArgs[C];
+}
+export type Invocation = { readonly [C in Command]: InvocationOf<C> }[Command];
 
 const COMMANDS = [
   'org-create',
@@ -132,6 +150,7 @@ const COMMANDS = [
   'restore-owner',
 ] as const;
 type Command = (typeof COMMANDS)[number];
+export type ProvisionCommand = Command;
 
 const text = { type: 'string' } as const;
 const OPTIONS: { readonly [C in Command]: ParseArgsOptionsConfig } = {
@@ -371,17 +390,6 @@ export interface Result {
   readonly lines: readonly string[];
 }
 
-/**
- * Runs `work` as tinnox_definer (BYPASSRLS, so it reads every organisation), then returns to the
- * migrator. A failure aborts the transaction, which undoes the SET LOCAL as well.
- */
-async function asDefiner<T>(tx: Tx, work: () => Promise<T>): Promise<T> {
-  await tx.query('SET LOCAL ROLE tinnox_definer');
-  const result = await work();
-  await tx.query('RESET ROLE');
-  return result;
-}
-
 async function enabledAccount(idp: IdpDirectory, name: string): Promise<IdpAccount> {
   const account = await idp.findByUsername(name);
   if (account === null) throw new RefusedError('no identity-provider account has this username');
@@ -433,22 +441,29 @@ async function named<T>(work: Promise<T>): Promise<T> {
   }
 }
 
-function audit(
-  tx: Tx,
-  action: string,
-  objectType: 'membership' | 'invite',
-  objectId: string,
-  detail: Record<string, unknown>,
-): Promise<void> {
-  return auditScoped(tx, {
-    actorType: 'system',
-    actorId: null,
-    action,
-    objectType,
-    objectId,
-    result: 'success',
-    detail,
-  });
+/** The audit actions provisioning writes; the last column of PROVISION_COMMANDS names them. */
+export type ProvisionAuditAction =
+  | 'invite.cancel'
+  | 'membership.create'
+  | 'membership.update'
+  | 'membership.role_change'
+  | 'membership.remove'
+  | 'membership.mfa_reset';
+
+/** What a command says about one change; `systemEvent` adds the actor (system) and the result. */
+type ProvisionAudit = {
+  readonly [A in ProvisionAuditAction]: Pick<
+    AuditEventOf<A>,
+    'action' | 'objectType' | 'objectId' | 'detail'
+  >;
+}[ProvisionAuditAction];
+
+/**
+ * The audit event of one change, for the command to return: changePreOrg and changeOrgAsMigrator
+ * write it on the transaction of the change, before COMMIT.
+ */
+function systemEvent(event: ProvisionAudit): AuditInput {
+  return { actorType: 'system', actorId: null, result: 'success', ...event };
 }
 
 // eslint-disable-next-line no-control-regex -- removing control characters is the purpose of this pattern
@@ -457,7 +472,7 @@ const UNPRINTABLE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\
 const printable = (value: string): string => value.replace(UNPRINTABLE, '?');
 
 export interface OrgCreateResult extends Result {
-  readonly orgId: string;
+  readonly orgId: OrgId;
   readonly siteId: string;
   /** In the order of --owner. */
   readonly ownerIds: readonly string[];
@@ -472,11 +487,12 @@ export async function orgCreate(
   const subjects: string[] = [];
   for (const owner of args.owners)
     subjects.push((await enabledAccount(idp, owner.username)).subject);
-  const orgId = randomUUID();
-  return withOrg(pool, orgId, async (tx) => {
+  // The one organisation id that no lookup returns: this command creates the organisation (D25).
+  const orgId = newOrgId();
+  return changeOrgAsMigrator(pool, orgId, provisionStatement('org-create'), async (tx) => {
     await lockOrgMembership(tx);
-    const taken = await asDefiner(tx, () =>
-      tx.query('SELECT 1 FROM public.membership WHERE oidc_sub = ANY($1::text[])', [subjects]),
+    const taken = await asDefiner(pool, tx, (definer) =>
+      definer.query('SELECT 1 FROM public.membership WHERE oidc_sub = ANY($1::text[])', [subjects]),
     );
     if (taken.rows.length > 0) {
       throw new RefusedError(
@@ -494,6 +510,7 @@ export async function orgCreate(
       ).rows,
     );
     const ownerIds: string[] = [];
+    const created: AuditInput[] = [];
     for (const [index, owner] of args.owners.entries()) {
       const { id } = first(
         (
@@ -507,23 +524,33 @@ export async function orgCreate(
         ).rows,
       );
       ownerIds.push(id);
-      await audit(tx, 'membership.create', 'membership', id, {
-        role: 'owner',
-        inviteId: null,
-        reactivated: false,
-        requestRef: args.requestRef,
-        executedBy: args.executedBy,
-        reason: 'org_create',
-      });
+      created.push(
+        systemEvent({
+          action: 'membership.create',
+          objectType: 'membership',
+          objectId: id,
+          detail: {
+            role: 'owner',
+            inviteId: null,
+            reactivated: false,
+            requestRef: args.requestRef,
+            executedBy: args.executedBy,
+            reason: 'org_create',
+          },
+        }),
+      );
     }
     return {
-      orgId,
-      siteId: site.id,
-      ownerIds,
-      lines: [
-        `Organisation ${orgId} created with site ${site.id}.`,
-        ...ownerIds.map((id, index) => `Owner ${index + 1}: membership ${id}`),
-      ],
+      value: {
+        orgId,
+        siteId: site.id,
+        ownerIds,
+        lines: [
+          `Organisation ${orgId} created with site ${site.id}.`,
+          ...ownerIds.map((id, index) => `Owner ${index + 1}: membership ${id}`),
+        ],
+      },
+      audit: created,
     };
   });
 }
@@ -531,7 +558,7 @@ export async function orgCreate(
 export interface PendingInvite {
   readonly id: string;
   readonly reference: string;
-  readonly orgId: string;
+  readonly orgId: OrgId;
   readonly orgName: string;
   readonly role: string;
   readonly name: string;
@@ -553,14 +580,19 @@ export async function pending(
   _idp: IdpDirectory,
   args: PendingArgs,
 ): Promise<PendingResult> {
-  return withoutOrg(pool, async (tx) => {
+  return changePreOrg(pool, provisionStatement('pending'), async (tx) => {
     // As the definer throughout: there is no organisation context, and the expiry and its audit
     // rows span every organisation (its 0013 UPDATE (status) on member_invite, its INSERT on
     // audit_event). No membership lock: only member_invite rows change, and an invite a
     // concurrent fulfil or cancel holds FOR UPDATE is skipped by the READ COMMITTED re-check.
-    await tx.query('SET LOCAL ROLE tinnox_definer');
-    const expired = await tx.query(
-      `WITH closed AS (
+    // The one audit row in the repository that auditScoped does not write (D25): the statement
+    // below is named, whole, in RAW_AUDIT_INSERTS of eslint.config.js, so a change to it is a
+    // change to that entry, and its row has the shape AuditEventShapes gives invite.cancel.
+    // So this change returns no event (changePreOrg would write the rows a second time): it
+    // returns the statement's own result, below.
+    const { expired, rows } = await asDefiner(pool, tx, async (definer) => {
+      const expired = await definer.query(
+        `WITH closed AS (
          UPDATE public.member_invite i SET status = 'expired'
          WHERE i.status = 'pending' AND i.expires_at <= now()
          RETURNING i.id, i.org_id, i.role
@@ -569,24 +601,25 @@ export async function pending(
        SELECT closed.org_id, 'system', NULL, 'invite.cancel', 'invite', closed.id::text, 'success',
               jsonb_build_object('role', closed.role, 'reason', 'expired', 'executedBy', $1::text)
        FROM closed`,
-      [args.executedBy],
-    );
-    const { rows } = await tx.query<{
-      id: string;
-      org_id: string;
-      org_name: string;
-      role: string;
-      name: string;
-      email: string;
-      created_at: Date;
-      expires_at: Date;
-    }>(
-      `SELECT i.id, i.org_id, o.name AS org_name, i.role, i.name, i.email, i.created_at, i.expires_at
+        [args.executedBy],
+      );
+      const { rows } = await definer.query<{
+        id: string;
+        org_id: string;
+        org_name: string;
+        role: string;
+        name: string;
+        email: string;
+        created_at: Date;
+        expires_at: Date;
+      }>(
+        `SELECT i.id, i.org_id, o.name AS org_name, i.role, i.name, i.email, i.created_at, i.expires_at
        FROM public.member_invite i JOIN public.organization o ON o.id = i.org_id
        WHERE i.status = 'pending'
        ORDER BY i.created_at, i.id`,
-    );
-    await tx.query('RESET ROLE');
+      );
+      return { expired, rows };
+    });
     const invites = rows.map((r) => ({
       id: r.id,
       reference: inviteReference(r.id),
@@ -600,24 +633,30 @@ export async function pending(
     }));
     const count = expired.rowCount ?? 0;
     return {
-      expired: count,
-      invites,
-      lines: [
-        `Expired ${count} invite(s); their names and e-mail addresses are deleted.`,
-        `Pending invites: ${invites.length}`,
-        ...invites.map(
-          (i) =>
-            `  ${i.reference}  ${i.role}  ${printable(i.name)} <${printable(i.email)}>  ` +
-            `${printable(i.orgName)}  requested ${i.createdAt}  expires ${i.expiresAt}  invite ${i.id}`,
-        ),
-      ],
+      value: {
+        expired: count,
+        invites,
+        lines: [
+          `Expired ${count} invite(s); their names and e-mail addresses are deleted.`,
+          `Pending invites: ${invites.length}`,
+          ...invites.map(
+            (i) =>
+              `  ${i.reference}  ${i.role}  ${printable(i.name)} <${printable(i.email)}>  ` +
+              `${printable(i.orgName)}  requested ${i.createdAt}  expires ${i.expiresAt}  invite ${i.id}`,
+          ),
+        ],
+      },
+      // One audit row per expired invite, written by the expiry statement itself: changePreOrg
+      // takes the database's count of them, and refuses the run if it is none. With nothing
+      // past its date the statement changed no invite and wrote no row.
+      audit: count > 0 ? auditedInSql(expired, 'invite.cancel') : unaudited('nothing_changed'),
     };
   });
 }
 
 export interface FulfilResult extends Result {
   readonly membershipId: string;
-  readonly orgId: string;
+  readonly orgId: OrgId;
   readonly role: Role;
   readonly reactivated: boolean;
 }
@@ -638,16 +677,16 @@ export async function fulfil(
   if (accountEmail === '') {
     throw new RefusedError('the identity-provider account has no e-mail address');
   }
-  return withResolvedOrg(pool, async (tx, enterOrg) => {
-    const found = await asDefiner(tx, async () => ({
+  return changePreOrg(pool, provisionStatement('fulfil'), async (pre, enterOrg) => {
+    const found = await asDefiner(pool, pre, async (definer) => ({
       invite: (
-        await tx.query<{ org_id: string }>(
+        await definer.query<{ org_id: string }>(
           'SELECT org_id FROM public.member_invite WHERE id = $1',
           [args.inviteId],
         )
       ).rows[0],
       orgs: (
-        await tx.query<{ org_id: string }>(
+        await definer.query<{ org_id: string }>(
           'SELECT org_id FROM public.membership WHERE oidc_sub = $1',
           [account.subject],
         )
@@ -661,7 +700,7 @@ export async function fulfil(
         'this account has a membership in another organisation, removed or not; the invite stays pending (tell only TINNOX staff)',
       );
     }
-    await enterOrg(orgId);
+    const tx = await enterOrg(orgId);
     await lockOrgMembership(tx);
 
     const invite = (
@@ -752,27 +791,34 @@ export async function fulfil(
       [args.inviteId, membershipId],
     );
     const reactivated = here !== undefined;
-    await audit(tx, 'membership.create', 'membership', membershipId, {
-      role,
-      inviteId: args.inviteId,
-      reactivated,
-      requestRef: inviteReference(args.inviteId),
-      confirmedWith: args.confirmedWith,
-      executedBy: args.executedBy,
-    });
     const org = first(
       (await tx.query<{ name: string }>('SELECT name FROM organization WHERE id = app_org_id()'))
         .rows,
     );
     return {
-      membershipId,
-      orgId,
-      role,
-      reactivated,
-      lines: [
-        `Invite ${inviteReference(args.inviteId)} fulfilled${reactivated ? ' (removed member reactivated)' : ''}.`,
-        `Membership ${membershipId} in ${printable(org.name)} (${orgId}) as ${ROLE_LABELS[role]}.`,
-      ],
+      value: {
+        membershipId,
+        orgId,
+        role,
+        reactivated,
+        lines: [
+          `Invite ${inviteReference(args.inviteId)} fulfilled${reactivated ? ' (removed member reactivated)' : ''}.`,
+          `Membership ${membershipId} in ${printable(org.name)} (${orgId}) as ${ROLE_LABELS[role]}.`,
+        ],
+      },
+      audit: systemEvent({
+        action: 'membership.create',
+        objectType: 'membership',
+        objectId: membershipId,
+        detail: {
+          role,
+          inviteId: args.inviteId,
+          reactivated,
+          requestRef: inviteReference(args.inviteId),
+          confirmedWith: args.confirmedWith,
+          executedBy: args.executedBy,
+        },
+      }),
     };
   });
 }
@@ -790,21 +836,22 @@ export async function setName(
   const lookup =
     'username' in args.target
       ? {
-          sql: 'SELECT id, org_id FROM public.membership WHERE oidc_sub = $1',
+          sql: sql`SELECT id, org_id FROM public.membership WHERE oidc_sub = $1`,
           value: await subjectOf(idp, args.target.username),
         }
       : {
-          sql: 'SELECT id, org_id FROM public.membership WHERE id = $1',
+          sql: sql`SELECT id, org_id FROM public.membership WHERE id = $1`,
           value: args.target.membershipId,
         };
-  return withResolvedOrg(pool, async (tx, enterOrg) => {
+  return changePreOrg(pool, provisionStatement('set-name'), async (pre, enterOrg) => {
     const member = await asDefiner(
-      tx,
-      async () =>
-        (await tx.query<{ id: string; org_id: string }>(lookup.sql, [lookup.value])).rows[0],
+      pool,
+      pre,
+      async (definer) =>
+        (await definer.query<{ id: string; org_id: string }>(lookup.sql, [lookup.value])).rows[0],
     );
     if (member === undefined) throw new RefusedError('no membership matches');
-    await enterOrg(member.org_id);
+    const tx = await enterOrg(member.org_id);
     await lockOrgMembership(tx);
     const current = (
       await tx.query<{ display_name: string | null }>(
@@ -817,8 +864,11 @@ export async function setName(
     // As PATCH /api/members/:id: the same name again (a repeated run) writes no row and no audit.
     if (current.display_name === args.name) {
       return {
-        membershipId: member.id,
-        lines: [`Membership ${member.id} already has this name; nothing changed.`],
+        value: {
+          membershipId: member.id,
+          lines: [`Membership ${member.id} already has this name; nothing changed.`],
+        },
+        audit: unaudited('nothing_changed'),
       };
     }
     // As PATCH /api/members/:id: a pending invite keeps its name until it is fulfilled with it,
@@ -840,12 +890,19 @@ export async function setName(
         args.name,
       ]),
     );
-    await audit(tx, 'membership.update', 'membership', member.id, {
-      fields: ['displayName'],
-      requestRef: args.requestRef,
-      executedBy: args.executedBy,
-    });
-    return { membershipId: member.id, lines: [`Name set for membership ${member.id}.`] };
+    return {
+      value: { membershipId: member.id, lines: [`Name set for membership ${member.id}.`] },
+      audit: systemEvent({
+        action: 'membership.update',
+        objectType: 'membership',
+        objectId: member.id,
+        detail: {
+          fields: ['displayName'],
+          requestRef: args.requestRef,
+          executedBy: args.executedBy,
+        },
+      }),
+    };
   });
 }
 
@@ -863,19 +920,20 @@ export async function mfaReset(
   args: MfaResetArgs,
 ): Promise<MfaResetResult> {
   const subject = await subjectOf(idp, args.username);
-  return withResolvedOrg(pool, async (tx, enterOrg) => {
+  return changePreOrg(pool, provisionStatement('mfa-reset'), async (pre, enterOrg) => {
     const member = await asDefiner(
-      tx,
-      async () =>
+      pool,
+      pre,
+      async (definer) =>
         (
-          await tx.query<{ id: string; org_id: string }>(
+          await definer.query<{ id: string; org_id: string }>(
             'SELECT id, org_id FROM public.membership WHERE oidc_sub = $1 AND removed_at IS NULL',
             [subject],
           )
         ).rows[0],
     );
     if (member === undefined) throw new RefusedError('this account has no active membership');
-    await enterOrg(member.org_id);
+    const tx = await enterOrg(member.org_id);
     await lockOrgMembership(tx);
     const target = await tx.query(
       `SELECT 1 FROM membership WHERE id = $1 AND org_id = app_org_id() AND removed_at IS NULL
@@ -894,20 +952,27 @@ export async function mfaReset(
       );
     }
     // The definer owns sec.session_revoke_membership; the migrator gets no EXECUTE grant.
-    const sessionsEnded = await asDefiner(tx, () => sessionRevokeMembership(tx, member.id));
-    await audit(tx, 'membership.mfa_reset', 'membership', member.id, {
-      requestRef: args.requestRef,
-      executedBy: args.executedBy,
-      ...(args.confirmedWith === null ? {} : { confirmedWith: args.confirmedWith }),
-      sessionsEnded,
-    });
+    const sessionsEnded = await asDefiner(pool, tx, () => sessionRevokeMembership(tx, member.id));
     return {
-      membershipId: member.id,
-      sessionsEnded,
-      lines: [
-        `Membership ${member.id}: ${sessionsEnded} session(s) ended; the next sign-in asks for the password and one-time code.`,
-        'Sign the user out at the identity provider too.',
-      ],
+      value: {
+        membershipId: member.id,
+        sessionsEnded,
+        lines: [
+          `Membership ${member.id}: ${sessionsEnded} session(s) ended; the next sign-in asks for the password and one-time code.`,
+          'Sign the user out at the identity provider too.',
+        ],
+      },
+      audit: systemEvent({
+        action: 'membership.mfa_reset',
+        objectType: 'membership',
+        objectId: member.id,
+        detail: {
+          requestRef: args.requestRef,
+          executedBy: args.executedBy,
+          ...(args.confirmedWith === null ? {} : { confirmedWith: args.confirmedWith }),
+          sessionsEnded,
+        },
+      }),
     };
   });
 }
@@ -934,20 +999,22 @@ export async function restoreOwner(
     executedBy: args.executedBy,
     approvedBy: args.approvedBy,
   };
+  const statement = provisionStatement('restore-owner');
   if (args.mode === 'promote') {
-    return withResolvedOrg(pool, async (tx, enterOrg) => {
+    return changePreOrg(pool, statement, async (pre, enterOrg) => {
       const member = await asDefiner(
-        tx,
-        async () =>
+        pool,
+        pre,
+        async (definer) =>
           (
-            await tx.query<{ org_id: string }>(
+            await definer.query<{ org_id: string }>(
               'SELECT org_id FROM public.membership WHERE id = $1',
               [args.membershipId],
             )
           ).rows[0],
       );
       if (member === undefined) throw new RefusedError('no membership has this id');
-      await enterOrg(member.org_id);
+      const tx = await enterOrg(member.org_id);
       await lockOrgMembership(tx);
       const target = first(
         (
@@ -963,40 +1030,54 @@ export async function restoreOwner(
         throw new RefusedError('only someone who has signed in at least once can be made an Owner');
       }
       if (target.role === 'owner') throw new RefusedError('the member is already an Owner');
+      // The audit row names the role the member had, from the closed list.
+      const from = parseRole(target.role);
+      if (from === null) throw new RefusedError('the member has a role this tool does not know');
       await tx.query(
         "UPDATE membership SET role = 'owner' WHERE id = $1 AND org_id = app_org_id()",
         [args.membershipId],
       );
-      await audit(tx, 'membership.role_change', 'membership', args.membershipId, {
-        from: target.role,
-        to: 'owner',
-        sessionsEnded: 0,
-        invitesCancelled: 0,
-        reason: 'owner_recovery',
-        ...approval,
-      });
       return {
-        ownerId: args.membershipId,
-        removedId: null,
-        sessionsEnded: 0,
-        invitesCancelled: 0,
-        lines: [`Membership ${args.membershipId} is now an Owner.`],
+        value: {
+          ownerId: args.membershipId,
+          removedId: null,
+          sessionsEnded: 0,
+          invitesCancelled: 0,
+          lines: [`Membership ${args.membershipId} is now an Owner.`],
+        },
+        audit: systemEvent({
+          action: 'membership.role_change',
+          objectType: 'membership',
+          objectId: args.membershipId,
+          detail: {
+            from,
+            to: 'owner',
+            sessionsEnded: 0,
+            invitesCancelled: 0,
+            reason: 'owner_recovery',
+            ...approval,
+          },
+        }),
       };
     });
   }
 
   const { successor, replaces } = args;
   const account = await enabledAccount(idp, successor.username);
-  return withResolvedOrg(pool, async (tx, enterOrg) => {
-    const found = await asDefiner(tx, async () => ({
+  return changePreOrg(pool, statement, async (pre, enterOrg) => {
+    const found = await asDefiner(pool, pre, async (definer) => ({
       old: (
-        await tx.query<{ org_id: string }>('SELECT org_id FROM public.membership WHERE id = $1', [
-          replaces,
-        ])
+        await definer.query<{ org_id: string }>(
+          'SELECT org_id FROM public.membership WHERE id = $1',
+          [replaces],
+        )
       ).rows[0],
       taken:
-        (await tx.query('SELECT 1 FROM public.membership WHERE oidc_sub = $1', [account.subject]))
-          .rows.length > 0,
+        (
+          await definer.query('SELECT 1 FROM public.membership WHERE oidc_sub = $1', [
+            account.subject,
+          ])
+        ).rows.length > 0,
     }));
     if (found.old === undefined) throw new RefusedError('no membership has the --replaces id');
     if (found.taken) {
@@ -1004,7 +1085,7 @@ export async function restoreOwner(
         'the successor account already has a membership, removed or not (one organisation per person)',
       );
     }
-    await enterOrg(found.old.org_id);
+    const tx = await enterOrg(found.old.org_id);
     await lockOrgMembership(tx);
     const active = (
       await tx.query<{ id: string; role: string }>(
@@ -1039,37 +1120,129 @@ export async function restoreOwner(
        RETURNING id, role`,
       [replaces],
     );
-    for (const invite of cancelled.rows) {
-      await audit(tx, 'invite.cancel', 'invite', invite.id, {
-        role: invite.role,
-        reason: 'inviter_removed',
-        executedBy: args.executedBy,
-      });
-    }
-    const sessionsEnded = await asDefiner(tx, () => sessionRevokeMembership(tx, replaces));
-    await audit(tx, 'membership.create', 'membership', ownerId, {
-      role: 'owner',
-      inviteId: null,
-      reactivated: false,
-      reason: 'owner_recovery',
-      ...approval,
-    });
-    await audit(tx, 'membership.remove', 'membership', replaces, {
-      previousRole: 'owner',
-      sessionsEnded,
-      invitesCancelled: cancelled.rows.length,
-      reason: 'owner_recovery',
-      ...approval,
-    });
+    const sessionsEnded = await asDefiner(pool, tx, () => sessionRevokeMembership(tx, replaces));
     return {
-      ownerId,
-      removedId: replaces,
-      sessionsEnded,
-      invitesCancelled: cancelled.rows.length,
-      lines: [
-        `Owner membership ${ownerId} created; membership ${replaces} removed (${sessionsEnded} session(s) ended, ${cancelled.rows.length} invite(s) cancelled).`,
-        "Disable the old Owner's identity-provider account.",
+      value: {
+        ownerId,
+        removedId: replaces,
+        sessionsEnded,
+        invitesCancelled: cancelled.rows.length,
+        lines: [
+          `Owner membership ${ownerId} created; membership ${replaces} removed (${sessionsEnded} session(s) ended, ${cancelled.rows.length} invite(s) cancelled).`,
+          "Disable the old Owner's identity-provider account.",
+        ],
+      },
+      // In the order they were written before the wrapper wrote them: each cancelled invite,
+      // the new Owner, the removed one.
+      audit: [
+        ...cancelled.rows.map((invite) =>
+          systemEvent({
+            action: 'invite.cancel',
+            objectType: 'invite',
+            objectId: invite.id,
+            detail: {
+              role: invite.role,
+              reason: 'inviter_removed',
+              executedBy: args.executedBy,
+            },
+          }),
+        ),
+        systemEvent({
+          action: 'membership.create',
+          objectType: 'membership',
+          objectId: ownerId,
+          detail: {
+            role: 'owner',
+            inviteId: null,
+            reactivated: false,
+            reason: 'owner_recovery',
+            ...approval,
+          },
+        }),
+        systemEvent({
+          action: 'membership.remove',
+          objectType: 'membership',
+          objectId: replaces,
+          detail: {
+            previousRole: 'owner',
+            sessionsEnded,
+            invitesCancelled: cancelled.rows.length,
+            reason: 'owner_recovery',
+            ...approval,
+          },
+        }),
       ],
     };
   });
+}
+
+/**
+ * Every provision-member command: the function the CLI runs for it, and each audit action the
+ * command can write. tests/integration/provision-member.test.ts goes through this table and
+ * fails each of those actions in turn, so a new command, or a new audit row in an old one,
+ * needs a case there that shows nothing is committed (SCR-09).
+ */
+export const PROVISION_COMMANDS = {
+  'org-create': { run: orgCreate, audits: ['membership.create'] },
+  // The one audit row no helper writes: the expiry and its rows are one statement (see pending).
+  pending: { run: pending, audits: ['invite.cancel'] },
+  fulfil: { run: fulfil, audits: ['membership.create'] },
+  'set-name': { run: setName, audits: ['membership.update'] },
+  'mfa-reset': { run: mfaReset, audits: ['membership.mfa_reset'] },
+  'restore-owner': {
+    run: restoreOwner,
+    audits: ['membership.role_change', 'invite.cancel', 'membership.create', 'membership.remove'],
+  },
+} as const satisfies ProvisionCommandTable;
+
+/**
+ * The statement a change of `command` is held to: the audits of its row in PROVISION_COMMANDS,
+ * which changePreOrg and changeOrgAsMigrator of @tinnox/db compare with what the change recorded
+ * before COMMIT (adoption plan step 20). They take no statement written in place, so a command
+ * gets its statement here, from the table the audit-failure test goes through.
+ */
+export function provisionStatement(command: ProvisionCommand): AuditStatement {
+  // A name the type checker did not read reaches no row.
+  if (!Object.hasOwn(PROVISION_COMMANDS, command)) {
+    throw new Error(
+      `no provisioning command is called ${String(command)}: a command gets its row in PROVISION_COMMANDS (scripts/lib/provision.ts) with the audit actions it writes, and each its case in tests/integration/provision-member.test.ts`,
+    );
+  }
+  const row: { readonly audits: readonly ProvisionAuditAction[] } = PROVISION_COMMANDS[command];
+  return issueAuditStatement({
+    stated: { actions: row.audits },
+    statedIn: `the audits of ${command} in PROVISION_COMMANDS (scripts/lib/provision.ts)`,
+  });
+}
+
+type ProvisionCommandTable = {
+  readonly [C in Command]: {
+    readonly run: (pool: MigratorPool, idp: IdpDirectory, args: CommandArgs[C]) => Promise<Result>;
+    // At least one: every command changes tenant or security state, which D3 audits. Only the
+    // seed's statement (seedStatement of @tinnox/db/migrate) states none (step 20).
+    readonly audits: readonly [ProvisionAuditAction, ...ProvisionAuditAction[]];
+  };
+};
+
+function runCommand<C extends Command>(
+  pool: MigratorPool,
+  idp: IdpDirectory,
+  call: InvocationOf<C>,
+): Promise<Result> {
+  // Typed as the mapped table, so the command's own run takes the command's own arguments.
+  const table: ProvisionCommandTable = PROVISION_COMMANDS;
+  return table[call.command].run(pool, idp, call.args);
+}
+
+/**
+ * Runs one parsed invocation through PROVISION_COMMANDS: the CLI (scripts/provision-member.ts)
+ * has no dispatch of its own, so the table the audit-failure test goes through is the one the
+ * CLI runs (SCR-09).
+ */
+export function runInvocation(
+  pool: MigratorPool,
+  idp: IdpDirectory,
+  call: Invocation,
+): Promise<Result> {
+  return runCommand(pool, idp, call);
 }

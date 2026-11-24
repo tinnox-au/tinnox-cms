@@ -5,7 +5,21 @@
  * with `sha256` before calling.
  */
 import { createHash } from 'node:crypto';
-import type { Tx } from './tx.ts';
+// Types only (D19): the audit vocabulary has one source, packages/contracts/src/audit.ts. Lint
+// refuses a value import here, so nothing of that package, zod included, loads with this one.
+import type { AuditAction, AuditEventOf } from '@tinnox/contracts';
+import { noteAuditRow } from './audit-note.ts';
+import { mintOrgId } from './org-id.ts';
+import type { Pool } from './pool.ts';
+import { statementsOf } from './pre-org.ts';
+import { poolAsTx, type Autocommit, type OrgId, type OrgTx, type PreOrgTx } from './tx.ts';
+
+/**
+ * What a lookup takes: any handle. It reads before the organisation is known, or its one
+ * statement is complete by itself, so the handle of `poolAsTx` will do, and so will a
+ * transaction of either kind.
+ */
+export type AnyScope = Autocommit | PreOrgTx;
 
 /** SHA-256 digest as a Buffer, the form stored in *_hash columns. */
 export function sha256(value: string | Uint8Array): Buffer {
@@ -23,16 +37,20 @@ function only<R>(rows: R[]): R | null {
 
 export interface MembershipLookup {
   readonly membershipId: string;
+  /**
+   * A plain string, not an `OrgId`: the subject is whatever the caller passed, so this lookup
+   * proves no credential, and nothing enters an organisation on its word.
+   */
   readonly orgId: string;
   readonly role: string;
   readonly orgName: string;
 }
 
 export async function membershipByOidcSub(
-  tx: Tx,
+  db: AnyScope,
   oidcSub: string,
 ): Promise<MembershipLookup | null> {
-  const { rows } = await tx.query<{
+  const { rows } = await statementsOf(db).query<{
     membership_id: string;
     org_id: string;
     role: string;
@@ -51,7 +69,7 @@ export interface LoginState {
 }
 
 export async function loginStatePut(
-  tx: Tx,
+  db: AnyScope,
   input: {
     stateHash: Buffer;
     codeVerifier: string;
@@ -60,7 +78,7 @@ export async function loginStatePut(
     ttlSeconds: number;
   },
 ): Promise<void> {
-  await tx.query('SELECT sec.login_state_put($1, $2, $3, $4, $5)', [
+  await statementsOf(db).query('SELECT sec.login_state_put($1, $2, $3, $4, $5)', [
     input.stateHash,
     input.codeVerifier,
     input.nonce,
@@ -70,8 +88,8 @@ export async function loginStatePut(
 }
 
 /** One-time: a second call with the same hash returns null. */
-export async function loginStateTake(tx: Tx, stateHash: Buffer): Promise<LoginState | null> {
-  const { rows } = await tx.query<{
+export async function loginStateTake(db: AnyScope, stateHash: Buffer): Promise<LoginState | null> {
+  const { rows } = await statementsOf(db).query<{
     code_verifier: string;
     nonce: string;
     return_to: string | null;
@@ -83,25 +101,26 @@ export async function loginStateTake(tx: Tx, stateHash: Buffer): Promise<LoginSt
 }
 
 /**
- * Outcome of `sec.session_create`. `role` stays a plain string here (this package depends
- * only on `pg`); the API narrows it.
+ * Outcome of `sec.session_create`. `role` stays a plain string here: at run time this package
+ * depends only on `pg`, and from `@tinnox/contracts` it takes types alone, for the audit
+ * events (D19). The API narrows the role.
  */
 export type SessionCreateResult =
   | {
       readonly outcome: 'created';
       readonly membershipId: string;
-      readonly orgId: string;
+      readonly orgId: OrgId;
       readonly role: string;
       readonly expiresAt: string;
     }
   /** The member's sessions were ended after this sign-in was authenticated: sign in again. */
-  | { readonly outcome: 'reauth'; readonly membershipId: string; readonly orgId: string }
+  | { readonly outcome: 'reauth'; readonly membershipId: string; readonly orgId: OrgId }
   /** No member with this subject, or a removed one: the sign-in is refused. */
   | { readonly outcome: 'no_membership' };
 
 /** sec.session_create (0013). authTime: the ID token's auth_time; null when the token has none. */
 export async function sessionCreate(
-  tx: Tx,
+  tx: PreOrgTx,
   input: {
     idHash: Buffer;
     oidcSub: string;
@@ -111,7 +130,7 @@ export async function sessionCreate(
     authTime: Date | null;
   },
 ): Promise<SessionCreateResult> {
-  const { rows } = await tx.query<{
+  const { rows } = await statementsOf(tx).query<{
     outcome: string;
     membership_id: string | null;
     org_id: string | null;
@@ -129,13 +148,13 @@ export async function sessionCreate(
     return {
       outcome: 'created',
       membershipId: r.membership_id,
-      orgId: r.org_id,
+      orgId: mintOrgId(r.org_id),
       role: r.role,
       expiresAt: iso(r.expires_at),
     };
   }
   if (r.outcome === 'reauth' && r.membership_id !== null && r.org_id !== null) {
-    return { outcome: 'reauth', membershipId: r.membership_id, orgId: r.org_id };
+    return { outcome: 'reauth', membershipId: r.membership_id, orgId: mintOrgId(r.org_id) };
   }
   if (r.outcome === 'no_membership') return { outcome: 'no_membership' };
   throw new Error(`unexpected session_create outcome ${r.outcome}`);
@@ -143,7 +162,7 @@ export async function sessionCreate(
 
 export interface SessionLookup {
   readonly membershipId: string;
-  readonly orgId: string;
+  readonly orgId: OrgId;
   readonly oidcSub: string;
   readonly role: string;
   readonly orgName: string;
@@ -154,11 +173,11 @@ export interface SessionLookup {
 
 /** Returns the live session and records activity, or null when missing, expired, idle or revoked. */
 export async function sessionByIdHash(
-  tx: Tx,
+  db: AnyScope,
   idHash: Buffer,
   idleTimeoutSeconds: number,
 ): Promise<SessionLookup | null> {
-  const { rows } = await tx.query<{
+  const { rows } = await statementsOf(db).query<{
     membership_id: string;
     org_id: string;
     oidc_sub: string;
@@ -176,7 +195,7 @@ export async function sessionByIdHash(
     ? null
     : {
         membershipId: r.membership_id,
-        orgId: r.org_id,
+        orgId: mintOrgId(r.org_id),
         oidcSub: r.oidc_sub,
         role: r.role,
         orgName: r.org_name,
@@ -188,10 +207,10 @@ export async function sessionByIdHash(
 
 /** Ends the session. Returns null when there was no live session. */
 export async function sessionRevoke(
-  tx: Tx,
+  tx: PreOrgTx,
   idHash: Buffer,
-): Promise<{ membershipId: string; orgId: string; idToken: string | null } | null> {
-  const { rows } = await tx.query<{
+): Promise<{ membershipId: string; orgId: OrgId; idToken: string | null } | null> {
+  const { rows } = await statementsOf(tx).query<{
     membership_id: string;
     org_id: string;
     id_token: string | null;
@@ -199,25 +218,43 @@ export async function sessionRevoke(
   const r = only(rows);
   return r === null
     ? null
-    : { membershipId: r.membership_id, orgId: r.org_id, idToken: r.id_token };
+    : { membershipId: r.membership_id, orgId: mintOrgId(r.org_id), idToken: r.id_token };
+}
+
+/**
+ * Ends the session in a statement of its own, with no audit row. The one accepted exception
+ * to "a revocation commits with its audit row" (CX-01 residual): the sign-out fallback, when
+ * the audited transaction failed and ending the session is still the safe direction. Every
+ * other revocation uses `sessionRevoke` on the transaction that also writes the audit row. Returns
+ * true when a live session was ended.
+ */
+export async function sessionRevokeUnaudited(pool: Pool, idHash: Buffer): Promise<boolean> {
+  const { rows } = await poolAsTx(pool, {
+    opener: 'sessionRevokeUnaudited',
+    instead:
+      'End the session on the outer tx with sessionRevoke(tx, idHash), and write its audit row on the same tx.',
+  }).query('SELECT 1 FROM sec.session_revoke($1)', [idHash]);
+  return rows.length > 0;
 }
 
 /**
  * sec.session_revoke_membership (0013): ends every live session of the member and sets the
  * member's cut-off, so older sessions and sign-ins authenticated before it are refused. The
  * cut-off is the start of this statement (never earlier than it was), so lock waits before it
- * are covered. Inside `withOrg` only: a member of another organisation, or no organisation
- * context, raises 42501. Returns the number of sessions ended (already expired ones are not).
+ * are covered. Takes an `OrgTx`: a member of another organisation raises 42501, and so would
+ * no organisation context. Returns the number of sessions ended (already expired ones are not).
  */
-export async function sessionRevokeMembership(tx: Tx, membershipId: string): Promise<number> {
+export async function sessionRevokeMembership(tx: OrgTx, membershipId: string): Promise<number> {
   const { rows } = await tx.query<{ n: number }>('SELECT sec.session_revoke_membership($1) AS n', [
     membershipId,
   ]);
   return rows[0]?.n ?? 0;
 }
 
-export async function sessionPurgeExpired(tx: Tx): Promise<number> {
-  const { rows } = await tx.query<{ n: number }>('SELECT sec.session_purge_expired() AS n');
+export async function sessionPurgeExpired(db: AnyScope): Promise<number> {
+  const { rows } = await statementsOf(db).query<{ n: number }>(
+    'SELECT sec.session_purge_expired() AS n',
+  );
   return rows[0]?.n ?? 0;
 }
 
@@ -227,7 +264,7 @@ export type PairingCreateResult =
   | { readonly outcome: 'code_collision' };
 
 export async function pairingCreate(
-  tx: Tx,
+  tx: PreOrgTx,
   input: {
     code: string;
     pollingTokenHash: Buffer;
@@ -238,7 +275,7 @@ export async function pairingCreate(
     windowSeconds: number;
   },
 ): Promise<PairingCreateResult> {
-  const { rows } = await tx.query<{
+  const { rows } = await statementsOf(tx).query<{
     outcome: string;
     pairing_id: string | null;
     expires_at: Date | null;
@@ -276,10 +313,10 @@ export const PAIRING_POLL_OUTCOMES = [
 export type PairingPollOutcome = (typeof PAIRING_POLL_OUTCOMES)[number];
 
 export async function pairingPoll(
-  tx: Tx,
+  tx: PreOrgTx,
   input: { pairingId: string; pollingTokenHash: Buffer; maxWrongAttempts: number },
 ): Promise<{ outcome: PairingPollOutcome; expiresAt: string | null }> {
-  const { rows } = await tx.query<{ outcome: string; expires_at: Date | null }>(
+  const { rows } = await statementsOf(tx).query<{ outcome: string; expires_at: Date | null }>(
     'SELECT outcome, expires_at FROM sec.pairing_poll($1, $2, $3)',
     [input.pairingId, input.pollingTokenHash, input.maxWrongAttempts],
   );
@@ -303,9 +340,9 @@ export type PairingClaimResult =
     }
   | { readonly outcome: 'invalid_code' | 'display_not_found' | 'rate_limited' };
 
-/** Must be called with a Tx from `withOrg`; the organisation is taken from the transaction context. */
+/** Takes an `OrgTx`: the organisation of the claim is the one of the transaction. */
 export async function pairingClaim(
-  tx: Tx,
+  tx: OrgTx,
   input: {
     code: string;
     displayId: string;
@@ -345,10 +382,10 @@ export async function pairingClaim(
 
 /**
  * Cancels the display's claims that its player has not collected yet, so none of them
- * can complete. Must be called with a Tx from `withOrg`, before the transaction touches
+ * can complete. Takes an `OrgTx`, and is called before the transaction touches
  * the display or its registrations. Returns the ids of the cancelled pairing sessions.
  */
-export async function pairingCancelClaims(tx: Tx, displayId: string): Promise<string[]> {
+export async function pairingCancelClaims(tx: OrgTx, displayId: string): Promise<string[]> {
   const { rows } = await tx.query<{ ids: string[] }>(
     'SELECT sec.pairing_cancel_claims($1) AS ids',
     [displayId],
@@ -360,7 +397,7 @@ export type PairingCompleteResult =
   | {
       readonly outcome: 'completed';
       readonly registrationId: string;
-      readonly orgId: string;
+      readonly orgId: OrgId;
       readonly displayId: string;
     }
   | { readonly outcome: 'not_claimable' };
@@ -371,10 +408,10 @@ export type PairingCompleteResult =
  * and this pairing is cancelled and answers `not_claimable`.
  */
 export async function pairingComplete(
-  tx: Tx,
+  tx: PreOrgTx,
   input: { pairingId: string; pollingTokenHash: Buffer; deviceTokenHash: Buffer },
 ): Promise<PairingCompleteResult> {
-  const { rows } = await tx.query<{
+  const { rows } = await statementsOf(tx).query<{
     outcome: string;
     registration_id: string | null;
     org_id: string | null;
@@ -395,7 +432,7 @@ export async function pairingComplete(
     return {
       outcome: 'completed',
       registrationId: r.registration_id,
-      orgId: r.org_id,
+      orgId: mintOrgId(r.org_id),
       displayId: r.display_id,
     };
   }
@@ -403,78 +440,127 @@ export async function pairingComplete(
   throw new Error(`unexpected pairing_complete outcome ${r.outcome}`);
 }
 
-export async function pairingPurge(tx: Tx, olderThanSeconds: number): Promise<number> {
-  const { rows } = await tx.query<{ n: number }>('SELECT sec.pairing_purge($1) AS n', [
-    olderThanSeconds,
-  ]);
+export async function pairingPurge(db: AnyScope, olderThanSeconds: number): Promise<number> {
+  const { rows } = await statementsOf(db).query<{ n: number }>(
+    'SELECT sec.pairing_purge($1) AS n',
+    [olderThanSeconds],
+  );
   return rows[0]?.n ?? 0;
 }
 
 /** Removes heartbeat history older than `olderThanSeconds` (at least 3600) in every organisation. */
-export async function heartbeatLogPurge(tx: Tx, olderThanSeconds: number): Promise<number> {
-  const { rows } = await tx.query<{ n: number }>('SELECT sec.heartbeat_log_purge($1) AS n', [
-    olderThanSeconds,
-  ]);
+export async function heartbeatLogPurge(db: AnyScope, olderThanSeconds: number): Promise<number> {
+  const { rows } = await statementsOf(db).query<{ n: number }>(
+    'SELECT sec.heartbeat_log_purge($1) AS n',
+    [olderThanSeconds],
+  );
   return rows[0]?.n ?? 0;
 }
 
 export interface DeviceLookup {
   readonly registrationId: string;
-  readonly orgId: string;
+  readonly orgId: OrgId;
   readonly displayId: string;
 }
 
 /** Null for an unknown or revoked token. */
-export async function deviceByTokenHash(tx: Tx, tokenHash: Buffer): Promise<DeviceLookup | null> {
-  const { rows } = await tx.query<{ registration_id: string; org_id: string; display_id: string }>(
-    'SELECT registration_id, org_id, display_id FROM sec.device_by_token_hash($1)',
-    [tokenHash],
-  );
+export async function deviceByTokenHash(
+  db: AnyScope,
+  tokenHash: Buffer,
+): Promise<DeviceLookup | null> {
+  const { rows } = await statementsOf(db).query<{
+    registration_id: string;
+    org_id: string;
+    display_id: string;
+  }>('SELECT registration_id, org_id, display_id FROM sec.device_by_token_hash($1)', [tokenHash]);
   const r = only(rows);
   return r === null
     ? null
-    : { registrationId: r.registration_id, orgId: r.org_id, displayId: r.display_id };
+    : { registrationId: r.registration_id, orgId: mintOrgId(r.org_id), displayId: r.display_id };
 }
 
-/** Every organisation's id, for the alert check (0014); it then enters each with withOrg. */
-export async function displayAlertOrgs(tx: Tx): Promise<string[]> {
-  const { rows } = await tx.query<{ org_id: string }>(
+/**
+ * The organisation and display of an active registration, by the registration id a signed media
+ * URL names (0003); null for an unknown or revoked one. The media route verifies the signature
+ * first, then reads in the organisation with readOrg.
+ */
+export async function deviceByRegistrationId(
+  db: AnyScope,
+  registrationId: string,
+): Promise<{ orgId: OrgId; displayId: string } | null> {
+  const { rows } = await statementsOf(db).query<{ org_id: string; display_id: string }>(
+    'SELECT org_id, display_id FROM sec.device_by_registration_id($1)',
+    [registrationId],
+  );
+  const r = only(rows);
+  return r === null ? null : { orgId: mintOrgId(r.org_id), displayId: r.display_id };
+}
+
+export interface MediaProcessingJob {
+  readonly mediaId: string;
+  readonly orgId: OrgId;
+  readonly createdAt: Date;
+}
+
+/**
+ * The oldest `limit` media rows still waiting for validation, in every organisation (0003): the
+ * media pipeline's queue. It then enters each row's organisation with readOrg and changeAsJob
+ * (apps/api/src/jobs.ts).
+ */
+export async function mediaProcessingJobs(
+  db: AnyScope,
+  limit: number,
+): Promise<MediaProcessingJob[]> {
+  const { rows } = await statementsOf(db).query<{
+    media_id: string;
+    org_id: string;
+    created_at: Date;
+  }>('SELECT media_id, org_id, created_at FROM sec.media_processing_jobs($1)', [limit]);
+  return rows.map((r) => ({
+    mediaId: r.media_id,
+    orgId: mintOrgId(r.org_id),
+    createdAt: r.created_at,
+  }));
+}
+
+/** Every organisation's id, for the alert check (0014); it then enters each with changeAsJob. */
+export async function displayAlertOrgs(db: AnyScope): Promise<OrgId[]> {
+  const { rows } = await statementsOf(db).query<{ org_id: string }>(
     'SELECT org_id FROM sec.display_alert_orgs()',
   );
-  return rows.map((r) => r.org_id);
+  return rows.map((r) => mintOrgId(r.org_id));
 }
 
 export interface AlertRecipientLookup {
-  readonly orgId: string;
+  readonly orgId: OrgId;
   readonly recipientId: string;
 }
 
 /** The unconfirmed, unexpired recipient a confirmation link names; null otherwise (0014). */
 export async function alertRecipientByTokenHash(
-  tx: Tx,
+  db: AnyScope,
   tokenHash: Buffer,
 ): Promise<AlertRecipientLookup | null> {
-  const { rows } = await tx.query<{ org_id: string; recipient_id: string }>(
+  const { rows } = await statementsOf(db).query<{ org_id: string; recipient_id: string }>(
     'SELECT org_id, recipient_id FROM sec.alert_recipient_by_token_hash($1)',
     [tokenHash],
   );
   const r = only(rows);
-  return r === null ? null : { orgId: r.org_id, recipientId: r.recipient_id };
+  return r === null ? null : { orgId: mintOrgId(r.org_id), recipientId: r.recipient_id };
 }
 
-export interface AuditInput {
-  readonly actorType: 'operator' | 'player' | 'system' | 'anonymous';
-  readonly actorId: string | null;
-  readonly action: string;
-  readonly objectType: string | null;
-  readonly objectId: string | null;
-  readonly result: 'success' | 'failure' | 'denied';
-  /** Small structured context. Never file content, secrets or signed URLs. */
-  readonly detail: Record<string, unknown> | null;
-}
+/**
+ * An audit event: one member per `AuditAction`, each with the actor kinds, the object kind and
+ * the closed `detail` shape that `AuditEventShapes` of `@tinnox/contracts` gives the action
+ * (AG-3.3, AG-3.4). So an action outside the list, a detail field nobody declared and an event
+ * without actor, object or result do not compile, nor does an operator or player actor, or a
+ * named kind of object, without its id. The organisation is not a field: the database
+ * takes it from the transaction (`app_org_id()`), and it stamps the time itself.
+ */
+export type AuditInput = AuditEventOf<AuditAction>;
 
-/** Appends an audit event for the organisation of the current `withOrg` transaction. */
-export async function auditScoped(tx: Tx, event: AuditInput): Promise<void> {
+/** Appends an audit event for the organisation of the transaction: it takes an `OrgTx`. */
+export async function auditScoped(tx: OrgTx, event: AuditInput): Promise<void> {
   await tx.query(
     `INSERT INTO audit_event (org_id, actor_type, actor_id, action, object_type, object_id, result, detail)
      VALUES (app_org_id(), $1, $2, $3, $4, $5, $6, $7)`,
@@ -488,11 +574,11 @@ export async function auditScoped(tx: Tx, event: AuditInput): Promise<void> {
       event.detail === null ? null : JSON.stringify(event.detail),
     ],
   );
+  noteAuditRow(tx, event.action);
 }
 
-/** Appends an audit event that has no organisation (before sign-in, rejected device token). */
-export async function auditUnscoped(tx: Tx, event: AuditInput): Promise<void> {
-  await tx.query('SELECT sec.audit_unscoped($1, $2, $3, $4, $5, $6, $7)', [
+function writeUnscoped(handle: Autocommit, event: AuditInput): Promise<unknown> {
+  return handle.query('SELECT sec.audit_unscoped($1, $2, $3, $4, $5, $6, $7)', [
     event.actorType,
     event.actorId,
     event.action,
@@ -501,4 +587,65 @@ export async function auditUnscoped(tx: Tx, event: AuditInput): Promise<void> {
     event.result,
     event.detail === null ? null : JSON.stringify(event.detail),
   ]);
+}
+
+/**
+ * Appends an audit event that has no organisation (a sign-in by nobody's member, a pairing
+ * attempt), on the transaction of what it records: a `PreOrgTx`, the handle from before any
+ * organisation is entered.
+ */
+export async function auditUnscoped(tx: PreOrgTx, event: AuditInput): Promise<void> {
+  await writeUnscoped(statementsOf(tx), event);
+  noteAuditRow(tx, event.action);
+}
+
+/** The event of `action`, narrowed to no actor id and no object: nothing it could name changed. */
+type Refusal<A extends AuditAction> = AuditEventOf<A> & {
+  readonly actorId: null;
+  readonly objectType: null;
+  readonly objectId: null;
+};
+
+/**
+ * What `auditStandalone` may record: a refusal with no change to commit with, so there is no
+ * transaction to write it on (D2). A closed list with no `success` member and no actor or
+ * object id, so a change can never be recorded this way. A sign-in refused at or after the
+ * provider call has already had its one-time login state consumed by `loginStateTake`, in an
+ * earlier statement of its own. That is the only change on these paths, and it is not audited
+ * by itself (D3).
+ *
+ * Does a new kind of refusal belong here? Only when it comes before the organisation is
+ * known, nothing but the login state was changed and nothing was issued on its path, and no
+ * transaction is open to carry the row. A refusal inside an organisation is a scoped
+ * audit-only transaction instead: `recordRefusal` of apps/api/src/auth/refusal.ts, a `changeOrg`
+ * given the refusal event and nothing else, as the permission, CSRF and upload refusals do
+ * (SCR-32).
+ */
+export type StandaloneAuditEvent =
+  /** A sign-in that was refused, or that failed, before any session existed. */
+  | (Refusal<'auth.login'> & {
+      readonly actorType: 'anonymous';
+      readonly result: 'denied' | 'failure';
+    })
+  /** A device credential the API did not accept. */
+  | (Refusal<'player.auth_rejected'> & {
+      readonly actorType: 'player';
+      readonly result: 'denied';
+    });
+
+/**
+ * Appends an unscoped audit event in a statement of its own. For the refusals of
+ * `StandaloneAuditEvent` only; every other event is returned from its change, and `changeOrg`
+ * or `changePreOrg` writes it with `auditScoped` or `auditUnscoped` on that change's
+ * transaction.
+ */
+export async function auditStandalone(pool: Pool, event: StandaloneAuditEvent): Promise<void> {
+  await writeUnscoped(
+    poolAsTx(pool, {
+      opener: 'auditStandalone',
+      instead:
+        'Return the event from the outer change as { value, audit }: changeOrg and changePreOrg, and the wrappers built on them (changeAsOperator, changeAsDevice, changeAsJob, changeOrgAsMigrator), write it on that transaction.',
+    }),
+    event,
+  );
 }

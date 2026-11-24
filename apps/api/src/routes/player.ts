@@ -7,6 +7,14 @@
  * can authorise an operator action.
  *
  * Registered under the prefix /player with CORS limited to the player origin (D7).
+ *
+ * Pairing does not know its organisation when it starts, so create, poll and complete run in
+ * changePreOrg, held to the route's entry in OTHER_ROUTE_AUDIT. What a player changes with its
+ * credential (giving it up, the heartbeat) runs in changeAsDevice, for the organisation of the
+ * credential. Each change returns its audit event, or says why it records none, and the wrapper
+ * writes the row on that transaction. A refused credential has no change to pair with and is
+ * recorded on its own (auditStandalone, D2). The manifest, the media addresses and the media
+ * bytes are reads: readOrg.
  */
 import { createHash } from 'node:crypto';
 import cors from '@fastify/cors';
@@ -30,22 +38,22 @@ import {
   type PairingPollResponse,
 } from '@tinnox/contracts';
 import {
-  auditScoped,
-  auditUnscoped,
-  deviceByTokenHash,
+  auditStandalone,
+  changePreOrg,
+  deviceByRegistrationId,
   pairingComplete,
   pairingCreate,
   pairingPoll,
   poolAsTx,
+  readOrg,
   sha256,
-  withOrg,
-  withoutOrg,
-  withResolvedOrg,
-  type DeviceLookup,
+  unaudited,
+  type PairingCreateResult,
 } from '@tinnox/db';
 import { heartbeatRejection, reduceHeartbeat } from '@tinnox/domain';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
+import { changeAsDevice, verifyDeviceCredential, type VerifiedDevice } from '../auth/device.ts';
 import { AuthFailureGuard, clientKeyOf } from '../auth/failure-guard.ts';
 import { perMinute, type AppContext } from '../context.ts';
 import {
@@ -56,6 +64,7 @@ import {
 } from '../display-state.ts';
 import { HttpError, notFound, parseInput } from '../errors.ts';
 import { serveObject } from '../media/serve.ts';
+import { routeStatement } from '../route-audit.ts';
 import {
   buildMediaUrl,
   clientFingerprint,
@@ -138,7 +147,7 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
     request: FastifyRequest,
     record: { count: number; crossedLimit: boolean },
   ): Promise<void> {
-    await auditUnscoped(unscoped, {
+    await auditStandalone(pool, {
       actorType: 'player',
       actorId: null,
       action: 'player.auth_rejected',
@@ -155,7 +164,7 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
   }
 
   /** Resolves the device credential. Unknown and revoked credentials are indistinguishable (401). */
-  async function authenticate(request: FastifyRequest): Promise<DeviceLookup> {
+  async function authenticate(request: FastifyRequest): Promise<VerifiedDevice> {
     const token = bearerToken(request);
     if (token === null) {
       throw new HttpError(401, 'unauthenticated', 'A device credential is required.', {
@@ -172,7 +181,7 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
         { headers: { 'retry-after': String(failures.retryAfterSeconds(request.ip)) } },
       );
     }
-    const device = await deviceByTokenHash(unscoped, tokenHash);
+    const device = await verifyDeviceCredential(unscoped, tokenHash);
     if (device === null) {
       const record = failures.recordFailure(request.ip, credential);
       if (record.first || record.crossedLimit) {
@@ -203,12 +212,13 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
     async (request, reply): Promise<PairingCreateResponse> => {
       const pollingToken = randomToken();
       const clientKey = pairingClientKey(config.pairingClientKeySecret, request.ip);
+      const statement = routeStatement(request);
       for (let attempt = 0; attempt < 5; attempt += 1) {
         const code = randomPairingCode();
         // One transaction: the pairing session and its audit event commit together, so a
         // failed audit leaves no session behind (round 3, SCU-01 and SCX-04).
-        const result = await withoutOrg(pool, async (tx) => {
-          const created = await pairingCreate(tx, {
+        const result = await changePreOrg<PairingCreateResult>(pool, statement, async (pre) => {
+          const created = await pairingCreate(pre, {
             code,
             pollingTokenHash: sha256(pollingToken),
             clientKey,
@@ -216,8 +226,15 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
             maxSessionsPerClient: limits.pairingMaxSessionsPerIp,
             windowSeconds: limits.pairingSessionWindowSeconds,
           });
-          if (created.outcome === 'created') {
-            await auditUnscoped(tx, {
+          if (created.outcome !== 'created') {
+            // Rate-limited, or the code was taken: no session was made. All that
+            // sec.pairing_create can have written is the mark on the pending sessions whose
+            // time had passed, which is not audited, as before (the step 20 ruling, CMS-36).
+            return { value: created, audit: unaudited('pairing_expired_by_time') };
+          }
+          return {
+            value: created,
+            audit: {
               actorType: 'anonymous',
               actorId: null,
               action: 'pairing.create',
@@ -225,9 +242,8 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
               objectId: created.pairingId,
               result: 'success',
               detail: null,
-            });
-          }
-          return created;
+            },
+          };
         });
         if (result.outcome === 'rate_limited') {
           throw new HttpError(
@@ -272,28 +288,42 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
       // One transaction: the wrong token that locks the session and the lockout's audit
       // event commit together (round 3, SCX-04). The answer is decided after the commit;
       // throwing inside would roll back the counted attempt.
-      const poll = await withoutOrg(pool, async (tx) => {
-        const polled = await pairingPoll(tx, {
+      const statement = routeStatement(request);
+      const poll = await changePreOrg(pool, statement, async (pre) => {
+        const polled = await pairingPoll(pre, {
           pairingId: id,
           pollingTokenHash,
           maxWrongAttempts: limits.pairingMaxWrongAttempts,
         });
         if (polled.outcome === 'wrong_token_locked') {
-          // Never the code or a polling token.
-          await auditUnscoped(tx, {
-            actorType: 'anonymous',
-            actorId: null,
-            action: 'pairing.lock',
-            objectType: 'pairing_session',
-            objectId: id,
-            result: 'denied',
-            detail: {
-              reason: 'wrong_polling_token',
-              client: clientFingerprint(config.pairingClientKeySecret, clientKeyOf(request.ip)),
+          return {
+            value: polled,
+            // Never the code or a polling token.
+            audit: {
+              actorType: 'anonymous',
+              actorId: null,
+              action: 'pairing.lock',
+              objectType: 'pairing_session',
+              objectId: id,
+              result: 'denied',
+              detail: {
+                reason: 'wrong_polling_token',
+                client: clientFingerprint(config.pairingClientKeySecret, clientKeyOf(request.ip)),
+              },
             },
-          });
+          };
         }
-        return polled;
+        // A wrong token under the limit is only counted (D3).
+        if (polled.outcome === 'wrong_token') {
+          return { value: polled, audit: unaudited('counter_under_threshold') };
+        }
+        // sec.pairing_poll marks the session expired once its time has passed, which is not
+        // audited, as before (the step 20 ruling, CMS-36).
+        if (polled.outcome === 'expired') {
+          return { value: polled, audit: unaudited('pairing_expired_by_time') };
+        }
+        // Every other outcome only read the session.
+        return { value: polled, audit: unaudited('nothing_changed') };
       });
       switch (poll.outcome) {
         case 'pending':
@@ -320,14 +350,32 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
       // One transaction: the registration and its audit event commit together, and a failure
       // leaves the pairing claimed, so the player's next poll can still collect.
       const deviceToken = randomToken();
-      const paired = await withResolvedOrg(pool, async (tx, enterOrg) => {
-        const done = await pairingComplete(tx, {
+      const paired = await changePreOrg(pool, statement, async (pre, enterOrg) => {
+        const done = await pairingComplete(pre, {
           pairingId: id,
           pollingTokenHash,
           deviceTokenHash: sha256(deviceToken),
         });
-        if (done.outcome !== 'completed') return null;
-        await enterOrg(done.orgId);
+        if (done.outcome !== 'completed') {
+          // Every attempt at pairing is audited, whatever its result (D3). A refusal here can
+          // also end the claim: the member who claimed the code has left or had their sessions
+          // ended, or the screen got a player meanwhile. That change commits with this row. A
+          // refusal names no organisation (sec.pairing_complete returns none), and none is
+          // entered, so the row has none, like pairing.create and pairing.lock.
+          return {
+            value: null,
+            audit: {
+              actorType: 'anonymous',
+              actorId: null,
+              action: 'pairing.complete',
+              objectType: 'pairing_session',
+              objectId: id,
+              result: 'denied',
+              detail: { reason: done.outcome },
+            },
+          };
+        }
+        const tx = await enterOrg(done.orgId);
         const { rows } = await tx.query<{
           id: string;
           name: string;
@@ -344,16 +392,19 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
         );
         const row = rows[0];
         if (row === undefined) throw new Error('display of a completed pairing is not visible');
-        await auditScoped(tx, {
-          actorType: 'player',
-          actorId: done.registrationId,
-          action: 'pairing.complete',
-          objectType: 'player_registration',
-          objectId: done.registrationId,
-          result: 'success',
-          detail: { displayId: done.displayId, pairingId: id },
-        });
-        return { done, display: row };
+        // Written for the organisation entered above.
+        return {
+          value: { done, display: row },
+          audit: {
+            actorType: 'player',
+            actorId: done.registrationId,
+            action: 'pairing.complete',
+            objectType: 'player_registration',
+            objectId: done.registrationId,
+            result: 'success',
+            detail: { displayId: done.displayId, pairingId: id },
+          },
+        };
       });
       if (paired === null) return { status: 'consumed' };
       const { done, display } = paired;
@@ -378,14 +429,17 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
   // packages/contracts ROUTES; documented in docs/player-protocol-v1.md.
   app.delete('/registration', { config: credentialLimit(30) }, async (request, reply) => {
     const device = await authenticate(request);
-    await withOrg(pool, device.orgId, async (tx) => {
+    await changeAsDevice(ctx, request, device, async (tx) => {
       const revoked = await tx.query(
         `UPDATE player_registration SET revoked_at = now(), revoked_reason = 'player_reset'
          WHERE id = $1 AND org_id = app_org_id() AND revoked_at IS NULL`,
         [device.registrationId],
       );
-      if (revoked.rowCount === 1) {
-        await auditScoped(tx, {
+      // Revoked between the credential lookup and here (an operator, or a second reset).
+      if (revoked.rowCount !== 1) return { value: undefined, audit: unaudited('nothing_changed') };
+      return {
+        value: undefined,
+        audit: {
           actorType: 'player',
           actorId: device.registrationId,
           action: 'player.revoke',
@@ -393,8 +447,8 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
           objectId: device.registrationId,
           result: 'success',
           detail: { reason: 'player_reset', displayId: device.displayId },
-        });
-      }
+        },
+      };
     });
     return reply.code(204).send();
   });
@@ -406,7 +460,7 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
     { config: credentialLimit(240) },
     async (request, reply): Promise<ManifestResponse | undefined> => {
       const device = await authenticate(request);
-      const row = await withOrg(pool, device.orgId, async (tx) => {
+      const row = await readOrg(pool, device.orgId, async (tx) => {
         const { rows } = await tx.query<{ id: string; manifest: unknown }>(
           `SELECT p.id, p.manifest
            FROM display_delivery dd
@@ -448,7 +502,7 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
       const device = await authenticate(request);
       const input = parseInput(MediaUrlsRequestSchema, request.body, 'request');
       const wanted = [...new Set(input.assetIds)];
-      const found = await withOrg(pool, device.orgId, async (tx) => {
+      const found = await readOrg(pool, device.orgId, async (tx) => {
         // Only the publication currently assigned to this credential's display.
         const current = await tx.query(
           `SELECT 1 FROM display_delivery
@@ -530,16 +584,12 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
         );
       }
 
-      const { rows: devices } = await unscoped.query<{ org_id: string; display_id: string }>(
-        'SELECT org_id, display_id FROM sec.device_by_registration_id($1)',
-        [claims.registrationId],
-      );
-      const device = devices[0];
-      if (device === undefined) {
+      const device = await deviceByRegistrationId(unscoped, claims.registrationId);
+      if (device === null) {
         throw new HttpError(401, 'device_revoked', 'This device registration is no longer valid.');
       }
 
-      const asset = await withOrg(pool, device.org_id, async (tx) => {
+      const asset = await readOrg(pool, device.orgId, async (tx) => {
         const { rows } = await tx.query<{
           storage_key: string | null;
           mime_type: string | null;
@@ -551,7 +601,7 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
            JOIN media m ON m.id = pa.media_id AND m.org_id = pa.org_id
            WHERE p.id = $1 AND p.org_id = app_org_id() AND p.display_id = $2 AND pa.media_id = $3
            LIMIT 1`,
-          [claims.publicationId, device.display_id, claims.assetId],
+          [claims.publicationId, device.displayId, claims.assetId],
         );
         return rows[0];
       });
@@ -566,7 +616,7 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
       }
       return serveObject(request, reply, {
         storage: ctx.storage,
-        orgId: device.org_id,
+        orgId: device.orgId,
         storageKey: asset.storage_key,
         mimeType: mime.data,
         sha256: asset.sha256,
@@ -586,7 +636,8 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
       const device = await authenticate(request);
       const receivedAt = ctx.now();
 
-      return withOrg(pool, device.orgId, async (tx) => {
+      // What this stores is telemetry (D3): the route's statement in OTHER_ROUTE_AUDIT says so.
+      return changeAsDevice(ctx, request, device, async (tx) => {
         const displays = await tx.query<{ route: 'browser' }>(
           'SELECT route FROM display WHERE id = $1 AND org_id = app_org_id()',
           [device.displayId],
@@ -698,11 +749,14 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
           );
         }
         return {
-          accepted: reduced.accepted,
-          ignoredReason: reduced.ignoredReason,
-          desiredPublicationId: row.desired_publication_id,
-          serverTime: receivedAt.toISOString(),
-          nextHeartbeatInMs: limits.heartbeatIntervalSeconds * 1000,
+          value: {
+            accepted: reduced.accepted,
+            ignoredReason: reduced.ignoredReason,
+            desiredPublicationId: row.desired_publication_id,
+            serverTime: receivedAt.toISOString(),
+            nextHeartbeatInMs: limits.heartbeatIntervalSeconds * 1000,
+          },
+          audit: unaudited('telemetry'),
         };
       });
     },

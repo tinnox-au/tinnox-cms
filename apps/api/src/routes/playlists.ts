@@ -29,14 +29,21 @@ import {
   type PublishResponse,
   type Transition,
 } from '@tinnox/contracts';
-import { auditScoped, STAGE_A_CONSTRAINTS, violatedConstraint, withOrg, type Tx } from '@tinnox/db';
+import {
+  readOrg,
+  STAGE_A_CONSTRAINTS,
+  unaudited,
+  violatedConstraint,
+  type Change,
+  type OrgReadTx,
+} from '@tinnox/db';
 import { isAppDraftItem, validatePlaylist } from '@tinnox/domain';
 import type { FastifyInstance } from 'fastify';
 import { APP_COLUMNS, toAppDto, type AppRow } from '../app-rows.ts';
-import { withOrgAllowed, withOrgDecisionAllowed } from '../auth/permissions.ts';
+import { changeAsOperator } from '../auth/permissions.ts';
 import { operatorOf } from '../auth/session.ts';
 import { perMinute, type AppContext } from '../context.ts';
-import { accept, bigintToNumber, iso, refuse } from '../db-helpers.ts';
+import { accept, bigintToNumber, iso, refuse, type Decision } from '../db-helpers.ts';
 import { HttpError, notFound, parseInput, pgErrorCode } from '../errors.ts';
 import { MEDIA_COLUMNS, toMediaDto, type MediaRow } from '../media/rows.ts';
 import {
@@ -84,7 +91,7 @@ interface ItemRow {
   fit: FitMode | null;
 }
 
-async function loadPlaylistDto(tx: Tx, id: string): Promise<PlaylistDto | null> {
+async function loadPlaylistDto(tx: OrgReadTx, id: string): Promise<PlaylistDto | null> {
   const playlist = await tx.query<PlaylistRow & { transition: Transition; shuffle: boolean }>(
     `SELECT id, name, description, transition, shuffle, created_at, updated_at FROM playlist
      WHERE id = $1 AND org_id = app_org_id() AND deleted_at IS NULL`,
@@ -144,6 +151,12 @@ async function loadPlaylistDto(tx: Tx, id: string): Promise<PlaylistDto | null> 
   };
 }
 
+/** What one attempt to publish answers: the publication, and whether this request made it. */
+interface PublishOutcome {
+  readonly response: PublishResponse;
+  readonly created: boolean;
+}
+
 function toPublishResponse(row: PublicationRow, replayed: boolean): PublishResponse {
   const manifest = ManifestSchema.safeParse(row.manifest);
   if (!manifest.success) throw new Error('stored manifest failed schema validation');
@@ -167,7 +180,7 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
    */
   app.get(ROUTES.playlists, async (request): Promise<PlaylistListResponse> => {
     const session = operatorOf(request);
-    return withOrg(pool, session.orgId, async (tx) => {
+    return readOrg(pool, session.orgId, async (tx) => {
       const { rows } = await tx.query<SummaryRow>(
         `SELECT p.id, p.name, p.description, p.created_at, p.updated_at,
                 COALESCE(s.item_count, 0) AS item_count,
@@ -230,25 +243,27 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
   app.post(ROUTES.playlists, async (request, reply): Promise<PlaylistDto> => {
     const session = operatorOf(request);
     const input = parseInput(PlaylistCreateSchema, request.body, 'playlist');
-    const dto = await withOrgAllowed(ctx, request, async (tx) => {
+    const dto = await changeAsOperator(ctx, request, async (tx) => {
       const inserted = await tx.query<{ id: string }>(
         'INSERT INTO playlist (org_id, name) VALUES (app_org_id(), $1) RETURNING id',
         [input.name],
       );
       const id = inserted.rows[0]?.id;
       if (id === undefined) throw new Error('playlist insert returned no row');
-      await auditScoped(tx, {
-        actorType: 'operator',
-        actorId: session.membershipId,
-        action: 'playlist.create',
-        objectType: 'playlist',
-        objectId: id,
-        result: 'success',
-        detail: null,
-      });
       const created = await loadPlaylistDto(tx, id);
       if (created === null) throw new Error('created playlist is not visible');
-      return created;
+      return {
+        value: created,
+        audit: {
+          actorType: 'operator',
+          actorId: session.membershipId,
+          action: 'playlist.create',
+          objectType: 'playlist',
+          objectId: id,
+          result: 'success',
+          detail: null,
+        },
+      };
     });
     void reply.code(201);
     return dto;
@@ -257,7 +272,7 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
   app.get(ROUTES.playlistPattern, async (request): Promise<PlaylistDto> => {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
-    return withOrg(pool, session.orgId, async (tx) => {
+    return readOrg(pool, session.orgId, async (tx) => {
       const dto = await loadPlaylistDto(tx, id);
       if (dto === null) throw notFound('The playlist');
       return dto;
@@ -272,7 +287,7 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     const input = parseInput(PlaylistReplaceSchema, request.body, 'playlist');
     try {
-      return await withOrgAllowed(ctx, request, async (tx) => {
+      return await changeAsOperator(ctx, request, async (tx) => {
         const locked = await tx.query(
           `SELECT 1 FROM playlist
            WHERE id = $1 AND org_id = app_org_id() AND deleted_at IS NULL FOR UPDATE`,
@@ -332,23 +347,25 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
             input.shuffle ?? null,
           ],
         );
-        await auditScoped(tx, {
-          actorType: 'operator',
-          actorId: session.membershipId,
-          action: 'playlist.update',
-          objectType: 'playlist',
-          objectId: id,
-          result: 'success',
-          // An option left out is undefined and so absent from the stored JSON.
-          detail: {
-            itemCount: input.items.length,
-            transition: input.transition,
-            shuffle: input.shuffle,
-          },
-        });
         const dto = await loadPlaylistDto(tx, id);
         if (dto === null) throw new Error('updated playlist is not visible');
-        return dto;
+        return {
+          value: dto,
+          audit: {
+            actorType: 'operator',
+            actorId: session.membershipId,
+            action: 'playlist.update',
+            objectType: 'playlist',
+            objectId: id,
+            result: 'success',
+            // An option left out is undefined and so absent from the stored JSON.
+            detail: {
+              itemCount: input.items.length,
+              transition: input.transition,
+              shuffle: input.shuffle,
+            },
+          },
+        };
       });
     } catch (error) {
       if (pgErrorCode(error) === '23503') {
@@ -371,7 +388,7 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
     async (request, reply): Promise<PlaylistDuplicateResponse> => {
       const session = operatorOf(request);
       const { id } = parseInput(IdParamSchema, request.params, 'address');
-      const dto = await withOrgAllowed(ctx, request, async (tx) => {
+      const dto = await changeAsOperator(ctx, request, async (tx) => {
         // Held until commit, so the items copied below are the items of one moment.
         const source = await tx.query<{
           name: string;
@@ -406,18 +423,20 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
            WHERE i.playlist_id = $1 AND i.org_id = app_org_id()`,
           [id, copyId],
         );
-        await auditScoped(tx, {
-          actorType: 'operator',
-          actorId: session.membershipId,
-          action: 'playlist.create',
-          objectType: 'playlist',
-          objectId: copyId,
-          result: 'success',
-          detail: { duplicatedFrom: id.toLowerCase(), itemCount: copied.rowCount ?? 0 },
-        });
         const created = await loadPlaylistDto(tx, copyId);
         if (created === null) throw new Error('duplicated playlist is not visible');
-        return created;
+        return {
+          value: created,
+          audit: {
+            actorType: 'operator',
+            actorId: session.membershipId,
+            action: 'playlist.create',
+            objectType: 'playlist',
+            objectId: copyId,
+            result: 'success',
+            detail: { duplicatedFrom: id.toLowerCase(), itemCount: copied.rowCount ?? 0 },
+          },
+        };
       });
       void reply.code(201);
       return dto;
@@ -439,7 +458,7 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
     const inUse = (message: string, details?: { path: string; message: string }[]): HttpError =>
       new HttpError(409, 'playlist_in_use', message, details === undefined ? {} : { details });
     try {
-      await withOrgAllowed(ctx, request, async (tx) => {
+      await changeAsOperator(ctx, request, async (tx) => {
         const locked = await tx.query(
           `SELECT 1 FROM playlist
            WHERE id = $1 AND org_id = app_org_id() AND deleted_at IS NULL FOR UPDATE`,
@@ -496,15 +515,18 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
           'UPDATE playlist SET deleted_at = now() WHERE id = $1 AND org_id = app_org_id()',
           [id],
         );
-        await auditScoped(tx, {
-          actorType: 'operator',
-          actorId: session.membershipId,
-          action: 'playlist.delete',
-          objectType: 'playlist',
-          objectId: id,
-          result: 'success',
-          detail: { itemCount: removed.rowCount ?? 0 },
-        });
+        return {
+          value: undefined,
+          audit: {
+            actorType: 'operator',
+            actorId: session.membershipId,
+            action: 'playlist.delete',
+            objectType: 'playlist',
+            objectId: id,
+            result: 'success',
+            detail: { itemCount: removed.rowCount ?? 0 },
+          },
+        };
       });
     } catch (error) {
       // A display was given this playlist, or a schedule or a layout took it, between
@@ -544,11 +566,14 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
       const playlistId = params.id.toLowerCase();
       const displayId = body.displayId.toLowerCase();
 
-      const attempt = (): Promise<{ response: PublishResponse; created: boolean }> =>
-        withOrgDecisionAllowed<{ response: PublishResponse; created: boolean }>(
+      // A refusal is a decision, not a throw: a rejected publication is an attempt, so its audit
+      // row commits with the decision (D3), and the refusal is thrown once the transaction has
+      // committed.
+      const attempt = async (): Promise<PublishOutcome> => {
+        const decision = await changeAsOperator(
           ctx,
           request,
-          async (tx) => {
+          async (tx): Promise<Change<Decision<PublishOutcome>>> => {
             // After the role check, which every attempt repeats first.
             await lockPublishKey(tx, displayId, key);
             const previous = await findPublicationByKey(tx, displayId, key);
@@ -561,15 +586,23 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
                 previous.manifest !== null &&
                 ('schedule' in previous.manifest || 'zones' in previous.manifest);
               if (previous.playlist_id !== playlistId || container) {
-                return refuse(
-                  new HttpError(
-                    409,
-                    'idempotency_conflict',
-                    'This Idempotency-Key was already used to publish a different playlist to this screen.',
+                // Refused before anything was written; no audit row, as before this move (a 409
+                // business-rule refusal).
+                return {
+                  value: refuse(
+                    new HttpError(
+                      409,
+                      'idempotency_conflict',
+                      'This Idempotency-Key was already used to publish a different playlist to this screen.',
+                    ),
                   ),
-                );
+                  audit: unaudited('nothing_changed'),
+                };
               }
-              return accept({ response: toPublishResponse(previous, true), created: false });
+              return {
+                value: accept({ response: toPublishResponse(previous, true), created: false }),
+                audit: unaudited('idempotent_replay'),
+              };
             }
 
             const display = await lockDisplayForPublish(tx, displayId);
@@ -582,19 +615,21 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
 
             const plan = planDraft(ctx, display, playlist, mediaById, appsById);
             if (!plan.ok) {
-              await auditRejectedPublication(tx, {
-                membershipId: session.membershipId,
-                playlistId,
-                scheduleId: null,
-                layoutId: null,
-                displayId,
-                issues: plan.issues,
-                via: 'publish',
-              });
-              return refuse(publicationRejected(plan.issues));
+              return {
+                value: refuse(publicationRejected(plan.issues)),
+                audit: auditRejectedPublication({
+                  membershipId: session.membershipId,
+                  playlistId,
+                  scheduleId: null,
+                  layoutId: null,
+                  displayId,
+                  issues: plan.issues,
+                  via: 'publish',
+                }),
+              };
             }
 
-            const row = await createPublication(tx, ctx, {
+            const made = await createPublication(tx, ctx, {
               display,
               playlistId,
               scheduleId: null,
@@ -613,9 +648,15 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
                  AND assigned_playlist_id IS DISTINCT FROM $2::uuid`,
               [displayId, playlistId],
             );
-            return accept({ response: toPublishResponse(row, false), created: true });
+            return {
+              value: accept({ response: toPublishResponse(made.value, false), created: true }),
+              audit: made.audit,
+            };
           },
         );
+        if (!decision.ok) throw decision.error;
+        return decision.value;
+      };
 
       let outcome;
       try {

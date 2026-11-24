@@ -1,18 +1,29 @@
 /**
  * Backend review round 1, CX-01, and security review round 3, SCU-01 and SCX-04: a
  * credential change (or a pairing session, or its lockout) and its audit event have one outcome.
- * Each case makes the audit insert fail (a trigger the test owns) and checks the outcome:
- * pairing and sign-in issue no credential; sign-out still ends the session. It then
+ * Each case makes the audit insert fail (the audit fault of @tinnox/db/testing) and checks the
+ * outcome: pairing and sign-in issue no credential; sign-out still ends the session. It then
  * removes the fault and checks that the same action works and is audited exactly once.
+ *
+ * tests/integration/audit-failure.test.ts holds the same rule for every audit action; the cases
+ * here go further into what a credential path must and must not hand out.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { IdentityProvider } from '@tinnox/api/test-support';
+import type { AuditAction } from '@tinnox/contracts';
 import {
+  removeAuditFault,
+  whileAuditFails as whileAuditRowsFail,
+  whileUnauditedAllowed,
+} from '@tinnox/db/testing';
+import {
+  addMember,
   auditEvents,
   createDisplay,
   createOrg,
+  migratorUrl,
   newPairing,
   pollPairing,
   signIn,
@@ -32,31 +43,13 @@ async function asMigrator<T>(work: (client: pg.Client) => Promise<T>): Promise<T
   }
 }
 
-async function removeFault(): Promise<void> {
-  await asMigrator(async (client) => {
-    await client.query('DROP TRIGGER IF EXISTS test_fail_audit ON public.audit_event');
-    await client.query('DROP FUNCTION IF EXISTS public.test_fail_audit()');
-  });
-}
-
-/** Runs `work` while every audit insert of `action` raises an error. */
-async function whileAuditFails(action: string, work: () => Promise<void>): Promise<void> {
-  if (!/^[a-z._]+$/.test(action)) throw new Error('unexpected audit action');
-  await asMigrator(async (client) => {
-    await client.query(`
-      CREATE FUNCTION public.test_fail_audit() RETURNS trigger LANGUAGE plpgsql AS $$
-      BEGIN
-        IF NEW.action = '${action}' THEN RAISE EXCEPTION 'injected audit failure'; END IF;
-        RETURN NEW;
-      END $$`);
-    await client.query(`CREATE TRIGGER test_fail_audit BEFORE INSERT ON public.audit_event
-      FOR EACH ROW EXECUTE FUNCTION public.test_fail_audit()`);
-  });
-  try {
-    await work();
-  } finally {
-    await removeFault();
-  }
+/**
+ * Runs `work` while every audit insert of `action` raises an error, and requires that at least
+ * one insert was refused: the path under test really reached its audit row.
+ */
+async function whileAuditFails(action: AuditAction, work: () => Promise<void>): Promise<void> {
+  const { refused } = await whileAuditRowsFail(migratorUrl(), action, work);
+  expect(refused, `nothing tried to write a ${action} row`).toBeGreaterThan(0);
 }
 
 /** One count as the owner of the security functions (bypasses row-level security). */
@@ -107,7 +100,7 @@ describe('credential changes and their audit events', () => {
     alice = await signIn(t, org);
   });
   afterAll(async () => {
-    await removeFault();
+    await removeAuditFault(migratorUrl());
     await t.close();
   });
 
@@ -141,6 +134,46 @@ describe('credential changes and their audit events', () => {
     expect(body.deviceToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(await registrations()).toBe(1);
     expect(await actions('pairing.complete')).toBe(1);
+  });
+
+  it('audits a refused completion together with the claim it ends, or commits neither (D3)', async () => {
+    const display = await createDisplay(alice, org);
+    const claimer = await addMember(org, 'editor');
+    const pairing = await newPairing(t);
+    const claim = await (
+      await signIn(t, claimer)
+    ).fetch(`/api/displays/${display.id}/claim`, { method: 'POST', json: { code: pairing.code } });
+    expect(claim.status).toBe(200);
+    // The claimer's sessions are ended after the claim, so it can no longer complete.
+    const cutOff = await alice.fetch(`/api/members/${claimer.membershipId}/sign-out`, {
+      method: 'POST',
+    });
+    expect(cutOff.status).toBe(200);
+    const stillClaimed = (): Promise<number> =>
+      countAsDefiner(
+        "SELECT count(*) AS n FROM public.pairing_session WHERE id = $1 AND status = 'claimed'",
+        [pairing.pairingId],
+      );
+
+    await whileAuditFails('pairing.complete', async () => {
+      expect((await pollPairing(t, pairing)).status).toBe(500);
+      expect(await stillClaimed()).toBe(1);
+    });
+    expect(await unscopedAudit('pairing.complete', pairing.pairingId)).toEqual([]);
+
+    const refused = await pollPairing(t, pairing);
+    expect(refused.status).toBe(200);
+    expect(await refused.json()).toEqual({ status: 'consumed' });
+    expect(await stillClaimed()).toBe(0);
+    // No organisation and no member: sec.pairing_complete names neither for a refusal.
+    expect(await unscopedAudit('pairing.complete', pairing.pairingId)).toEqual([
+      {
+        actor_type: 'anonymous',
+        result: 'denied',
+        object_type: 'pairing_session',
+        detail: { reason: 'not_claimable' },
+      },
+    ]);
   });
 
   it('creates no pairing session when its audit event cannot be written (round 3, SCU-01)', async () => {
@@ -205,8 +238,16 @@ describe('credential changes and their audit events', () => {
   it('ends the session at sign-out even when the audit event cannot be written', async () => {
     const leaving = await signIn(t, org);
     await whileAuditFails('auth.logout', async () => {
-      // The failure is reported, but ending a session is the safe direction.
-      expect((await leaving.fetch('/api/auth/logout', { method: 'POST' })).status).toBe(500);
+      // The failure is reported, but ending a session is the safe direction. That fallback
+      // commits with no audit row by decision (CX-01), so the audit-debt guard is told to let
+      // it pass, for this one call.
+      const signOut = await whileUnauditedAllowed(
+        migratorUrl(),
+        'session',
+        'the accepted CX-01 residual: a sign-out whose audit row cannot be written still ends the session, through sessionRevokeUnaudited (adoption plan section 2.1 A)',
+        () => leaving.fetch('/api/auth/logout', { method: 'POST' }),
+      );
+      expect(signOut.status).toBe(500);
       expect((await leaving.fetch('/api/displays')).status).toBe(401);
     });
     expect(await actions('auth.logout')).toBe(0);
@@ -215,6 +256,62 @@ describe('credential changes and their audit events', () => {
     expect((await next.fetch('/api/auth/logout', { method: 'POST' })).status).toBe(200);
     expect((await next.fetch('/api/displays')).status).toBe(401);
     expect(await actions('auth.logout')).toBe(1);
+  });
+
+  it('audits one sign-out when several end the same session, and the others change nothing', async () => {
+    const leaving = await signIn(t, org);
+    const before = await actions('auth.logout');
+    const requests = 3;
+    const answers: Promise<Response>[] = [];
+    // A key-share lock on the session row lets each request past requireOperator (its activity
+    // stamp is a no-key update) and holds every sign-out at the FOR UPDATE of sec.session_revoke.
+    // Once the lock goes, one ends the session and the rest find no live session left: the
+    // unaudited('nothing_changed') branch of POST /api/auth/logout, which the audit-debt guard
+    // would fail at COMMIT with a 500 if it changed anything.
+    const holder = new pg.Client({ connectionString: migratorUrl() });
+    await holder.connect();
+    try {
+      await holder.query('BEGIN');
+      await holder.query('SET LOCAL ROLE tinnox_definer');
+      const held = await holder.query(
+        'SELECT 1 FROM public.session WHERE csrf_token = $1 FOR KEY SHARE',
+        [leaving.csrfToken],
+      );
+      expect(held.rowCount).toBe(1);
+      // One at a time, so no request's activity stamp waits on another's.
+      for (let i = 1; i <= requests; i += 1) {
+        answers.push(leaving.fetch('/api/auth/logout', { method: 'POST' }));
+        const deadline = Date.now() + 10_000;
+        let waiting = 0;
+        while (waiting < i && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          waiting = await asMigrator(async (client) => {
+            const { rows } = await client.query<{ n: number }>(
+              'SELECT count(DISTINCT pid)::int AS n FROM pg_locks WHERE NOT granted',
+            );
+            return rows[0]?.n ?? 0;
+          });
+        }
+        expect(waiting, `sign-out ${String(i)} never waited for the session row`).toBe(i);
+      }
+    } finally {
+      await holder.query('ROLLBACK');
+      await holder.end();
+    }
+
+    const responses = await Promise.all(answers);
+    const statuses = responses.map((response) => response.status).sort();
+    expect(statuses).toEqual([200, 401, 401]);
+    for (const response of responses.filter((r) => r.status === 401)) {
+      // requireOperator refuses with no Set-Cookie; only the handler clears the cookie, so these
+      // came from the branch that found the session already ended.
+      expect(response.headers.get('set-cookie') ?? '').toMatch(/tinnox_session=;/);
+      expect(((await response.json()) as { error: { code: string } }).error.code).toBe(
+        'unauthenticated',
+      );
+    }
+    expect((await leaving.fetch('/api/displays')).status).toBe(401);
+    expect(await actions('auth.logout')).toBe(before + 1);
   });
 
   it('creates no session and keeps the previous one when the sign-in audit event cannot be written', async () => {

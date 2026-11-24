@@ -114,6 +114,20 @@ describe('ROUTE_PERMISSIONS', () => {
     }
   });
 
+  it('says what every route audits: a read nothing, a write at least one action (D3)', () => {
+    for (const [key, rule] of Object.entries(ROUTE_PERMISSIONS)) {
+      if (key.startsWith('GET ')) {
+        expect(rule.audit, key).toEqual({ none: 'read_only' });
+      } else {
+        expect('actions' in rule.audit ? rule.audit.actions.length : 0, key).toBeGreaterThan(0);
+      }
+    }
+    // A row cannot leave the statement out: the type has no optional `audit`.
+    // @ts-expect-error a row says what the route audits (write(rule, ...actions) or read(rule))
+    const silent: RouteRule = { all: ['org.read'] };
+    expect(silent).toBeDefined();
+  });
+
   it('uses refines only on the display PATCH and the tag writes', () => {
     const refined = Object.entries(ROUTE_PERMISSIONS)
       .filter(([, rule]) => 'refine' in rule)
@@ -137,8 +151,12 @@ describe('routeKey', () => {
 
 describe('checkRouteTable', () => {
   const table: Record<string, RouteRule> = {
-    'GET /api/media': { all: ['org.read'] },
-    'POST /api/tags': { any: ['content.write', 'screen.setup'], refine: 'tagScopeFromBody' },
+    'GET /api/media': { all: ['org.read'], audit: { none: 'read_only' } },
+    'POST /api/tags': {
+      any: ['content.write', 'screen.setup'],
+      refine: 'tagScopeFromBody',
+      audit: { actions: ['tag.create'] },
+    },
   };
 
   it('accepts a matching set, with HEAD twins read as GET', () => {
@@ -163,7 +181,11 @@ describe('checkRouteTable', () => {
 
   it('reports an any entry with an unknown refine', () => {
     const broken = {
-      'POST /api/tags': { any: ['content.write'], refine: 'guess' },
+      'POST /api/tags': {
+        any: ['content.write'],
+        refine: 'guess',
+        audit: { actions: ['tag.create'] },
+      },
     } as unknown as Record<string, RouteRule>;
     expect(checkRouteTable(new Set(['POST /api/tags']), broken)).toEqual([
       'permission entry POST /api/tags names an unknown refine guess',

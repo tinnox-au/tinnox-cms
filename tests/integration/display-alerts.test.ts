@@ -78,11 +78,13 @@ describe('e-mail alerts for screens', () => {
       t.advanceClock(-DELAY_MS);
     }
   }
+  // A close without an e-mail writes no audit row, as today (alert_closed_silently, the step 20
+  // ruling; open on CMS-36): the audit-debt guard lets its DELETE through (EXEMPT_SHAPES).
   async function check(): Promise<void> {
     expect((await checkAlerts(t)).failed).toBe(0);
   }
   const openEpisodes = async (displayId: string) => {
-    const client = await appClient();
+    const client = await appClient('reads the open episodes of a screen, as the runtime role');
     try {
       await client.query('BEGIN');
       await client.query("SELECT set_config('app.org_id', $1, true)", [org.orgId]);
@@ -323,7 +325,9 @@ describe('e-mail alerts for screens', () => {
 
   it('skips while another runner holds the lock, and two runs at once send once', async () => {
     const screen = await reportingScreen('Alert race');
-    const holder = await appClient();
+    const holder = await appClient(
+      'holds the alert check’s advisory lock, as a second runner would',
+    );
     try {
       await holder.query("SELECT pg_advisory_lock(hashtextextended('tinnox.display_alerts', 0))");
       expect(await later(() => checkAlerts(t))).toMatchObject({ skipped: true, offline: 0 });
@@ -397,7 +401,7 @@ describe('e-mail alerts for screens', () => {
       send: async (message: (typeof t.sentMail)[number]) => {
         if (!terminated && made.some((m) => message.subject.endsWith(`: ${m.name}`))) {
           terminated = true;
-          const killer = await appClient();
+          const killer = await appClient('finds and ends the alert run’s lock connection');
           try {
             const { rows } = await killer.query<{ pid: number }>(
               `SELECT l.pid FROM pg_locks l,
@@ -426,7 +430,7 @@ describe('e-mail alerts for screens', () => {
       },
     };
     const countEpisodes = async (orgId: string, displayId: string) => {
-      const client = await appClient();
+      const client = await appClient('reads the open episodes of a screen, as the runtime role');
       try {
         await client.query('BEGIN');
         await client.query("SELECT set_config('app.org_id', $1, true)", [orgId]);
@@ -814,7 +818,9 @@ describe('alert addresses and the member who added them (D22)', () => {
     const pending = await pendingFrom('cut-off-committing@example.com');
     // What the people routes and the incident script do, left open: the member row is locked
     // and its cut-off set, and neither is committed yet.
-    const ending = await appClient();
+    const ending = await appClient(
+      'a member change left open under a confirmation, as the people routes make it (D22)',
+    );
     try {
       await ending.query('BEGIN');
       await ending.query("SELECT set_config('app.org_id', $1, true)", [org.orgId]);
@@ -836,7 +842,9 @@ describe('alert addresses and the member who added them (D22)', () => {
   it('D22: a member change that holds the adder’s row past lock_timeout answers 503 with retry-after, and the link works after it (SEC-3, BEH-3)', async () => {
     const pending = await pendingFrom('adder-row-held@example.com');
     // A sign out everywhere left open past tinnox_app's 5 s lock_timeout, then rolled back.
-    const ending = await appClient();
+    const ending = await appClient(
+      'a member change left open under a confirmation, as the people routes make it (D22)',
+    );
     let held: Response;
     let waitedMs: number;
     try {
@@ -853,7 +861,7 @@ describe('alert addresses and the member who added them (D22)', () => {
     expect(waitedMs).toBeGreaterThanOrEqual(4_500);
     expect(held.status).toBe(503);
     expect(held.headers.get('retry-after')).toBe('2');
-    // The body withOrgAllowed gives a write that waited too long for a lock.
+    // The body changeAsOperator gives a write that waited too long for a lock.
     const body = (await held.json()) as { error: Record<string, unknown> };
     expect({ ...body.error, requestId: null }).toEqual({
       code: 'service_unavailable',

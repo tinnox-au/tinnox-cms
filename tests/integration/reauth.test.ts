@@ -8,7 +8,8 @@
  * The provider is a fake with a settable `auth_time`, as in credential-audit.test.ts.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
-import { sessionRevokeMembership, withOrg } from '@tinnox/db';
+import { sessionRevokeMembership } from '@tinnox/db';
+import { withOrg } from '@tinnox/db/testing';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { IdentityProvider } from '@tinnox/api/test-support';
@@ -318,8 +319,10 @@ describe('signing in again after the sessions were ended', () => {
       const signingIn = callback(login, cookie);
       await held.reached;
       // "Sign out everywhere" for the member while the sign-in waits.
-      const revoking = withOrg(t.ctx.pool, org.orgId, (tx) =>
-        sessionRevokeMembership(tx, signedIn.membershipId),
+      const revoking = withOrg(
+        t.testSql('the test’s own sign-out of the member, racing a sign-in in flight'),
+        org.orgId,
+        (tx) => sessionRevokeMembership(tx, signedIn.membershipId),
       );
       // With the old order the revocation would now wait for the sign-in's session row lock.
       await Promise.race([revoking, new Promise((resolve) => setTimeout(resolve, 500))]);

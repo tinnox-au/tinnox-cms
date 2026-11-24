@@ -4,20 +4,24 @@
  *
  * Safe with several runners: a session advisory lock makes a second run skip, and each transition
  * is claimed with a conditional statement on display_alert, so it is recorded and mailed once.
- * The claim and its audit row commit together; e-mail goes out after the commit, so delivery is
- * at most once per transition.
+ * The claims of one organisation run in one change of the display alerts job (changeAsJob,
+ * jobs.ts), which writes the audit rows they return before COMMIT, so claim and audit row commit
+ * together; e-mail goes out after the commit, so delivery is at most once per transition.
  */
 import { alertDelayText, type WorkingHours } from '@tinnox/contracts';
 import {
-  auditScoped,
   displayAlertOrgs,
   errorField,
   poolAsTx,
-  withOrg,
+  readOrg,
+  unaudited,
+  type AuditInput,
+  type Change,
   type Pool,
-  type Tx,
+  type OrgTx,
 } from '@tinnox/db';
 import { offlineDue } from '@tinnox/domain';
+import { changeAsJob } from './jobs.ts';
 import type { MailMessage, Mailer } from './mail.ts';
 
 const LOCK_KEY = 'tinnox.display_alerts';
@@ -100,7 +104,9 @@ export async function runDisplayAlerts(deps: DisplayAlertDeps): Promise<DisplayA
         if (deps.shouldStop?.() === true) break;
         let outcome: OrgOutcome;
         try {
-          outcome = await withOrg(deps.pool, orgId, (tx) => claimTransitions(tx, deps));
+          outcome = await changeAsJob(deps.pool, 'display_alerts', orgId, (tx) =>
+            claimTransitions(tx, deps),
+          );
         } catch (error) {
           counts.failed += 1;
           deps.logger.error(
@@ -117,7 +123,7 @@ export async function runDisplayAlerts(deps: DisplayAlertDeps): Promise<DisplayA
           try {
             // An address removed since the claim gets nothing; one already handed to the
             // server cannot be recalled.
-            const live = await withOrg(deps.pool, orgId, (tx) =>
+            const live = await readOrg(deps.pool, orgId, (tx) =>
               tx.query(
                 `SELECT 1 FROM alert_recipient
                  WHERE org_id = app_org_id() AND email = $1 AND confirmed_at IS NOT NULL`,
@@ -168,8 +174,11 @@ export function mailErrorCode(error: unknown): { errorCode: string | null } {
   return { errorCode: typeof code === 'string' ? code.slice(0, 64) : null };
 }
 
-/** Decides and claims the transitions of the organisation of `tx`; returns the e-mails to send. */
-async function claimTransitions(tx: Tx, deps: DisplayAlertDeps): Promise<OrgOutcome> {
+/**
+ * Decides and claims the transitions of the organisation of `tx`; returns the e-mails to send,
+ * and the audit events of the transitions it claimed for changeAsJob to write.
+ */
+async function claimTransitions(tx: OrgTx, deps: DisplayAlertDeps): Promise<Change<OrgOutcome>> {
   const org = await tx.query<{ name: string }>(
     'SELECT name FROM organization WHERE id = app_org_id()',
   );
@@ -205,8 +214,9 @@ async function claimTransitions(tx: Tx, deps: DisplayAlertDeps): Promise<OrgOutc
   let online = 0;
   let closed = 0;
   const outbox: { displayId: string; message: MailMessage }[] = [];
-  const audit = (action: string, displayId: string) =>
-    auditScoped(tx, {
+  const events: AuditInput[] = [];
+  const audit = (action: 'display.offline_alert' | 'display.online_alert', displayId: string) => {
+    events.push({
       actorType: 'system',
       actorId: null,
       action,
@@ -215,6 +225,7 @@ async function claimTransitions(tx: Tx, deps: DisplayAlertDeps): Promise<OrgOutc
       result: 'success',
       detail: { recipients: to.length },
     });
+  };
   const mailAll = (displayId: string, message: Omit<MailMessage, 'to'>) => {
     for (const address of to) outbox.push({ displayId, message: { ...message, to: address } });
   };
@@ -240,7 +251,7 @@ async function claimTransitions(tx: Tx, deps: DisplayAlertDeps): Promise<OrgOutc
         [row.id, last],
       );
       if (opened.rowCount !== 1) continue;
-      await audit('display.offline_alert', row.id);
+      audit('display.offline_alert', row.id);
       offline += 1;
       mailAll(row.id, offlineEmail(screen, last, minutes));
       continue;
@@ -256,14 +267,22 @@ async function claimTransitions(tx: Tx, deps: DisplayAlertDeps): Promise<OrgOutc
     );
     if (deleted.rowCount !== 1) continue;
     if (back && row.alert_back_online) {
-      await audit('display.online_alert', row.id);
+      audit('display.online_alert', row.id);
       online += 1;
       mailAll(row.id, onlineEmail(screen, last));
     } else {
       closed += 1;
     }
   }
-  return { offline, online, closed, outbox };
+  const value = { offline, online, closed, outbox };
+  if (events.length > 0) return { value, audit: events };
+  // No transition was recorded. An episode closed without an e-mail is still a change, left
+  // unaudited as before (alert_closed_silently, granted by the display_alerts row of JOB_AUDIT);
+  // otherwise this run changed nothing.
+  return {
+    value,
+    audit: unaudited(closed > 0 ? 'alert_closed_silently' : 'nothing_changed'),
+  };
 }
 
 // ---------------------------------------------------------------------- e-mail texts

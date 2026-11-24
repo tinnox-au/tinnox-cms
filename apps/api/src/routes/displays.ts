@@ -1,7 +1,8 @@
 /**
  * Sites, displays, pairing claim, player revocation and delivery status.
- * Every query runs inside withOrg with the organisation of the verified session; every write
- * runs inside withOrgAllowed, which checks the member's role again first (auth/permissions.ts).
+ * Every read runs inside readOrg with the organisation of the verified session; every write
+ * runs inside changeAsOperator, which checks the member's role again first and writes the audit
+ * rows the change returns on its transaction (auth/permissions.ts).
  */
 import {
   ABSOLUTE,
@@ -27,20 +28,20 @@ import {
   type WorkingHours,
 } from '@tinnox/contracts';
 import {
-  auditScoped,
   pairingCancelClaims,
   pairingClaim,
+  readOrg,
   STAGE_A_CONSTRAINTS,
   STAGE_B_CONSTRAINTS,
   violatedConstraint,
-  withOrg,
-  type Tx,
+  type AuditInput,
+  type OrgReadTx,
 } from '@tinnox/db';
 import type { FastifyInstance } from 'fastify';
-import { withOrgAllowed, withOrgDecisionAllowed } from '../auth/permissions.ts';
+import { changeAsOperator } from '../auth/permissions.ts';
 import { operatorOf } from '../auth/session.ts';
 import { perMinute, type AppContext } from '../context.ts';
-import { accept, iso, refuse } from '../db-helpers.ts';
+import { accept, iso, refuse, type Decision } from '../db-helpers.ts';
 import { contentRectOf, loadStatusViews } from '../display-state.ts';
 import { HttpError, notFound, parseInput, pgErrorCode } from '../errors.ts';
 import { isUnknownTag, replaceTags } from '../tags.ts';
@@ -189,7 +190,7 @@ function assignmentAfter(
   };
 }
 
-async function loadDisplay(tx: Tx, id: string): Promise<DisplayRow | null> {
+async function loadDisplay(tx: OrgReadTx, id: string): Promise<DisplayRow | null> {
   const { rows } = await tx.query<DisplayRow>(`${DISPLAY_SELECT} AND d.id = $1`, [id]);
   return rows[0] ?? null;
 }
@@ -223,7 +224,7 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
 
   app.get(ROUTES.sites, async (request): Promise<SiteListResponse> => {
     const session = operatorOf(request);
-    return withOrg(pool, session.orgId, async (tx) => {
+    return readOrg(pool, session.orgId, async (tx) => {
       const { rows } = await tx.query<{ id: string; name: string; timezone: string }>(
         'SELECT id, name, timezone FROM site WHERE org_id = app_org_id() ORDER BY name, id',
       );
@@ -233,7 +234,7 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
 
   app.get(ROUTES.displays, async (request): Promise<DisplayListResponse> => {
     const session = operatorOf(request);
-    return withOrg(pool, session.orgId, async (tx) => {
+    return readOrg(pool, session.orgId, async (tx) => {
       const { rows } = await tx.query<DisplayRow>(`${DISPLAY_SELECT} ORDER BY d.created_at, d.id`);
       return { items: rows.map(toDisplayDto) };
     });
@@ -243,7 +244,7 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
     const session = operatorOf(request);
     const input = parseInput(DisplayCreateSchema, request.body, 'display');
     assertCanvasWithinLimits(input.canvas, config.limits);
-    const created = await withOrgAllowed(ctx, request, async (tx) => {
+    const created = await changeAsOperator(ctx, request, async (tx) => {
       const site = await tx.query('SELECT 1 FROM site WHERE id = $1 AND org_id = app_org_id()', [
         input.siteId,
       ]);
@@ -267,18 +268,20 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
       );
       const id = inserted.rows[0]?.id;
       if (id === undefined) throw new Error('display insert returned no row');
-      await auditScoped(tx, {
-        actorType: 'operator',
-        actorId: session.membershipId,
-        action: 'display.create',
-        objectType: 'display',
-        objectId: id,
-        result: 'success',
-        detail: { canvas: input.canvas, contentRect: input.contentRect },
-      });
       const row = await loadDisplay(tx, id);
       if (row === null) throw new Error('created display is not visible');
-      return toDisplayDto(row);
+      return {
+        value: toDisplayDto(row),
+        audit: {
+          actorType: 'operator',
+          actorId: session.membershipId,
+          action: 'display.create',
+          objectType: 'display',
+          objectId: id,
+          result: 'success',
+          detail: { canvas: input.canvas, contentRect: input.contentRect },
+        },
+      };
     });
     void reply.code(201);
     return created;
@@ -287,7 +290,7 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
   app.get(ROUTES.displayPattern, async (request): Promise<DisplayDto> => {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
-    return withOrg(pool, session.orgId, async (tx) => {
+    return readOrg(pool, session.orgId, async (tx) => {
       const row = await loadDisplay(tx, id);
       if (row === null) throw notFound('The screen');
       return toDisplayDto(row);
@@ -305,7 +308,7 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     const patch = parseInput(DisplayPatchSchema, request.body, 'display');
     try {
-      return await withOrgAllowed(ctx, request, async (tx) => {
+      return await changeAsOperator(ctx, request, async (tx) => {
         const locked = await tx.query<{
           name: string;
           description: string | null;
@@ -416,32 +419,33 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
         }
         if (tagIds !== undefined) await replaceTags(tx, 'display', id, tagIds);
 
-        await auditScoped(tx, {
-          actorType: 'operator',
-          actorId: session.membershipId,
-          action: 'display.update',
-          objectType: 'display',
-          objectId: id,
-          result: 'success',
-          detail: {
-            fields: Object.keys(patch).sort(),
-            // The values written, in lower case as the database stores them: one spelling
-            // per object in the trail. A key is recorded when the patch named it, and
-            // also when assigning another kind took a stored assignment off the display,
-            // so the trail says so without the reader knowing the "one of three" rule.
-            ...Object.fromEntries(
-              ASSIGNMENT_KEYS.flatMap((key) =>
-                patch[key] !== undefined ||
-                (current[ASSIGNMENT_COLUMNS[key]] !== null && after[key] === null)
-                  ? [[key, after[key]?.toLowerCase() ?? null]]
-                  : [],
-              ),
-            ),
-          },
-        });
+        // The values written, in lower case as the database stores them: one spelling per
+        // object in the trail. A key is recorded when the patch named it, and also when
+        // assigning another kind took a stored assignment off the display, so the trail says
+        // so without the reader knowing the "one of three" rule.
+        const assignments: { [K in AssignmentKey]?: string | null } = {};
+        for (const key of ASSIGNMENT_KEYS) {
+          if (
+            patch[key] !== undefined ||
+            (current[ASSIGNMENT_COLUMNS[key]] !== null && after[key] === null)
+          ) {
+            assignments[key] = after[key]?.toLowerCase() ?? null;
+          }
+        }
         const row = await loadDisplay(tx, id);
         if (row === null) throw new Error('updated display is not visible');
-        return toDisplayDto(row);
+        return {
+          value: toDisplayDto(row),
+          audit: {
+            actorType: 'operator',
+            actorId: session.membershipId,
+            action: 'display.update',
+            objectType: 'display',
+            objectId: id,
+            result: 'success',
+            detail: { fields: Object.keys(patch).sort(), ...assignments },
+          },
+        };
       });
     } catch (error) {
       // The playlist, the schedule, the layout or a tag went away between the check above
@@ -474,80 +478,100 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
       const session = operatorOf(request);
       const { id } = parseInput(IdParamSchema, request.params, 'address');
       const { code } = parseInput(PairingClaimRequestSchema, request.body, 'pairing code');
-      return withOrgDecisionAllowed(ctx, request, async (tx) => {
-        const result = await pairingClaim(tx, {
-          code,
-          displayId: id,
-          membershipId: session.membershipId,
-          maxFailures: config.limits.pairingMaxWrongAttempts,
-          windowSeconds: config.limits.pairingSessionWindowSeconds,
-        });
-        if (result.outcome === 'display_not_found') throw notFound('The screen');
-        if (result.outcome === 'claimed') {
-          await auditScoped(tx, {
+      // A refused code is a decision, not a throw, so its audit row and the wrong-attempt count
+      // commit with it; the refusal is thrown once the transaction has committed.
+      const decision = await changeAsOperator<Decision<PairingClaimResponse>>(
+        ctx,
+        request,
+        async (tx) => {
+          const result = await pairingClaim(tx, {
+            code,
+            displayId: id,
+            membershipId: session.membershipId,
+            maxFailures: config.limits.pairingMaxWrongAttempts,
+            windowSeconds: config.limits.pairingSessionWindowSeconds,
+          });
+          if (result.outcome === 'display_not_found') throw notFound('The screen');
+          if (result.outcome === 'claimed') {
+            const claimed: AuditInput = {
+              actorType: 'operator',
+              actorId: session.membershipId,
+              action: 'pairing.claim',
+              objectType: 'display',
+              objectId: id,
+              result: 'success',
+              // Older claims of this screen that were never collected; they can no longer complete.
+              detail: {
+                pairingId: result.pairingId,
+                cancelledPairingIds: result.cancelledPairingIds,
+              },
+            };
+            return {
+              value: accept({
+                displayId: id,
+                pairingId: result.pairingId,
+                replacedRegistrationId: result.replacedRegistrationId,
+              }),
+              audit:
+                result.replacedRegistrationId === null
+                  ? claimed
+                  : [
+                      claimed,
+                      {
+                        actorType: 'operator',
+                        actorId: session.membershipId,
+                        action: 'player.revoke',
+                        objectType: 'player_registration',
+                        objectId: result.replacedRegistrationId,
+                        result: 'success',
+                        detail: { reason: 'replaced', displayId: id },
+                      },
+                    ],
+            };
+          }
+          // The code itself is never written to the audit trail.
+          const denied: AuditInput = {
             actorType: 'operator',
             actorId: session.membershipId,
             action: 'pairing.claim',
             objectType: 'display',
             objectId: id,
-            result: 'success',
-            // Older claims of this screen that were never collected; they can no longer complete.
-            detail: {
-              pairingId: result.pairingId,
-              cancelledPairingIds: result.cancelledPairingIds,
-            },
-          });
-          if (result.replacedRegistrationId !== null) {
-            await auditScoped(tx, {
-              actorType: 'operator',
-              actorId: session.membershipId,
-              action: 'player.revoke',
-              objectType: 'player_registration',
-              objectId: result.replacedRegistrationId,
-              result: 'success',
-              detail: { reason: 'replaced', displayId: id },
-            });
+            result: 'denied',
+            detail: { reason: result.outcome },
+          };
+          if (result.outcome === 'rate_limited') {
+            return {
+              value: refuse(
+                new HttpError(
+                  429,
+                  'pairing_locked',
+                  'Too many incorrect pairing codes. Wait a few minutes before trying again.',
+                ),
+              ),
+              audit: denied,
+            };
           }
-          return accept({
-            displayId: id,
-            pairingId: result.pairingId,
-            replacedRegistrationId: result.replacedRegistrationId,
-          });
-        }
-        // The code itself is never written to the audit trail.
-        await auditScoped(tx, {
-          actorType: 'operator',
-          actorId: session.membershipId,
-          action: 'pairing.claim',
-          objectType: 'display',
-          objectId: id,
-          result: 'denied',
-          detail: { reason: result.outcome },
-        });
-        if (result.outcome === 'rate_limited') {
-          return refuse(
-            new HttpError(
-              429,
-              'pairing_locked',
-              'Too many incorrect pairing codes. Wait a few minutes before trying again.',
+          return {
+            value: refuse(
+              new HttpError(
+                400,
+                'pairing_code_invalid',
+                'That pairing code is not valid. It may have expired or already been used; ask the player for a new code.',
+              ),
             ),
-          );
-        }
-        return refuse(
-          new HttpError(
-            400,
-            'pairing_code_invalid',
-            'That pairing code is not valid. It may have expired or already been used; ask the player for a new code.',
-          ),
-        );
-      });
+            audit: denied,
+          };
+        },
+      );
+      if (!decision.ok) throw decision.error;
+      return decision.value;
     },
   );
 
   app.post(ROUTES.displayRevokePlayerPattern, async (request): Promise<RevokePlayerResponse> => {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
-    return withOrgAllowed(ctx, request, async (tx) => {
+    return changeAsOperator(ctx, request, async (tx) => {
       // After the role check, the claims are cancelled first, before the display row is locked:
       // claims of this screen that no player has collected yet can then not bring a player
       // back after the revocation (round 3, SCX-01). Only this organisation's rows are touched, so an
@@ -566,23 +590,25 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
         [id],
       );
       const registrationId = revoked.rows[0]?.id ?? null;
-      await auditScoped(tx, {
-        actorType: 'operator',
-        actorId: session.membershipId,
-        action: 'player.revoke',
-        objectType: registrationId === null ? 'display' : 'player_registration',
-        objectId: registrationId ?? id,
-        result: 'success',
-        detail: {
-          reason: 'operator',
-          displayId: id,
-          hadActiveRegistration: registrationId !== null,
-          cancelledPairingIds,
-        },
-      });
       return {
-        revokedRegistrationId: registrationId,
-        cancelledPairingCount: cancelledPairingIds.length,
+        value: {
+          revokedRegistrationId: registrationId,
+          cancelledPairingCount: cancelledPairingIds.length,
+        },
+        audit: {
+          actorType: 'operator',
+          actorId: session.membershipId,
+          action: 'player.revoke',
+          objectType: registrationId === null ? 'display' : 'player_registration',
+          objectId: registrationId ?? id,
+          result: 'success',
+          detail: {
+            reason: 'operator',
+            displayId: id,
+            hadActiveRegistration: registrationId !== null,
+            cancelledPairingIds,
+          },
+        },
       };
     });
   });
@@ -591,7 +617,7 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
   app.get(ROUTES.displayStatusPattern, async (request): Promise<DeliveryStatusView> => {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
-    return withOrg(pool, session.orgId, async (tx) => {
+    return readOrg(pool, session.orgId, async (tx) => {
       const [view] = await loadStatusViews(tx, ctx, id);
       if (view === undefined) throw notFound('The screen');
       return view;
@@ -601,7 +627,7 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
   // The same view for every display, in the order of the display list, in one query.
   app.get(ROUTES.displaysStatus, async (request): Promise<DeliveryStatusListResponse> => {
     const session = operatorOf(request);
-    return withOrg(pool, session.orgId, async (tx) => ({
+    return readOrg(pool, session.orgId, async (tx) => ({
       items: await loadStatusViews(tx, ctx, null),
     }));
   });

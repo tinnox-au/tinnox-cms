@@ -7,12 +7,13 @@ import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
-  auditScoped,
-  auditUnscoped,
+  auditStandalone,
+  deviceByRegistrationId,
   deviceByTokenHash,
   heartbeatLogPurge,
   loginStatePut,
   loginStateTake,
+  mediaProcessingJobs,
   membershipByOidcSub,
   pairingCancelClaims,
   pairingClaim,
@@ -24,34 +25,37 @@ import {
   sessionCreate,
   sessionPurgeExpired,
   sessionRevoke,
+  sessionRevokeUnaudited,
   sha256,
-  withOrg,
-  withoutOrg,
+  type Autocommit,
   type Pool,
-  type Tx,
 } from '../src/index.ts';
+import { auditScoped, auditUnscoped, withOrg, withoutOrg } from '../src/testing.ts';
 import {
   appPool,
   asDefiner,
+  asSuperuser,
   createOrg,
   hash,
+  inTx,
   migratorClient,
   pairingCode,
   PG,
   pgCode,
   stillWaiting,
   twoTransactions,
+  withNoOrgSet,
   type TestOrg,
 } from './support.ts';
 
 let pool: Pool;
-let db: Tx;
+let db: Autocommit;
 let migrator: pg.Client;
 let a: TestOrg;
 let b: TestOrg;
 
 beforeAll(async () => {
-  pool = appPool(8);
+  pool = appPool('calls the sec.* functions directly, as the runtime role', 8);
   db = poolAsTx(pool);
   migrator = await migratorClient();
   a = await createOrg(migrator, 'Sec A');
@@ -68,7 +72,9 @@ const claimLimits = { maxFailures: 5, windowSeconds: 600 };
 async function newPairing(clientKey = `client-${randomUUID()}`) {
   const pollingTokenHash = hash();
   const code = pairingCode();
-  const created = await pairingCreate(db, { code, pollingTokenHash, clientKey, ...limits });
+  const created = await inTx(pool, (tx) =>
+    pairingCreate(tx, { code, pollingTokenHash, clientKey, ...limits }),
+  );
   if (created.outcome !== 'created') throw new Error(`pairing not created: ${created.outcome}`);
   return { code, pollingTokenHash, pairingId: created.pairingId, expiresAt: created.expiresAt };
 }
@@ -77,7 +83,7 @@ const claim = (org: TestOrg, code: string, displayId = org.displayId) =>
     pairingClaim(tx, { code, displayId, membershipId: org.membershipId, ...claimLimits }),
   );
 const pollOutcome = async (p: { pairingId: string; pollingTokenHash: Buffer }) =>
-  (await pairingPoll(db, { ...p, maxWrongAttempts: 5 })).outcome;
+  (await inTx(pool, (tx) => pairingPoll(tx, { ...p, maxWrongAttempts: 5 }))).outcome;
 
 /** Adds a second member, an Editor, to an organisation; returns the membership id. */
 async function addMember(org: TestOrg): Promise<string> {
@@ -199,14 +205,16 @@ describe('membership and sessions', () => {
 
   it('creates a session whose organisation comes from the membership only', async () => {
     const idHash = sha256(`cookie-${randomUUID()}`);
-    const created = await sessionCreate(db, {
-      idHash,
-      oidcSub: a.oidcSub,
-      csrfToken: 'c'.repeat(43),
-      ttlSeconds: 3600,
-      idToken: 'header.payload.signature',
-      authTime: new Date(),
-    });
+    const created = await inTx(pool, (tx) =>
+      sessionCreate(tx, {
+        idHash,
+        oidcSub: a.oidcSub,
+        csrfToken: 'c'.repeat(43),
+        ttlSeconds: 3600,
+        idToken: 'header.payload.signature',
+        authTime: new Date(),
+      }),
+    );
     expect(created).toMatchObject({
       outcome: 'created',
       membershipId: a.membershipId,
@@ -224,27 +232,29 @@ describe('membership and sessions', () => {
     });
     expect(await sessionByIdHash(db, hash(), 1800)).toBeNull();
 
-    const revoked = await sessionRevoke(db, idHash);
+    const revoked = await inTx(pool, (tx) => sessionRevoke(tx, idHash));
     expect(revoked).toEqual({
       membershipId: a.membershipId,
       orgId: a.orgId,
       idToken: 'header.payload.signature',
     });
     expect(await sessionByIdHash(db, idHash, 1800)).toBeNull();
-    expect(await sessionRevoke(db, idHash)).toBeNull();
+    expect(await inTx(pool, (tx) => sessionRevoke(tx, idHash))).toBeNull();
   });
 
   it('refuses a session for a subject with no membership', async () => {
     const idHash = hash();
     expect(
-      await sessionCreate(db, {
-        idHash,
-        oidcSub: 'no-membership',
-        csrfToken: 'c'.repeat(43),
-        ttlSeconds: 3600,
-        idToken: null,
-        authTime: new Date(),
-      }),
+      await inTx(pool, (tx) =>
+        sessionCreate(tx, {
+          idHash,
+          oidcSub: 'no-membership',
+          csrfToken: 'c'.repeat(43),
+          ttlSeconds: 3600,
+          idToken: null,
+          authTime: new Date(),
+        }),
+      ),
     ).toEqual({ outcome: 'no_membership' });
     expect(await sessionByIdHash(db, idHash, 1800)).toBeNull();
   });
@@ -257,14 +267,16 @@ describe('membership and sessions', () => {
       await migrator.query('COMMIT');
     };
     const expired = hash();
-    await sessionCreate(db, {
-      idHash: expired,
-      oidcSub: a.oidcSub,
-      csrfToken: 'c'.repeat(43),
-      ttlSeconds: 3600,
-      idToken: null,
-      authTime: new Date(),
-    });
+    await inTx(pool, (tx) =>
+      sessionCreate(tx, {
+        idHash: expired,
+        oidcSub: a.oidcSub,
+        csrfToken: 'c'.repeat(43),
+        ttlSeconds: 3600,
+        idToken: null,
+        authTime: new Date(),
+      }),
+    );
     await asDefiner(
       "UPDATE public.session SET expires_at = now() - interval '1 second' WHERE id_hash = $1",
       [expired],
@@ -272,14 +284,16 @@ describe('membership and sessions', () => {
     expect(await sessionByIdHash(db, expired, 1800)).toBeNull();
 
     const idle = hash();
-    await sessionCreate(db, {
-      idHash: idle,
-      oidcSub: a.oidcSub,
-      csrfToken: 'c'.repeat(43),
-      ttlSeconds: 3600,
-      idToken: null,
-      authTime: new Date(),
-    });
+    await inTx(pool, (tx) =>
+      sessionCreate(tx, {
+        idHash: idle,
+        oidcSub: a.oidcSub,
+        csrfToken: 'c'.repeat(43),
+        ttlSeconds: 3600,
+        idToken: null,
+        authTime: new Date(),
+      }),
+    );
     await asDefiner(
       "UPDATE public.session SET last_seen_at = now() - interval '31 minutes' WHERE id_hash = $1",
       [idle],
@@ -304,14 +318,16 @@ describe('membership and sessions', () => {
     const ended = hash();
     const live = hash();
     for (const idHash of [ended, live]) {
-      await sessionCreate(db, {
-        idHash,
-        oidcSub: a.oidcSub,
-        csrfToken: 'c'.repeat(43),
-        ttlSeconds: 3600,
-        idToken: 'header.payload.signature',
-        authTime: new Date(),
-      });
+      await inTx(pool, (tx) =>
+        sessionCreate(tx, {
+          idHash,
+          oidcSub: a.oidcSub,
+          csrfToken: 'c'.repeat(43),
+          ttlSeconds: 3600,
+          idToken: 'header.payload.signature',
+          authTime: new Date(),
+        }),
+      );
     }
     await asDefiner(
       "UPDATE public.session SET expires_at = now() - interval '1 second' WHERE id_hash = $1",
@@ -331,14 +347,16 @@ describe('membership and sessions', () => {
   it('rejects out-of-range lifetimes', async () => {
     expect(
       await pgCode(
-        sessionCreate(db, {
-          idHash: hash(),
-          oidcSub: a.oidcSub,
-          csrfToken: 'c'.repeat(43),
-          ttlSeconds: 10,
-          idToken: null,
-          authTime: new Date(),
-        }),
+        inTx(pool, (tx) =>
+          sessionCreate(tx, {
+            idHash: hash(),
+            oidcSub: a.oidcSub,
+            csrfToken: 'c'.repeat(43),
+            ttlSeconds: 10,
+            idToken: null,
+            authTime: new Date(),
+          }),
+        ),
       ),
     ).toBe('22023');
     expect(await pgCode(sessionByIdHash(db, hash(), 1))).toBe('22023');
@@ -349,19 +367,23 @@ describe('pairing', () => {
   it('runs the whole flow and hands the device credential over exactly once', async () => {
     const p = await newPairing();
     expect(
-      await pairingPoll(db, {
-        pairingId: p.pairingId,
-        pollingTokenHash: p.pollingTokenHash,
-        maxWrongAttempts: 5,
-      }),
+      await inTx(pool, (tx) =>
+        pairingPoll(tx, {
+          pairingId: p.pairingId,
+          pollingTokenHash: p.pollingTokenHash,
+          maxWrongAttempts: 5,
+        }),
+      ),
     ).toMatchObject({ outcome: 'pending' });
     // Not claimed yet: nothing to collect.
     expect(
-      await pairingComplete(db, {
-        pairingId: p.pairingId,
-        pollingTokenHash: p.pollingTokenHash,
-        deviceTokenHash: hash(),
-      }),
+      await inTx(pool, (tx) =>
+        pairingComplete(tx, {
+          pairingId: p.pairingId,
+          pollingTokenHash: p.pollingTokenHash,
+          deviceTokenHash: hash(),
+        }),
+      ),
     ).toEqual({ outcome: 'not_claimable' });
 
     const claimed = await claim(a, p.code);
@@ -372,20 +394,24 @@ describe('pairing', () => {
     });
     expect(
       (
-        await pairingPoll(db, {
-          pairingId: p.pairingId,
-          pollingTokenHash: p.pollingTokenHash,
-          maxWrongAttempts: 5,
-        })
+        await inTx(pool, (tx) =>
+          pairingPoll(tx, {
+            pairingId: p.pairingId,
+            pollingTokenHash: p.pollingTokenHash,
+            maxWrongAttempts: 5,
+          }),
+        )
       ).outcome,
     ).toBe('claimed');
 
     const deviceTokenHash = sha256(`device-${randomUUID()}`);
-    const completed = await pairingComplete(db, {
-      pairingId: p.pairingId,
-      pollingTokenHash: p.pollingTokenHash,
-      deviceTokenHash,
-    });
+    const completed = await inTx(pool, (tx) =>
+      pairingComplete(tx, {
+        pairingId: p.pairingId,
+        pollingTokenHash: p.pollingTokenHash,
+        deviceTokenHash,
+      }),
+    );
     expect(completed).toMatchObject({
       outcome: 'completed',
       orgId: a.orgId,
@@ -394,19 +420,23 @@ describe('pairing', () => {
     if (completed.outcome !== 'completed') return;
 
     expect(
-      await pairingComplete(db, {
-        pairingId: p.pairingId,
-        pollingTokenHash: p.pollingTokenHash,
-        deviceTokenHash: hash(),
-      }),
+      await inTx(pool, (tx) =>
+        pairingComplete(tx, {
+          pairingId: p.pairingId,
+          pollingTokenHash: p.pollingTokenHash,
+          deviceTokenHash: hash(),
+        }),
+      ),
     ).toEqual({ outcome: 'not_claimable' });
     expect(
       (
-        await pairingPoll(db, {
-          pairingId: p.pairingId,
-          pollingTokenHash: p.pollingTokenHash,
-          maxWrongAttempts: 5,
-        })
+        await inTx(pool, (tx) =>
+          pairingPoll(tx, {
+            pairingId: p.pairingId,
+            pollingTokenHash: p.pollingTokenHash,
+            maxWrongAttempts: 5,
+          }),
+        )
       ).outcome,
     ).toBe('completed');
     expect(await deviceByTokenHash(db, deviceTokenHash)).toEqual({
@@ -430,11 +460,13 @@ describe('pairing', () => {
     expect(outcomes.filter((o) => o.outcome === 'claimed')).toHaveLength(1);
     expect(outcomes.filter((o) => o.outcome === 'invalid_code')).toHaveLength(11);
     const winner = racers[outcomes.findIndex((o) => o.outcome === 'claimed')];
-    const done = await pairingComplete(db, {
-      pairingId: p.pairingId,
-      pollingTokenHash: p.pollingTokenHash,
-      deviceTokenHash: hash(),
-    });
+    const done = await inTx(pool, (tx) =>
+      pairingComplete(tx, {
+        pairingId: p.pairingId,
+        pollingTokenHash: p.pollingTokenHash,
+        deviceTokenHash: hash(),
+      }),
+    );
     expect(done).toMatchObject({
       outcome: 'completed',
       orgId: winner?.orgId,
@@ -448,11 +480,13 @@ describe('pairing', () => {
     expect((await claim(b, p.code)).outcome).toBe('claimed');
     const results = await Promise.all(
       Array.from({ length: 8 }, () =>
-        pairingComplete(db, {
-          pairingId: p.pairingId,
-          pollingTokenHash: p.pollingTokenHash,
-          deviceTokenHash: hash(),
-        }),
+        inTx(pool, (tx) =>
+          pairingComplete(tx, {
+            pairingId: p.pairingId,
+            pollingTokenHash: p.pollingTokenHash,
+            deviceTokenHash: hash(),
+          }),
+        ),
       ),
     );
     expect(results.filter((r) => r.outcome === 'completed')).toHaveLength(1);
@@ -478,19 +512,23 @@ describe('pairing', () => {
     expect(await claim(a, p.code)).toEqual({ outcome: 'invalid_code' });
     expect(
       (
-        await pairingPoll(db, {
-          pairingId: p.pairingId,
-          pollingTokenHash: p.pollingTokenHash,
-          maxWrongAttempts: 5,
-        })
+        await inTx(pool, (tx) =>
+          pairingPoll(tx, {
+            pairingId: p.pairingId,
+            pollingTokenHash: p.pollingTokenHash,
+            maxWrongAttempts: 5,
+          }),
+        )
       ).outcome,
     ).toBe('expired');
     expect(
-      await pairingComplete(db, {
-        pairingId: p.pairingId,
-        pollingTokenHash: p.pollingTokenHash,
-        deviceTokenHash: hash(),
-      }),
+      await inTx(pool, (tx) =>
+        pairingComplete(tx, {
+          pairingId: p.pairingId,
+          pollingTokenHash: p.pollingTokenHash,
+          deviceTokenHash: hash(),
+        }),
+      ),
     ).toEqual({ outcome: 'not_claimable' });
   });
 
@@ -514,13 +552,16 @@ describe('pairing', () => {
       }),
     );
     expect(await pgCode(foreignMember)).toBe(PG.insufficientPrivilege);
+    // pairingClaim takes an OrgTx, so it cannot be called with no organisation any more. The
+    // function's own refusal is still what is tested: the same statement, sent raw.
     const noContext = withoutOrg(pool, (tx) =>
-      pairingClaim(tx, {
-        code: p.code,
-        displayId: a.displayId,
-        membershipId: a.membershipId,
-        ...claimLimits,
-      }),
+      withNoOrgSet(tx).query('SELECT outcome FROM sec.pairing_claim($1, $2, $3, $4, $5)', [
+        p.code,
+        a.displayId,
+        a.membershipId,
+        claimLimits.maxFailures,
+        claimLimits.windowSeconds,
+      ]),
     );
     expect(await pgCode(noContext)).toBe(PG.insufficientPrivilege);
   });
@@ -531,66 +572,80 @@ describe('pairing', () => {
     expect((await claim(a, p.code)).outcome).toBe('claimed');
     const thief = hash();
     expect(
-      await pairingComplete(db, {
-        pairingId: p.pairingId,
-        pollingTokenHash: thief,
-        deviceTokenHash: hash(),
-      }),
+      await inTx(pool, (tx) =>
+        pairingComplete(tx, {
+          pairingId: p.pairingId,
+          pollingTokenHash: thief,
+          deviceTokenHash: hash(),
+        }),
+      ),
     ).toEqual({ outcome: 'not_claimable' });
     for (let i = 0; i < 4; i += 1) {
       expect(
         (
-          await pairingPoll(db, {
-            pairingId: p.pairingId,
-            pollingTokenHash: thief,
-            maxWrongAttempts: 5,
-          })
+          await inTx(pool, (tx) =>
+            pairingPoll(tx, {
+              pairingId: p.pairingId,
+              pollingTokenHash: thief,
+              maxWrongAttempts: 5,
+            }),
+          )
         ).outcome,
       ).toBe('wrong_token');
     }
     // The attempt that locks the session says so, once, for its audit event (round 3, SCX-04).
     expect(
       (
-        await pairingPoll(db, {
-          pairingId: p.pairingId,
-          pollingTokenHash: thief,
-          maxWrongAttempts: 5,
-        })
+        await inTx(pool, (tx) =>
+          pairingPoll(tx, {
+            pairingId: p.pairingId,
+            pollingTokenHash: thief,
+            maxWrongAttempts: 5,
+          }),
+        )
       ).outcome,
     ).toBe('wrong_token_locked');
     expect(
       (
-        await pairingPoll(db, {
-          pairingId: p.pairingId,
-          pollingTokenHash: thief,
-          maxWrongAttempts: 5,
-        })
+        await inTx(pool, (tx) =>
+          pairingPoll(tx, {
+            pairingId: p.pairingId,
+            pollingTokenHash: thief,
+            maxWrongAttempts: 5,
+          }),
+        )
       ).outcome,
     ).toBe('locked');
     // Locked for the rightful player too: it must start a new pairing.
     expect(
       (
-        await pairingPoll(db, {
-          pairingId: p.pairingId,
-          pollingTokenHash: p.pollingTokenHash,
-          maxWrongAttempts: 5,
-        })
+        await inTx(pool, (tx) =>
+          pairingPoll(tx, {
+            pairingId: p.pairingId,
+            pollingTokenHash: p.pollingTokenHash,
+            maxWrongAttempts: 5,
+          }),
+        )
       ).outcome,
     ).toBe('locked');
     expect(
-      await pairingComplete(db, {
-        pairingId: p.pairingId,
-        pollingTokenHash: p.pollingTokenHash,
-        deviceTokenHash: hash(),
-      }),
+      await inTx(pool, (tx) =>
+        pairingComplete(tx, {
+          pairingId: p.pairingId,
+          pollingTokenHash: p.pollingTokenHash,
+          deviceTokenHash: hash(),
+        }),
+      ),
     ).toEqual({ outcome: 'not_claimable' });
     expect(
       (
-        await pairingPoll(db, {
-          pairingId: randomUUID(),
-          pollingTokenHash: thief,
-          maxWrongAttempts: 5,
-        })
+        await inTx(pool, (tx) =>
+          pairingPoll(tx, {
+            pairingId: randomUUID(),
+            pollingTokenHash: thief,
+            maxWrongAttempts: 5,
+          }),
+        )
       ).outcome,
     ).toBe('not_found');
   });
@@ -599,19 +654,28 @@ describe('pairing', () => {
     const clientKey = `flood-${randomUUID()}`;
     const results = await Promise.all(
       Array.from({ length: 14 }, () =>
-        pairingCreate(db, { code: pairingCode(), pollingTokenHash: hash(), clientKey, ...limits }),
+        inTx(pool, (tx) =>
+          pairingCreate(tx, {
+            code: pairingCode(),
+            pollingTokenHash: hash(),
+            clientKey,
+            ...limits,
+          }),
+        ),
       ),
     );
     expect(results.filter((r) => r.outcome === 'created')).toHaveLength(10);
     expect(results.filter((r) => r.outcome === 'rate_limited')).toHaveLength(4);
     expect(
       (
-        await pairingCreate(db, {
-          code: pairingCode(),
-          pollingTokenHash: hash(),
-          clientKey: `other-${randomUUID()}`,
-          ...limits,
-        })
+        await inTx(pool, (tx) =>
+          pairingCreate(tx, {
+            code: pairingCode(),
+            pollingTokenHash: hash(),
+            clientKey: `other-${randomUUID()}`,
+            ...limits,
+          }),
+        )
       ).outcome,
     ).toBe('created');
   });
@@ -619,12 +683,14 @@ describe('pairing', () => {
   it('reports a code collision instead of creating an ambiguous code', async () => {
     const p = await newPairing();
     expect(
-      await pairingCreate(db, {
-        code: p.code,
-        pollingTokenHash: hash(),
-        clientKey: `c-${randomUUID()}`,
-        ...limits,
-      }),
+      await inTx(pool, (tx) =>
+        pairingCreate(tx, {
+          code: p.code,
+          pollingTokenHash: hash(),
+          clientKey: `c-${randomUUID()}`,
+          ...limits,
+        }),
+      ),
     ).toEqual({ outcome: 'code_collision' });
   });
 
@@ -644,11 +710,13 @@ describe('pairing', () => {
     const first = await newPairing();
     await claim(org, first.code);
     const firstToken = hash();
-    const one = await pairingComplete(db, {
-      pairingId: first.pairingId,
-      pollingTokenHash: first.pollingTokenHash,
-      deviceTokenHash: firstToken,
-    });
+    const one = await inTx(pool, (tx) =>
+      pairingComplete(tx, {
+        pairingId: first.pairingId,
+        pollingTokenHash: first.pollingTokenHash,
+        deviceTokenHash: firstToken,
+      }),
+    );
     if (one.outcome !== 'completed') throw new Error('expected completed');
 
     const second = await newPairing();
@@ -658,11 +726,13 @@ describe('pairing', () => {
     });
     expect(await deviceByTokenHash(db, firstToken)).toBeNull();
     const secondToken = hash();
-    const two = await pairingComplete(db, {
-      pairingId: second.pairingId,
-      pollingTokenHash: second.pollingTokenHash,
-      deviceTokenHash: secondToken,
-    });
+    const two = await inTx(pool, (tx) =>
+      pairingComplete(tx, {
+        pairingId: second.pairingId,
+        pollingTokenHash: second.pollingTokenHash,
+        deviceTokenHash: secondToken,
+      }),
+    );
     expect(two.outcome).toBe('completed');
     expect((await deviceByTokenHash(db, secondToken))?.displayId).toBe(org.displayId);
   });
@@ -682,22 +752,26 @@ describe('pairing', () => {
     const newerToken = hash();
     expect(
       (
-        await pairingComplete(db, {
-          pairingId: newer.pairingId,
-          pollingTokenHash: newer.pollingTokenHash,
-          deviceTokenHash: newerToken,
-        })
+        await inTx(pool, (tx) =>
+          pairingComplete(tx, {
+            pairingId: newer.pairingId,
+            pollingTokenHash: newer.pollingTokenHash,
+            deviceTokenHash: newerToken,
+          }),
+        )
       ).outcome,
     ).toBe('completed');
 
     // The older player comes back within its code's lifetime: told to start again.
     expect(await pollOutcome(older)).toBe('expired');
     expect(
-      await pairingComplete(db, {
-        pairingId: older.pairingId,
-        pollingTokenHash: older.pollingTokenHash,
-        deviceTokenHash: hash(),
-      }),
+      await inTx(pool, (tx) =>
+        pairingComplete(tx, {
+          pairingId: older.pairingId,
+          pollingTokenHash: older.pollingTokenHash,
+          deviceTokenHash: hash(),
+        }),
+      ),
     ).toEqual({ outcome: 'not_claimable' });
     expect((await deviceByTokenHash(db, newerToken))?.displayId).toBe(org.displayId);
   });
@@ -711,9 +785,14 @@ describe('pairing', () => {
     expect(await withOrg(pool, b.orgId, (tx) => pairingCancelClaims(tx, org.displayId))).toEqual(
       [],
     );
-    expect(await pgCode(withoutOrg(pool, (tx) => pairingCancelClaims(tx, org.displayId)))).toBe(
-      PG.insufficientPrivilege,
-    );
+    // As above: pairingCancelClaims takes an OrgTx, so the call with no organisation is sent raw.
+    expect(
+      await pgCode(
+        withoutOrg(pool, (tx) =>
+          withNoOrgSet(tx).query('SELECT sec.pairing_cancel_claims($1) AS ids', [org.displayId]),
+        ),
+      ),
+    ).toBe(PG.insufficientPrivilege);
     expect(await pollOutcome(p)).toBe('claimed');
 
     expect(await withOrg(pool, org.orgId, (tx) => pairingCancelClaims(tx, org.displayId))).toEqual([
@@ -721,11 +800,13 @@ describe('pairing', () => {
     ]);
     expect(await pollOutcome(p)).toBe('expired');
     expect(
-      await pairingComplete(db, {
-        pairingId: p.pairingId,
-        pollingTokenHash: p.pollingTokenHash,
-        deviceTokenHash: hash(),
-      }),
+      await inTx(pool, (tx) =>
+        pairingComplete(tx, {
+          pairingId: p.pairingId,
+          pollingTokenHash: p.pollingTokenHash,
+          deviceTokenHash: hash(),
+        }),
+      ),
     ).toEqual({ outcome: 'not_claimable' });
     expect(await withOrg(pool, org.orgId, (tx) => pairingCancelClaims(tx, org.displayId))).toEqual(
       [],
@@ -768,11 +849,13 @@ describe('pairing', () => {
     const firstToken = hash();
     expect(
       (
-        await pairingComplete(db, {
-          pairingId: first.pairingId,
-          pollingTokenHash: first.pollingTokenHash,
-          deviceTokenHash: firstToken,
-        })
+        await inTx(pool, (tx) =>
+          pairingComplete(tx, {
+            pairingId: first.pairingId,
+            pollingTokenHash: first.pollingTokenHash,
+            deviceTokenHash: firstToken,
+          }),
+        )
       ).outcome,
     ).toBe('completed');
 
@@ -789,11 +872,13 @@ describe('pairing', () => {
       [stray.pairingId, org.orgId, org.displayId, org.membershipId],
     );
     expect(
-      await pairingComplete(db, {
-        pairingId: stray.pairingId,
-        pollingTokenHash: stray.pollingTokenHash,
-        deviceTokenHash: hash(),
-      }),
+      await inTx(pool, (tx) =>
+        pairingComplete(tx, {
+          pairingId: stray.pairingId,
+          pollingTokenHash: stray.pollingTokenHash,
+          deviceTokenHash: hash(),
+        }),
+      ),
     ).toEqual({ outcome: 'not_claimable' });
     expect(await pollOutcome(stray)).toBe('expired');
     expect((await deviceByTokenHash(db, firstToken))?.displayId).toBe(org.displayId);
@@ -861,11 +946,13 @@ describe('device credentials', () => {
     const p = await newPairing();
     await claim(org, p.code);
     const token = hash();
-    const done = await pairingComplete(db, {
-      pairingId: p.pairingId,
-      pollingTokenHash: p.pollingTokenHash,
-      deviceTokenHash: token,
-    });
+    const done = await inTx(pool, (tx) =>
+      pairingComplete(tx, {
+        pairingId: p.pairingId,
+        pollingTokenHash: p.pollingTokenHash,
+        deviceTokenHash: token,
+      }),
+    );
     if (done.outcome !== 'completed') throw new Error('expected completed');
     expect(await deviceByTokenHash(db, token)).not.toBeNull();
 
@@ -904,21 +991,25 @@ describe('device credentials', () => {
     await claim(org, p.code);
     expect(
       await pgCode(
-        pairingComplete(db, {
-          pairingId: p.pairingId,
-          pollingTokenHash: p.pollingTokenHash,
-          deviceTokenHash: Buffer.from('short'),
-        }),
+        inTx(pool, (tx) =>
+          pairingComplete(tx, {
+            pairingId: p.pairingId,
+            pollingTokenHash: p.pollingTokenHash,
+            deviceTokenHash: Buffer.from('short'),
+          }),
+        ),
       ),
     ).toBe(PG.check);
     // The failed attempt rolled back; the session is still collectable.
     expect(
       (
-        await pairingComplete(db, {
-          pairingId: p.pairingId,
-          pollingTokenHash: p.pollingTokenHash,
-          deviceTokenHash: hash(),
-        })
+        await inTx(pool, (tx) =>
+          pairingComplete(tx, {
+            pairingId: p.pairingId,
+            pollingTokenHash: p.pollingTokenHash,
+            deviceTokenHash: hash(),
+          }),
+        )
       ).outcome,
     ).toBe('completed');
   });
@@ -934,19 +1025,21 @@ describe('audit helpers', () => {
         action: 'pairing.claim',
         objectType: 'display',
         objectId: marker,
-        result: 'success',
-        detail: { via: 'test' },
+        result: 'denied',
+        detail: { reason: 'invalid_code' },
       }),
     );
-    await auditUnscoped(db, {
-      actorType: 'anonymous',
-      actorId: null,
-      action: 'auth.login',
-      objectType: null,
-      objectId: marker,
-      result: 'denied',
-      detail: { reason: 'no_membership' },
-    });
+    await inTx(pool, (tx) =>
+      auditUnscoped(tx, {
+        actorType: 'anonymous',
+        actorId: null,
+        action: 'pairing.create',
+        objectType: 'pairing_session',
+        objectId: marker,
+        result: 'success',
+        detail: null,
+      }),
+    );
 
     const seenByA = await withOrg(pool, a.orgId, (tx) =>
       tx.query<{ action: string; org_id: string }>(
@@ -961,17 +1054,186 @@ describe('audit helpers', () => {
     expect(seenByB.rowCount).toBe(0);
     expect(
       await pgCode(
-        auditUnscoped(db, {
-          actorType: 'operator',
-          actorId: null,
-          action: 'Not An Action',
-          objectType: null,
-          objectId: null,
-          result: 'success',
-          detail: null,
-        }),
+        inTx(pool, (tx) =>
+          auditUnscoped(tx, {
+            actorType: 'operator',
+            actorId: null,
+            // @ts-expect-error not an AuditAction: the union refuses it at compile time, and this case is the database's own CHECK on the shape of an action
+            action: 'Not An Action',
+            objectType: null,
+            objectId: null,
+            result: 'success',
+            detail: null,
+          }),
+        ),
       ),
     ).toBe(PG.check);
+  });
+});
+
+describe('the two writes outside a transaction (D2, CX-01)', () => {
+  it('auditStandalone commits a refusal on its own, where no organisation can read it (D2)', async () => {
+    const marker = `standalone-${randomUUID()}`;
+    await auditStandalone(pool, {
+      actorType: 'player',
+      actorId: null,
+      action: 'player.auth_rejected',
+      objectType: null,
+      objectId: null,
+      result: 'denied',
+      detail: { route: marker, client: 'a-fingerprint', failuresInWindow: 1, throttled: false },
+    });
+    const stored = await asSuperuser((client) =>
+      client.query(
+        `SELECT org_id, actor_type, actor_id, action, object_type, object_id, result
+         FROM public.audit_event WHERE detail->>'route' = $1`,
+        [marker],
+      ),
+    );
+    expect(stored.rows).toEqual([
+      {
+        org_id: null,
+        actor_type: 'player',
+        actor_id: null,
+        action: 'player.auth_rejected',
+        object_type: null,
+        object_id: null,
+        result: 'denied',
+      },
+    ]);
+    for (const org of [a, b]) {
+      const seen = await withOrg(pool, org.orgId, (tx) =>
+        tx.query("SELECT 1 FROM audit_event WHERE detail->>'route' = $1", [marker]),
+      );
+      expect(seen.rowCount).toBe(0);
+    }
+  });
+
+  it('auditStandalone is refused inside an open transaction, and nothing is written (U-3)', async () => {
+    const marker = `standalone-${randomUUID()}`;
+    // Defined outside the callback: lint reports the form it can read.
+    const writeRefusal = (): Promise<void> =>
+      auditStandalone(pool, {
+        actorType: 'anonymous',
+        actorId: null,
+        action: 'auth.login',
+        objectType: null,
+        objectId: null,
+        result: 'denied',
+        detail: { reason: 'mfa_evidence_missing', acr: marker, amr: [] },
+      });
+    await expect(withOrg(pool, a.orgId, () => writeRefusal())).rejects.toThrow(
+      /^auditStandalone was called while a transaction is open on the same asynchronous path .* Return the event from the outer change as \{ value, audit \}/,
+    );
+    const stored = await asSuperuser((client) =>
+      client.query("SELECT 1 FROM public.audit_event WHERE detail->>'acr' = $1", [marker]),
+    );
+    expect(stored.rowCount).toBe(0);
+  });
+
+  it('sessionRevokeUnaudited ends the session, says whether one was live, and writes no audit row (CX-01 residual)', async () => {
+    const idHash = sha256(`cookie-${randomUUID()}`);
+    await inTx(pool, (tx) =>
+      sessionCreate(tx, {
+        idHash,
+        oidcSub: a.oidcSub,
+        csrfToken: 'c'.repeat(43),
+        ttlSeconds: 3600,
+        idToken: null,
+        authTime: new Date(),
+      }),
+    );
+    const auditRows = async (): Promise<number> => {
+      const { rows } = await asSuperuser((client) =>
+        client.query<{ n: string }>('SELECT count(*) AS n FROM public.audit_event'),
+      );
+      return Number(rows[0]?.n);
+    };
+    const before = await auditRows();
+    expect(await sessionByIdHash(db, idHash, 1800)).not.toBeNull();
+    expect(await sessionRevokeUnaudited(pool, idHash)).toBe(true);
+    expect(await sessionByIdHash(db, idHash, 1800)).toBeNull();
+    expect(await sessionRevokeUnaudited(pool, idHash)).toBe(false);
+    expect(await sessionRevokeUnaudited(pool, hash())).toBe(false);
+    expect(await auditRows()).toBe(before);
+  });
+});
+
+describe('the device-registration and media-queue lookups (AG-2.2)', () => {
+  it('deviceByRegistrationId resolves a registration to its organisation and display, until it is revoked', async () => {
+    const org = await createOrg(migrator, 'By registration');
+    const p = await newPairing();
+    await claim(org, p.code);
+    const done = await inTx(pool, (tx) =>
+      pairingComplete(tx, {
+        pairingId: p.pairingId,
+        pollingTokenHash: p.pollingTokenHash,
+        deviceTokenHash: hash(),
+      }),
+    );
+    if (done.outcome !== 'completed') throw new Error('expected completed');
+    expect(await deviceByRegistrationId(db, done.registrationId)).toEqual({
+      orgId: org.orgId,
+      displayId: org.displayId,
+    });
+    // A lookup takes either handle.
+    expect(await withoutOrg(pool, (tx) => deviceByRegistrationId(tx, done.registrationId))).toEqual(
+      { orgId: org.orgId, displayId: org.displayId },
+    );
+    expect(await deviceByRegistrationId(db, randomUUID())).toBeNull();
+
+    await withOrg(pool, org.orgId, (tx) =>
+      tx.query(
+        "UPDATE player_registration SET revoked_at = now(), revoked_reason = 'operator' WHERE id = $1 AND revoked_at IS NULL",
+        [done.registrationId],
+      ),
+    );
+    expect(await deviceByRegistrationId(db, done.registrationId)).toBeNull();
+  });
+
+  it('mediaProcessingJobs lists the rows waiting for validation in every organisation, oldest first, up to the limit', async () => {
+    // Older than anything another test file may have left waiting, so these two lead the queue.
+    const waiting = (org: TestOrg, age: string): Promise<string> =>
+      withOrg(pool, org.orgId, async (tx) => {
+        const { rows } = await tx.query<{ id: string }>(
+          `INSERT INTO media (org_id, kind, status, original_name, created_at)
+           VALUES (app_org_id(), 'image', 'processing', 'queued', now() - $1::interval)
+           RETURNING id`,
+          [age],
+        );
+        if (rows[0] === undefined) throw new Error('the media row was not inserted');
+        return rows[0].id;
+      });
+    const settle = (org: TestOrg, id: string): Promise<unknown> =>
+      withOrg(pool, org.orgId, (tx) =>
+        tx.query(
+          `UPDATE media SET status = 'failed', error_code = 'inspection_timeout',
+                  error_detail = 'Settled by the test that queued it.'
+           WHERE org_id = app_org_id() AND id = $1`,
+          [id],
+        ),
+      );
+    const older = await waiting(a, '20 years');
+    const newer = await waiting(b, '19 years');
+    try {
+      const jobs = await mediaProcessingJobs(db, 2);
+      expect(jobs.map((job) => ({ mediaId: job.mediaId, orgId: job.orgId }))).toEqual([
+        { mediaId: older, orgId: a.orgId },
+        { mediaId: newer, orgId: b.orgId },
+      ]);
+      expect(jobs[0]?.createdAt).toBeInstanceOf(Date);
+      expect(jobs[0]?.createdAt.getTime()).toBeLessThan(jobs[1]?.createdAt.getTime() ?? 0);
+      expect(await mediaProcessingJobs(db, 1)).toHaveLength(1);
+      // The function clamps the limit to at least one row (migration 0003).
+      expect(await mediaProcessingJobs(db, 0)).toHaveLength(1);
+    } finally {
+      // Left waiting, they would lengthen the media pipeline's queue for the files after this.
+      await settle(a, older);
+      await settle(b, newer);
+    }
+    const left = (await mediaProcessingJobs(db, 5000)).map((job) => job.mediaId);
+    expect(left).not.toContain(older);
+    expect(left).not.toContain(newer);
   });
 });
 

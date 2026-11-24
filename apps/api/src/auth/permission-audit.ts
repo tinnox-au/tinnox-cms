@@ -2,16 +2,17 @@
  * `security.permission_denied`: the audit row of a refusal by role (CMS-13,
  * docs/portal-v2/stage-c.md section 6.4).
  *
- * Nothing changed, so the row is written in its own transaction after the refusal, as
- * `security.csrf_rejected` is (auth/session.ts). Route refusals are throttled per member with
- * the B6 pattern (routes/player.ts): one row when a member starts being refused in a window and
- * one when the member reaches the limit. Refused member and invite changes are always written.
+ * Nothing changed, so the row is written in its own transaction after the refusal, through
+ * `recordRefusal` (./refusal.ts; SCR-32, D2), as `security.csrf_rejected` is (auth/session.ts).
+ * Route refusals are throttled per member with the B6 pattern (routes/player.ts): one row when a
+ * member starts being refused in a window and one when the member reaches the limit. Refused
+ * member and invite changes are always written.
  */
 import type { PermissionKey } from '@tinnox/contracts';
-import { auditScoped, withOrg } from '@tinnox/db';
 import type { FastifyRequest } from 'fastify';
 import type { AppContext } from '../context.ts';
 import { AuthFailureGuard } from './failure-guard.ts';
+import { recordRefusal } from './refusal.ts';
 import type { OperatorSession } from './session.ts';
 
 /**
@@ -74,25 +75,23 @@ export async function recordPermissionDenied(
   if (!record.always && !counted.first && !counted.crossedLimit) return;
   const route = request.routeOptions.url ?? 'unknown';
   try {
-    await withOrg(ctx.pool, session.orgId, (tx) =>
-      auditScoped(tx, {
-        actorType: 'operator',
-        actorId: session.membershipId,
-        action: 'security.permission_denied',
-        objectType: record.object?.type ?? 'route',
-        objectId: record.object?.id ?? `${request.method} ${route}`.slice(0, 100),
-        result: 'denied',
-        detail: {
-          permission: [...record.keys],
-          method: request.method,
-          route,
-          reason: record.reason,
-          ...(record.always
-            ? {}
-            : { refusalsInWindow: counted.count, throttled: counted.crossedLimit }),
-        },
-      }),
-    );
+    await recordRefusal(ctx, request, session, {
+      actorType: 'operator',
+      actorId: session.membershipId,
+      action: 'security.permission_denied',
+      objectType: record.object?.type ?? 'route',
+      objectId: record.object?.id ?? `${request.method} ${route}`.slice(0, 100),
+      result: 'denied',
+      detail: {
+        permission: [...record.keys],
+        method: request.method,
+        route,
+        reason: record.reason,
+        ...(record.always
+          ? {}
+          : { refusalsInWindow: counted.count, throttled: counted.crossedLimit }),
+      },
+    });
   } catch (error) {
     request.log.error({ err: error }, 'failed to record permission refusal');
   }

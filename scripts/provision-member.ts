@@ -5,40 +5,18 @@
 // Environment (controlled host only): DATABASE_MIGRATOR_URL; PROVISION_IDP_ISSUER (default
 // OIDC_ISSUER), PROVISION_IDP_CLIENT_ID and PROVISION_IDP_CLIENT_SECRET, the identity-provider
 // client that can only read accounts. Exit 0 done, 1 refused or failed, 2 usage error.
-import { CommitOutcomeUnknownError, connectMigrator, type MigratorPool } from '@tinnox/db';
+import { CommitOutcomeUnknownError } from '@tinnox/db';
+import { connectMigrator, type MigratorPool } from '@tinnox/db/migrate';
 import { loadEnv, requireEnv } from './lib/env.ts';
 import { keycloakDirectory, type IdpDirectory } from './lib/idp.ts';
 import {
   RefusedError,
   USAGE,
   UsageError,
-  fulfil,
-  mfaReset,
-  orgCreate,
   parseInvocation,
-  pending,
-  restoreOwner,
-  setName,
+  runInvocation,
   type Invocation,
-  type Result,
 } from './lib/provision.ts';
-
-function run(pool: MigratorPool, idp: IdpDirectory, call: Invocation): Promise<Result> {
-  switch (call.command) {
-    case 'org-create':
-      return orgCreate(pool, idp, call.args);
-    case 'pending':
-      return pending(pool, idp, call.args);
-    case 'fulfil':
-      return fulfil(pool, idp, call.args);
-    case 'set-name':
-      return setName(pool, idp, call.args);
-    case 'mfa-reset':
-      return mfaReset(pool, idp, call.args);
-    case 'restore-owner':
-      return restoreOwner(pool, idp, call.args);
-  }
-}
 
 /** Returns the exit code (no process.exit, so nothing written to a pipe is lost). */
 async function main(argv: readonly string[]): Promise<number> {
@@ -72,7 +50,7 @@ async function main(argv: readonly string[]): Promise<number> {
     pool = await connectMigrator(requireEnv('DATABASE_MIGRATOR_URL'), {
       applicationName: 'tinnox-provision',
     });
-    const result = await run(pool, idp, invocation);
+    const result = await runInvocation(pool, idp, invocation);
     for (const line of result.lines) console.log(line);
     return 0;
   } catch (error) {

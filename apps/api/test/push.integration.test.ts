@@ -19,7 +19,7 @@ import {
   type PushPlanRow,
   type PushResult,
 } from '@tinnox/contracts';
-import { withOrg } from '@tinnox/db';
+import { withOrg } from '@tinnox/db/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { MANIFEST_BATCH_SIZE } from '../src/publishing.ts';
 import {
@@ -588,7 +588,7 @@ describe('assign, then push', () => {
       ] as const;
       const total = MANIFEST_BATCH_SIZE * 2 + 5;
       expect(total).toBeLessThanOrEqual(ABSOLUTE.maxPushDisplays * 2);
-      await withOrg(t.pool, org.orgId, (tx) =>
+      await withOrg(t.testSql('adds screens in bulk, more than one push batch'), org.orgId, (tx) =>
         tx.query(
           `INSERT INTO display (org_id, site_id, name, canvas_width, canvas_height, assigned_playlist_id)
            SELECT app_org_id(), $1, 'Batch ' || g, 640, 360,
@@ -1247,6 +1247,32 @@ describe('assign, then push', () => {
       expect(await desiredPublicationId(alice, displayId)).toBeNull();
     });
 
+    // A publishing attempt is audited whatever its result. The refusal is the value of the
+    // change, so its audit row has committed by the time the route answers 422.
+    it('D3: leaves the failure audit row of a refused publish, and still answers 422 with the reasons', async () => {
+      const display = await createDisplay(alice, orgA, 'Refused publish');
+      const empty = await createPlaylist(alice, 'Empty, refused');
+      const refused = await publish(empty, display.id);
+      expect(refused.status).toBe(422);
+      const body = (await refused.json()) as ErrorBody;
+      expect(body.error.code).toBe('publication_rejected');
+      expect(body.error.details).toEqual([
+        expect.objectContaining({ path: 'playlist', code: 'playlist_empty' }),
+      ]);
+      const events = (await auditEvents(alice, '&category=publication&result=failure')).filter(
+        (e) => e.objectId === empty,
+      );
+      expect(events).toEqual([
+        expect.objectContaining({
+          action: 'publication.create',
+          result: 'failure',
+          objectType: 'playlist',
+          detail: { displayId: display.id, reasons: ['playlist_empty'], via: 'publish' },
+        }),
+      ]);
+      expect(await publications(orgA, display.id)).toEqual([]);
+    });
+
     it('shares its Idempotency-Key space with push, per display', async () => {
       // A key used to publish to a display names that publication for a push as well.
       const { displayId, playlistId } = await assigned(alice, orgA, [imageA], 'Shared key');
@@ -1321,32 +1347,37 @@ describe('assign, then push', () => {
     ): Promise<{ waited: boolean; results: PushResult[] }> {
       const started: { push?: Promise<Response> } = {};
       let waited = false;
-      await withOrg(t.pool, orgA.orgId, async (tx) => {
-        await edit(tx);
-        const pushing = push(alice, [displayId]);
-        started.push = pushing;
-        let settled = false;
-        void pushing.then(
-          () => {
-            settled = true;
-          },
-          () => {
-            settled = true;
-          },
-        );
-        const deadline = Date.now() + 5000;
-        while (!settled && Date.now() < deadline) {
-          const { rows } = await t.pool.query<{ n: number }>(
-            'SELECT count(*)::int AS n FROM pg_locks WHERE NOT granted',
+      // The edit is the test's own SQL, not a route's, so it runs on the test's pool.
+      await withOrg(
+        t.testSql('the concurrent edit the test makes under a push'),
+        orgA.orgId,
+        async (tx) => {
+          await edit(tx);
+          const pushing = push(alice, [displayId]);
+          started.push = pushing;
+          let settled = false;
+          void pushing.then(
+            () => {
+              settled = true;
+            },
+            () => {
+              settled = true;
+            },
           );
-          if ((rows[0]?.n ?? 0) > 0) {
-            waited = true;
-            break;
+          const deadline = Date.now() + 5000;
+          while (!settled && Date.now() < deadline) {
+            const { rows } = await t.pool.query<{ n: number }>(
+              'SELECT count(*)::int AS n FROM pg_locks WHERE NOT granted',
+            );
+            if ((rows[0]?.n ?? 0) > 0) {
+              waited = true;
+              break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 20));
           }
-          await new Promise((resolve) => setTimeout(resolve, 20));
-        }
-        // Returning commits the edit and lets the push go on.
-      });
+          // Returning commits the edit and lets the push go on.
+        },
+      );
       if (started.push === undefined) throw new Error('the push was not started');
       const response = await started.push;
       expect(response.status, await response.clone().text()).toBe(200);

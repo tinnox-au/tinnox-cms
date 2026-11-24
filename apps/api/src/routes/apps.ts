@@ -14,15 +14,15 @@ import {
   type AppDto,
   type AppListResponse,
 } from '@tinnox/contracts';
-import { auditScoped, withOrg, type Tx } from '@tinnox/db';
+import { readOrg, type OrgReadTx } from '@tinnox/db';
 import type { FastifyInstance } from 'fastify';
 import { APP_COLUMNS, toAppDto, type AppRow } from '../app-rows.ts';
-import { withOrgAllowed } from '../auth/permissions.ts';
+import { changeAsOperator } from '../auth/permissions.ts';
 import { operatorOf } from '../auth/session.ts';
 import type { AppContext } from '../context.ts';
 import { HttpError, notFound, parseInput, pgErrorCode } from '../errors.ts';
 
-async function loadApp(tx: Tx, id: string): Promise<AppDto | null> {
+async function loadApp(tx: OrgReadTx, id: string): Promise<AppDto | null> {
   const { rows } = await tx.query<AppRow>(
     `SELECT ${APP_COLUMNS} FROM app a WHERE a.id = $1 AND a.org_id = app_org_id()`,
     [id],
@@ -39,7 +39,7 @@ export function registerAppRoutes(app: FastifyInstance, ctx: AppContext): void {
 
   app.get(ROUTES.apps, async (request): Promise<AppListResponse> => {
     const session = operatorOf(request);
-    return withOrg(pool, session.orgId, async (tx) => {
+    return readOrg(pool, session.orgId, async (tx) => {
       const { rows } = await tx.query<AppRow>(
         `SELECT ${APP_COLUMNS} FROM app a
          WHERE a.org_id = app_org_id()
@@ -54,7 +54,7 @@ export function registerAppRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.post(ROUTES.apps, async (request, reply): Promise<AppDto> => {
     const session = operatorOf(request);
     const input = parseInput(AppCreateSchema, request.body, 'app');
-    const dto = await withOrgAllowed(ctx, request, async (tx) => {
+    const dto = await changeAsOperator(ctx, request, async (tx) => {
       const inserted = await tx.query<{ id: string }>(
         `INSERT INTO app (org_id, type, name, description, settings)
          VALUES (app_org_id(), $1, $2, $3, $4::jsonb) RETURNING id`,
@@ -67,18 +67,20 @@ export function registerAppRoutes(app: FastifyInstance, ctx: AppContext): void {
       );
       const id = inserted.rows[0]?.id;
       if (id === undefined) throw new Error('app insert returned no row');
-      await auditScoped(tx, {
-        actorType: 'operator',
-        actorId: session.membershipId,
-        action: 'app.create',
-        objectType: 'app',
-        objectId: id,
-        result: 'success',
-        detail: { type: input.content.type },
-      });
       const created = await loadApp(tx, id);
       if (created === null) throw new Error('created app is not visible');
-      return created;
+      return {
+        value: created,
+        audit: {
+          actorType: 'operator',
+          actorId: session.membershipId,
+          action: 'app.create',
+          objectType: 'app',
+          objectId: id,
+          result: 'success',
+          detail: { type: input.content.type },
+        },
+      };
     });
     void reply.code(201);
     return dto;
@@ -87,7 +89,7 @@ export function registerAppRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.get(ROUTES.appPattern, async (request): Promise<AppDto> => {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
-    return withOrg(pool, session.orgId, async (tx) => {
+    return readOrg(pool, session.orgId, async (tx) => {
       const dto = await loadApp(tx, id);
       if (dto === null) throw notFound('The app');
       return dto;
@@ -98,7 +100,7 @@ export function registerAppRoutes(app: FastifyInstance, ctx: AppContext): void {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     const patch = parseInput(AppPatchSchema, request.body, 'app');
-    return withOrgAllowed(ctx, request, async (tx) => {
+    return changeAsOperator(ctx, request, async (tx) => {
       const locked = await tx.query<{ type: string }>(
         'SELECT type FROM app WHERE id = $1 AND org_id = app_org_id() FOR UPDATE',
         [id],
@@ -124,19 +126,21 @@ export function registerAppRoutes(app: FastifyInstance, ctx: AppContext): void {
           patch.content === undefined ? null : JSON.stringify(patch.content.settings),
         ],
       );
-      await auditScoped(tx, {
-        actorType: 'operator',
-        actorId: session.membershipId,
-        action: 'app.update',
-        objectType: 'app',
-        objectId: id,
-        result: 'success',
-        // Field names only: settings hold operator text.
-        detail: { fields: Object.keys(patch).sort() },
-      });
       const dto = await loadApp(tx, id);
       if (dto === null) throw new Error('updated app is not visible');
-      return dto;
+      return {
+        value: dto,
+        audit: {
+          actorType: 'operator',
+          actorId: session.membershipId,
+          action: 'app.update',
+          objectType: 'app',
+          objectId: id,
+          result: 'success',
+          // Field names only: settings hold operator text.
+          detail: { fields: Object.keys(patch).sort() },
+        },
+      };
     });
   });
 
@@ -146,7 +150,7 @@ export function registerAppRoutes(app: FastifyInstance, ctx: AppContext): void {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     try {
-      await withOrgAllowed(ctx, request, async (tx) => {
+      await changeAsOperator(ctx, request, async (tx) => {
         const locked = await tx.query<{ type: string }>(
           'SELECT type FROM app WHERE id = $1 AND org_id = app_org_id() FOR UPDATE',
           [id],
@@ -168,15 +172,18 @@ export function registerAppRoutes(app: FastifyInstance, ctx: AppContext): void {
           );
         }
         await tx.query('DELETE FROM app WHERE id = $1 AND org_id = app_org_id()', [id]);
-        await auditScoped(tx, {
-          actorType: 'operator',
-          actorId: session.membershipId,
-          action: 'app.delete',
-          objectType: 'app',
-          objectId: id,
-          result: 'success',
-          detail: { type: current.type },
-        });
+        return {
+          value: undefined,
+          audit: {
+            actorType: 'operator',
+            actorId: session.membershipId,
+            action: 'app.delete',
+            objectType: 'app',
+            objectId: id,
+            result: 'success',
+            detail: { type: current.type },
+          },
+        };
       });
     } catch (error) {
       // A playlist took the app between the check above and the delete.

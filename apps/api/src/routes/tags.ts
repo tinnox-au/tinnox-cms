@@ -16,9 +16,9 @@ import {
   type TagDto,
   type TagListResponse,
 } from '@tinnox/contracts';
-import { auditScoped, STAGE_A_CONSTRAINTS, violatedConstraint, withOrg, type Tx } from '@tinnox/db';
+import { readOrg, STAGE_A_CONSTRAINTS, violatedConstraint, type OrgReadTx } from '@tinnox/db';
 import type { FastifyInstance } from 'fastify';
-import { requirePermission, tagScopeKey, withOrgAllowed } from '../auth/permissions.ts';
+import { changeAsOperator, requirePermission, tagScopeKey } from '../auth/permissions.ts';
 import { operatorOf } from '../auth/session.ts';
 import type { AppContext } from '../context.ts';
 import { bigintToNumber } from '../db-helpers.ts';
@@ -57,7 +57,7 @@ function toTagDto(row: TagRow): TagDto {
   };
 }
 
-async function loadTag(tx: Tx, id: string): Promise<TagDto | null> {
+async function loadTag(tx: OrgReadTx, id: string): Promise<TagDto | null> {
   const { rows } = await tx.query<TagRow>(
     `SELECT ${TAG_COLUMNS} FROM tag t WHERE t.id = $1 AND t.org_id = app_org_id()`,
     [id],
@@ -81,7 +81,7 @@ export function registerTagRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.get(ROUTES.tags, async (request): Promise<TagListResponse> => {
     const session = operatorOf(request);
     const query = parseInput(TagListQuerySchema, request.query, 'query');
-    return withOrg(pool, session.orgId, async (tx) => {
+    return readOrg(pool, session.orgId, async (tx) => {
       const { rows } = await tx.query<TagRow>(
         `SELECT ${TAG_COLUMNS} FROM tag t
          WHERE t.org_id = app_org_id() AND ($1::text IS NULL OR t.scope = $1)
@@ -98,7 +98,7 @@ export function registerTagRoutes(app: FastifyInstance, ctx: AppContext): void {
     const input = parseInput(TagCreateSchema, request.body, 'tag');
     let created: TagDto;
     try {
-      created = await withOrgAllowed(ctx, request, async (tx) => {
+      created = await changeAsOperator(ctx, request, async (tx) => {
         // One at a time per organisation, so the ceiling below cannot be passed by a burst.
         await tx.query(
           "SELECT pg_advisory_xact_lock(hashtextextended('tinnox.tag_count:' || app_org_id()::text, 0))",
@@ -120,18 +120,20 @@ export function registerTagRoutes(app: FastifyInstance, ctx: AppContext): void {
         );
         const id = inserted.rows[0]?.id;
         if (id === undefined) throw new Error('tag insert returned no row');
-        await auditScoped(tx, {
-          actorType: 'operator',
-          actorId: session.membershipId,
-          action: 'tag.create',
-          objectType: 'tag',
-          objectId: id,
-          result: 'success',
-          detail: { scope: input.scope, colour: input.colour },
-        });
         const dto = await loadTag(tx, id);
         if (dto === null) throw new Error('created tag is not visible');
-        return dto;
+        return {
+          value: dto,
+          audit: {
+            actorType: 'operator',
+            actorId: session.membershipId,
+            action: 'tag.create',
+            objectType: 'tag',
+            objectId: id,
+            result: 'success',
+            detail: { scope: input.scope, colour: input.colour },
+          },
+        };
       });
     } catch (error) {
       if (isNameTaken(error)) throw nameTaken();
@@ -146,7 +148,7 @@ export function registerTagRoutes(app: FastifyInstance, ctx: AppContext): void {
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     const patch = parseInput(TagPatchSchema, request.body, 'tag');
     try {
-      return await withOrgAllowed(ctx, request, async (tx, role) => {
+      return await changeAsOperator(ctx, request, async (tx, role) => {
         // The scope decides the key; the row stays locked until the change commits.
         const stored = await tx.query<{ scope: string }>(
           'SELECT scope FROM tag WHERE id = $1 AND org_id = app_org_id() FOR UPDATE',
@@ -161,18 +163,20 @@ export function registerTagRoutes(app: FastifyInstance, ctx: AppContext): void {
           [id, patch.name ?? null, patch.colour ?? null],
         );
         if (updated.rowCount !== 1) throw notFound('The tag');
-        await auditScoped(tx, {
-          actorType: 'operator',
-          actorId: session.membershipId,
-          action: 'tag.update',
-          objectType: 'tag',
-          objectId: id,
-          result: 'success',
-          detail: { fields: Object.keys(patch).sort() },
-        });
         const dto = await loadTag(tx, id);
         if (dto === null) throw new Error('updated tag is not visible');
-        return dto;
+        return {
+          value: dto,
+          audit: {
+            actorType: 'operator',
+            actorId: session.membershipId,
+            action: 'tag.update',
+            objectType: 'tag',
+            objectId: id,
+            result: 'success',
+            detail: { fields: Object.keys(patch).sort() },
+          },
+        };
       });
     } catch (error) {
       if (isNameTaken(error)) throw nameTaken();
@@ -184,7 +188,7 @@ export function registerTagRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.delete(ROUTES.tagPattern, async (request, reply) => {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
-    await withOrgAllowed(ctx, request, async (tx, role) => {
+    await changeAsOperator(ctx, request, async (tx, role) => {
       const current = await tx.query<TagRow>(
         `SELECT ${TAG_COLUMNS} FROM tag t
          WHERE t.id = $1 AND t.org_id = app_org_id() FOR UPDATE OF t`,
@@ -194,15 +198,18 @@ export function registerTagRoutes(app: FastifyInstance, ctx: AppContext): void {
       if (row === undefined) throw notFound('The tag');
       requirePermission(role, { all: [tagScopeKey(TagScopeSchema.parse(row.scope), 'delete')] });
       await tx.query('DELETE FROM tag WHERE id = $1 AND org_id = app_org_id()', [id]);
-      await auditScoped(tx, {
-        actorType: 'operator',
-        actorId: session.membershipId,
-        action: 'tag.delete',
-        objectType: 'tag',
-        objectId: id,
-        result: 'success',
-        detail: { scope: row.scope, removedFrom: bigintToNumber(row.usage_count) },
-      });
+      return {
+        value: undefined,
+        audit: {
+          actorType: 'operator',
+          actorId: session.membershipId,
+          action: 'tag.delete',
+          objectType: 'tag',
+          objectId: id,
+          result: 'success',
+          detail: { scope: row.scope, removedFrom: bigintToNumber(row.usage_count) },
+        },
+      };
     });
     return reply.code(204).send();
   });

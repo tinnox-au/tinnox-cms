@@ -2,10 +2,12 @@
  * People routes (CMS-13, docs/portal-v2/stage-c.md section 6.7): the members of the caller's
  * organisation, their roles and names, and the invite requests TINNOX completes.
  *
- * Every write runs in withOrgAllowed with the membership lock, so the order is always
+ * Every write runs in changeAsOperator with the membership lock, so the order is always
  * membership lock → actor row FOR SHARE (role re-read) → target row → change → audit, all on
- * one transaction (6.8). The route guard has already required `member.manage`; the rank rule,
- * self-actions and the roles an actor may grant are decided here, after the target is read.
+ * one transaction (6.8). A change returns its audit events and the wrapper writes them, in the
+ * order returned, as the last statements before COMMIT; the lists run in readOrg. The route
+ * guard has already required `member.manage`; the rank rule, self-actions and the roles an
+ * actor may grant are decided here, after the target is read.
  * Members never carry an e-mail address (D3 a): only a pending invite holds one.
  */
 import {
@@ -28,16 +30,21 @@ import {
 } from '@tinnox/contracts';
 import { canManage, grantableRoles, isDemotion } from '@tinnox/domain';
 import {
-  auditScoped,
+  joinSql,
+  readOrg,
   sessionRevokeMembership,
+  sql,
+  sqlParameter,
   STAGE_C_CONSTRAINTS,
+  unaudited,
   violatedConstraint,
-  withOrg,
-  type Tx,
+  type AuditInput,
+  type SqlFragment,
+  type OrgTx,
 } from '@tinnox/db';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { recordPermissionDenied, type DenialReason } from '../auth/permission-audit.ts';
-import { parseRole, PermissionDeniedError, withOrgAllowed } from '../auth/permissions.ts';
+import { changeAsOperator, parseRole, PermissionDeniedError } from '../auth/permissions.ts';
 import { operatorOf, type OperatorSession } from '../auth/session.ts';
 import { perMinute, type AppContext } from '../context.ts';
 import { bigintToNumber, iso, isoOrNull } from '../db-helpers.ts';
@@ -111,7 +118,7 @@ function refused(
 
 /**
  * A 409 that is also a refusal by rule (last Owner, Owner before a first sign-in). The change
- * rolled back, so it is recorded after the transaction, as withOrgAllowed records a 403.
+ * rolled back, so it is recorded after the transaction, as changeAsOperator records a 403.
  */
 class RefusedConflict extends HttpError {
   readonly reason: DenialReason;
@@ -181,7 +188,7 @@ async function answerRefusal(
  * agrees: membership_removed_final).
  */
 async function lockTarget(
-  tx: Tx,
+  tx: OrgTx,
   session: OperatorSession,
   role: Role,
   id: string,
@@ -211,15 +218,16 @@ async function lockTarget(
 /**
  * Cancels the pending invites the member sent whose role is not in `keep` (all of them for a
  * removal). The actor is the person whose change caused it; closed_by stays NULL because
- * nobody chose to cancel these invites. One invite.cancel row per invite.
+ * nobody chose to cancel these invites. Returns one invite.cancel event per invite, for the
+ * change to return with its own.
  */
 async function cancelInvitesOf(
-  tx: Tx,
+  tx: OrgTx,
   session: OperatorSession,
   inviterId: string,
   keep: readonly Role[],
   reason: 'inviter_demoted' | 'inviter_removed',
-): Promise<number> {
+): Promise<AuditInput[]> {
   const { rows } = await tx.query<{ id: string; role: string }>(
     `UPDATE member_invite SET status = 'cancelled'
      WHERE org_id = app_org_id() AND invited_by = $1 AND status = 'pending'
@@ -227,18 +235,15 @@ async function cancelInvitesOf(
      RETURNING id, role`,
     [inviterId, [...keep]],
   );
-  for (const invite of rows) {
-    await auditScoped(tx, {
-      actorType: 'operator',
-      actorId: session.membershipId,
-      action: 'invite.cancel',
-      objectType: 'invite',
-      objectId: invite.id,
-      result: 'success',
-      detail: { role: invite.role, reason },
-    });
-  }
-  return rows.length;
+  return rows.map((invite) => ({
+    actorType: 'operator',
+    actorId: session.membershipId,
+    action: 'invite.cancel',
+    objectType: 'invite',
+    objectId: invite.id,
+    result: 'success',
+    detail: { role: invite.role, reason },
+  }));
 }
 
 export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): void {
@@ -247,7 +252,7 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): voi
 
   app.get(ROUTES.members, async (request): Promise<MemberListResponse> => {
     const session = operatorOf(request);
-    return withOrg(pool, session.orgId, async (tx) => {
+    return readOrg(pool, session.orgId, async (tx) => {
       // shortcut: at most ABSOLUTE.maxListItems members are listed; page the list if an organisation gets near it.
       const { rows } = await tx.query<MemberRow>(
         `SELECT ${MEMBER_COLUMNS} FROM membership
@@ -262,7 +267,7 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): voi
 
   app.get(ROUTES.memberNames, async (request): Promise<MemberNameListResponse> => {
     const session = operatorOf(request);
-    return withOrg(pool, session.orgId, async (tx) => {
+    return readOrg(pool, session.orgId, async (tx) => {
       // shortcut: at most ABSOLUTE.maxListItems names are returned (a later one shows as "Person");
       // page the list if an organisation gets near it.
       const { rows } = await tx.query<{
@@ -293,7 +298,7 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): voi
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     const patch = parseInput(MemberPatchSchema, request.body, 'change');
     try {
-      return await withOrgAllowed(
+      return await changeAsOperator(
         ctx,
         request,
         async (tx, role) => {
@@ -313,7 +318,10 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): voi
             }
           }
           if (to === null && name === null) {
-            return { member: toMemberDto(target.row), sessionsEnded: 0, invitesCancelled: 0 };
+            return {
+              value: { member: toMemberDto(target.row), sessionsEnded: 0, invitesCancelled: 0 },
+              audit: unaudited('nothing_changed'),
+            };
           }
           if (name !== null) {
             // A pending invite keeps its name until TINNOX fulfils it with that name, and the
@@ -330,11 +338,11 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): voi
 
           // Only the named, changed columns; fixed text, every value a parameter.
           const values: unknown[] = [target.row.id];
-          const sets: string[] = [];
-          if (to !== null) sets.push(`role = $${values.push(to)}`);
-          if (name !== null) sets.push(`display_name = $${values.push(name)}`);
+          const sets: SqlFragment[] = [];
+          if (to !== null) sets.push(sql`role = ${sqlParameter(values.push(to))}`);
+          if (name !== null) sets.push(sql`display_name = ${sqlParameter(values.push(name))}`);
           const updated = await tx.query<MemberRow>(
-            `UPDATE membership SET ${sets.join(', ')}
+            `UPDATE membership SET ${joinSql(sets, sql`, `)}
              WHERE id = $1 AND org_id = app_org_id()
              RETURNING ${MEMBER_COLUMNS}`,
             values,
@@ -342,21 +350,26 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): voi
           const row = updated.rows[0];
           if (row === undefined) throw new Error('locked member was not updated');
 
+          // In the order the rows are written: the invites a demotion cancelled, the role
+          // change, the rename. Never empty: a role or a name changed.
+          const audit: AuditInput[] = [];
           let sessionsEnded = 0;
           let invitesCancelled = 0;
           if (to !== null && isDemotion(target.role, to)) {
             // Its own statement, after the target row is locked: the cut-off is its start.
             sessionsEnded = await sessionRevokeMembership(tx, target.row.id);
-            invitesCancelled = await cancelInvitesOf(
+            const cancelled = await cancelInvitesOf(
               tx,
               session,
               target.row.id,
               grantableRoles(to, 'invite'),
               'inviter_demoted',
             );
+            invitesCancelled = cancelled.length;
+            audit.push(...cancelled);
           }
           if (to !== null) {
-            await auditScoped(tx, {
+            audit.push({
               actorType: 'operator',
               actorId: session.membershipId,
               action: 'membership.role_change',
@@ -367,7 +380,7 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): voi
             });
           }
           if (name !== null) {
-            await auditScoped(tx, {
+            audit.push({
               actorType: 'operator',
               actorId: session.membershipId,
               action: 'membership.update',
@@ -377,7 +390,7 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): voi
               detail: { fields: ['displayName'] },
             });
           }
-          return { member: toMemberDto(row), sessionsEnded, invitesCancelled };
+          return { value: { member: toMemberDto(row), sessionsEnded, invitesCancelled }, audit };
         },
         { lockMembership: true },
       );
@@ -394,7 +407,7 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): voi
       const session = operatorOf(request);
       const { id } = parseInput(IdParamSchema, request.params, 'address');
       try {
-        return await withOrgAllowed(
+        return await changeAsOperator(
           ctx,
           request,
           async (tx, role) => {
@@ -408,23 +421,30 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): voi
             const row = updated.rows[0];
             if (row === undefined) throw new Error('locked member was not removed');
             const sessionsEnded = await sessionRevokeMembership(tx, target.row.id);
-            const invitesCancelled = await cancelInvitesOf(
+            const cancelled = await cancelInvitesOf(
               tx,
               session,
               target.row.id,
               [],
               'inviter_removed',
             );
-            await auditScoped(tx, {
-              actorType: 'operator',
-              actorId: session.membershipId,
-              action: 'membership.remove',
-              objectType: 'membership',
-              objectId: target.row.id,
-              result: 'success',
-              detail: { previousRole: target.role, sessionsEnded, invitesCancelled },
-            });
-            return { member: toMemberDto(row), sessionsEnded, invitesCancelled };
+            const invitesCancelled = cancelled.length;
+            return {
+              value: { member: toMemberDto(row), sessionsEnded, invitesCancelled },
+              // In the order the rows are written: the cancelled invites, then the removal.
+              audit: [
+                ...cancelled,
+                {
+                  actorType: 'operator',
+                  actorId: session.membershipId,
+                  action: 'membership.remove',
+                  objectType: 'membership',
+                  objectId: target.row.id,
+                  result: 'success',
+                  detail: { previousRole: target.role, sessionsEnded, invitesCancelled },
+                },
+              ],
+            };
           },
           { lockMembership: true },
         );
@@ -441,22 +461,24 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): voi
     async (request): Promise<MemberSignOutResponse> => {
       const session = operatorOf(request);
       const { id } = parseInput(IdParamSchema, request.params, 'address');
-      return withOrgAllowed(
+      return changeAsOperator(
         ctx,
         request,
         async (tx, role) => {
           const target = await lockTarget(tx, session, role, id);
           const sessionsEnded = await sessionRevokeMembership(tx, target.row.id);
-          await auditScoped(tx, {
-            actorType: 'operator',
-            actorId: session.membershipId,
-            action: 'membership.sessions_end',
-            objectType: 'membership',
-            objectId: target.row.id,
-            result: 'success',
-            detail: { sessions: sessionsEnded },
-          });
-          return { sessionsEnded };
+          return {
+            value: { sessionsEnded },
+            audit: {
+              actorType: 'operator',
+              actorId: session.membershipId,
+              action: 'membership.sessions_end',
+              objectType: 'membership',
+              objectId: target.row.id,
+              result: 'success',
+              detail: { sessions: sessionsEnded },
+            },
+          };
         },
         { lockMembership: true },
       );
@@ -466,7 +488,7 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): voi
   // Pending invites, expired ones included until TINNOX's daily run closes them.
   app.get(ROUTES.invites, async (request): Promise<InviteListResponse> => {
     const session = operatorOf(request);
-    return withOrg(pool, session.orgId, async (tx) => {
+    return readOrg(pool, session.orgId, async (tx) => {
       const { rows } = await tx.query<InviteRow>(
         `SELECT ${INVITE_COLUMNS} FROM member_invite
          WHERE org_id = app_org_id() AND status = 'pending'
@@ -483,7 +505,7 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): voi
     const input = parseInput(InviteCreateSchema, request.body, 'invite');
     let created: InviteDto;
     try {
-      created = await withOrgAllowed(
+      created = await changeAsOperator(
         ctx,
         request,
         async (tx, role) => {
@@ -526,16 +548,18 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): voi
           );
           const row = inserted.rows[0];
           if (row === undefined) throw new Error('invite insert returned no row');
-          await auditScoped(tx, {
-            actorType: 'operator',
-            actorId: session.membershipId,
-            action: 'invite.create',
-            objectType: 'invite',
-            objectId: row.id,
-            result: 'success',
-            detail: { role: input.role },
-          });
-          return toInviteDto(row);
+          return {
+            value: toInviteDto(row),
+            audit: {
+              actorType: 'operator',
+              actorId: session.membershipId,
+              action: 'invite.create',
+              objectType: 'invite',
+              objectId: row.id,
+              result: 'success',
+              detail: { role: input.role },
+            },
+          };
         },
         { lockMembership: true },
       );
@@ -552,7 +576,7 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): voi
   app.post(ROUTES.inviteCancelPattern, writeLimit, async (request, reply) => {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
-    await withOrgAllowed(
+    await changeAsOperator(
       ctx,
       request,
       async (tx, role) => {
@@ -579,15 +603,18 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): voi
            WHERE id = $1 AND org_id = app_org_id()`,
           [invite.id, session.membershipId],
         );
-        await auditScoped(tx, {
-          actorType: 'operator',
-          actorId: session.membershipId,
-          action: 'invite.cancel',
-          objectType: 'invite',
-          objectId: invite.id,
-          result: 'success',
-          detail: { role: invite.role, reason: 'cancelled' },
-        });
+        return {
+          value: undefined,
+          audit: {
+            actorType: 'operator',
+            actorId: session.membershipId,
+            action: 'invite.cancel',
+            objectType: 'invite',
+            objectId: invite.id,
+            result: 'success',
+            detail: { role: invite.role, reason: 'cancelled' },
+          },
+        };
       },
       { lockMembership: true },
     );

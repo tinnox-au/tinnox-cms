@@ -10,6 +10,12 @@
  * provider authenticated before that is refused (sec.session_create answers `reauth`), and the
  * browser is sent back once with `prompt=login`. That forced sign-in is stored under its own
  * key, so a provider that does not re-authenticate ends at `reauth_failed` instead of a loop.
+ *
+ * The callback and the sign-out learn their organisation inside the transaction, so they run in
+ * changePreOrg, held to the route's entry in OTHER_ROUTE_AUDIT: each returns its audit event, and
+ * the wrapper writes it on that transaction. A sign-in refused before any member is known has no
+ * change to pair with and is recorded on its own (auditStandalone, D2). The session document is a
+ * read: readOrg.
  */
 import { createHmac } from 'node:crypto';
 import {
@@ -20,16 +26,18 @@ import {
   type SessionResponse,
 } from '@tinnox/contracts';
 import {
-  auditScoped,
-  auditUnscoped,
+  auditStandalone,
+  changePreOrg,
   loginStatePut,
   loginStateTake,
   poolAsTx,
+  readOrg,
   sessionCreate,
   sessionRevoke,
+  sessionRevokeUnaudited,
   sha256,
-  withOrg,
-  withResolvedOrg,
+  unaudited,
+  type Change,
   type SessionCreateResult,
 } from '@tinnox/db';
 import { permissionsOf } from '@tinnox/domain';
@@ -45,6 +53,7 @@ import {
 } from '../auth/session.ts';
 import { perMinute, type AppContext } from '../context.ts';
 import { HttpError, parseInput, pgErrorCode } from '../errors.ts';
+import { routeStatement } from '../route-audit.ts';
 import { randomToken } from '../security.ts';
 
 const LOGIN_STATE_TTL_SECONDS = 600;
@@ -145,7 +154,7 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
         (await loginStateTake(unscoped, loginStateKey(ctx, preAuth, state, 'normal')));
       const forced = reauthStored !== null;
       if (stored === null) {
-        await auditUnscoped(unscoped, {
+        await auditStandalone(ctx.pool, {
           actorType: 'anonymous',
           actorId: null,
           action: 'auth.login',
@@ -171,7 +180,7 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
           { reason: error instanceof Error ? error.message : 'unknown' },
           'sign-in was not completed',
         );
-        await auditUnscoped(unscoped, {
+        await auditStandalone(ctx.pool, {
           actorType: 'anonymous',
           actorId: null,
           action: 'auth.login',
@@ -188,7 +197,7 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
         amrValues: ctx.config.oidc.mfaAmrValues,
       });
       if (!mfa.ok) {
-        await auditUnscoped(unscoped, {
+        await auditStandalone(ctx.pool, {
           actorType: 'anonymous',
           actorId: null,
           action: 'auth.login',
@@ -202,75 +211,88 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
 
       // Session rotation: whatever session the browser had is ended; a new id is issued.
       // One transaction: the rotation, the new session and the audit event commit together.
+      // The event is written with no organisation when none was entered (no member), and for
+      // the member's organisation otherwise.
       const previous = request.cookies[ctx.config.sessionCookieName];
       const sessionId = randomToken();
       const csrfToken = randomToken();
       const idToken =
         identity.idToken !== null && identity.idToken.length <= 8192 ? identity.idToken : null;
+      const statement = routeStatement(request);
       let created: SessionCreateResult;
       try {
-        created = await withResolvedOrg(ctx.pool, async (tx, enterOrg) => {
-          // The member row is locked first (sec.session_create), the previous session row after
-          // it: the order a member change uses (stage-c.md 6.8). The other way round, a removal
-          // or sign-out of the member whose old cookie the browser still sends deadlocks.
-          const session = await sessionCreate(tx, {
-            idHash: sha256(sessionId),
-            oidcSub: identity.sub,
-            csrfToken,
-            ttlSeconds: ctx.config.sessionTtlSeconds,
-            idToken,
-            authTime: identity.authTime === null ? null : new Date(identity.authTime * 1000),
-          });
-          // The rotation commits whatever the outcome.
-          if (typeof previous === 'string' && previous.length <= 100) {
-            await sessionRevoke(tx, sha256(previous));
-          }
-          if (session.outcome === 'no_membership') {
-            await auditUnscoped(tx, {
-              actorType: 'anonymous',
-              actorId: null,
-              action: 'auth.login',
-              objectType: null,
-              objectId: null,
-              result: 'denied',
-              detail: { reason: 'no_membership' },
+        created = await changePreOrg(
+          ctx.pool,
+          statement,
+          async (pre, enterOrg): Promise<Change<SessionCreateResult>> => {
+            // The member row is locked first (sec.session_create), the previous session row after
+            // it: the order a member change uses (stage-c.md 6.8). The other way round, a removal
+            // or sign-out of the member whose old cookie the browser still sends deadlocks.
+            const session = await sessionCreate(pre, {
+              idHash: sha256(sessionId),
+              oidcSub: identity.sub,
+              csrfToken,
+              ttlSeconds: ctx.config.sessionTtlSeconds,
+              idToken,
+              authTime: identity.authTime === null ? null : new Date(identity.authTime * 1000),
             });
-            return session;
-          }
-          await enterOrg(session.orgId);
-          if (session.outcome === 'reauth') {
-            await auditScoped(tx, {
-              actorType: 'operator',
-              actorId: session.membershipId,
-              action: 'auth.login',
-              objectType: 'membership',
-              objectId: session.membershipId,
-              result: 'denied',
-              detail: { reason: forced ? 'reauth_failed' : 'reauth_required' },
-            });
-            return session;
-          }
-          await auditScoped(tx, {
-            actorType: 'operator',
-            actorId: session.membershipId,
-            action: 'auth.login',
-            objectType: 'membership',
-            objectId: session.membershipId,
-            result: 'success',
-            detail: {
-              acr: identity.acr,
-              amr: identity.amr,
-              mfaVerifiedFromClaims: mfa.checked,
-            },
-          });
-          return session;
-        });
+            // The rotation commits whatever the outcome.
+            if (typeof previous === 'string' && previous.length <= 100) {
+              await sessionRevoke(pre, sha256(previous));
+            }
+            if (session.outcome === 'no_membership') {
+              return {
+                value: session,
+                audit: {
+                  actorType: 'anonymous',
+                  actorId: null,
+                  action: 'auth.login',
+                  objectType: null,
+                  objectId: null,
+                  result: 'denied',
+                  detail: { reason: 'no_membership' },
+                },
+              };
+            }
+            await enterOrg(session.orgId);
+            if (session.outcome === 'reauth') {
+              return {
+                value: session,
+                audit: {
+                  actorType: 'operator',
+                  actorId: session.membershipId,
+                  action: 'auth.login',
+                  objectType: 'membership',
+                  objectId: session.membershipId,
+                  result: 'denied',
+                  detail: { reason: forced ? 'reauth_failed' : 'reauth_required' },
+                },
+              };
+            }
+            return {
+              value: session,
+              audit: {
+                actorType: 'operator',
+                actorId: session.membershipId,
+                action: 'auth.login',
+                objectType: 'membership',
+                objectId: session.membershipId,
+                result: 'success',
+                detail: {
+                  acr: identity.acr,
+                  amr: identity.amr,
+                  mfaVerifiedFromClaims: mfa.checked,
+                },
+              },
+            };
+          },
+        );
       } catch (error) {
         // A member change held the member row past lock_timeout: nothing was committed, the
         // transaction's audit row included, so the failed sign-in is recorded on its own.
         if (pgErrorCode(error) === '55P03') {
           request.log.warn({ pgCode: '55P03' }, 'sign-in waited too long for the member row');
-          await auditUnscoped(unscoped, {
+          await auditStandalone(ctx.pool, {
             actorType: 'anonymous',
             actorId: null,
             action: 'auth.login',
@@ -335,7 +357,7 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
       request.log.error('session with an unknown role');
       return { authenticated: false };
     }
-    const name = await withOrg(ctx.pool, session.orgId, (tx) =>
+    const name = await readOrg(ctx.pool, session.orgId, (tx) =>
       tx.query<{ display_name: string | null }>(
         'SELECT display_name FROM membership WHERE id = $1 AND org_id = app_org_id()',
         [session.membershipId],
@@ -366,27 +388,31 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
       // The browser forgets the session whatever happens next.
       clearSessionCookie(ctx, reply);
       // One transaction: the revocation and its audit event commit together.
+      const statement = routeStatement(request);
       let revoked;
       try {
-        revoked = await withResolvedOrg(ctx.pool, async (tx, enterOrg) => {
-          const ended = await sessionRevoke(tx, session.idHash);
-          if (ended === null) return null;
+        revoked = await changePreOrg(ctx.pool, statement, async (pre, enterOrg) => {
+          const ended = await sessionRevoke(pre, session.idHash);
+          // No live session left to end (another request ended it first): nothing changed.
+          if (ended === null) return { value: null, audit: unaudited('nothing_changed') };
           await enterOrg(ended.orgId);
-          await auditScoped(tx, {
-            actorType: 'operator',
-            actorId: ended.membershipId,
-            action: 'auth.logout',
-            objectType: 'membership',
-            objectId: ended.membershipId,
-            result: 'success',
-            detail: null,
-          });
-          return ended;
+          return {
+            value: ended,
+            audit: {
+              actorType: 'operator',
+              actorId: ended.membershipId,
+              action: 'auth.logout',
+              objectType: 'membership',
+              objectId: ended.membershipId,
+              result: 'success',
+              detail: null,
+            },
+          };
         });
       } catch (error) {
         // Ending a session is the safe direction, so a sign-out that cannot be audited still
         // ends it. Sign-in and pairing do the opposite: no audit event, no credential.
-        const ended = await sessionRevoke(unscoped, session.idHash).then(
+        const ended = await sessionRevokeUnaudited(ctx.pool, session.idHash).then(
           () => true,
           (revokeError: unknown) => {
             request.log.error({ err: revokeError }, 'sign-out could not end the session either');

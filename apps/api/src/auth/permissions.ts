@@ -3,12 +3,18 @@
  *
  * - Every operator route has an entry in ROUTE_PERMISSIONS (default deny). A start-up check
  *   compares the table with the registered routes and refuses to start on any difference.
+ *   The entry also says what the route audits (`audit`, D3; ../route-audit.ts).
  * - `permissionGuard` decides each request from the session's role before the handler runs:
  *   a refusal is the same 403 for every id (own, unknown, another organisation's), because it
  *   is decided before any lookup.
- * - Every write transaction re-reads the member row FOR SHARE as its first statement
- *   (`withOrgAllowed`), so no write commits under a role, or a session, that was taken away
- *   while the request was on its way.
+ * - Every write transaction re-reads the member row FOR SHARE as its first statement, so no
+ *   write commits under a role, or a session, that was taken away while the request was on its
+ *   way. `changeOrg` of @tinnox/db runs no change without a `WritePermit`, and this module is
+ *   the only one that issues an operator's (`changeAsOperator`): the permit's re-check is that
+ *   first statement (SCR-34, adoption plan step 19). A refusal recorded on its own has the
+ *   permit of ./refusal.ts, which changes nothing. `changePreOrg` enters an organisation with
+ *   no permit, so lint keeps it to the files of PRE_ORG_CHANGE_FILES (eslint.config.js), whose
+ *   transactions start before the organisation is known.
  *
  * Who holds which key: ROLE_PERMISSIONS in packages/domain/src/permissions.ts.
  */
@@ -16,17 +22,26 @@ import {
   PERMISSION_KEYS,
   RoleSchema,
   ROUTES,
+  type AuditAction,
   type DisplayPatch,
   type PermissionKey,
   type Role,
   type TagScope,
 } from '@tinnox/contracts';
-import { lockOrgMembership, membershipForCheck, withOrg, type Tx } from '@tinnox/db';
+import {
+  changeOrg,
+  issueWritePermit,
+  lockOrgMembership,
+  membershipForCheck,
+  type Change,
+  type OrgTx,
+  type WritePermit,
+} from '@tinnox/db';
 import { permissionsOf } from '@tinnox/domain';
 import type { FastifyReply, FastifyRequest, RouteOptions } from 'fastify';
 import type { AppContext } from '../context.ts';
-import type { Decision } from '../db-helpers.ts';
 import { HttpError, pgErrorCode } from '../errors.ts';
+import { audits, noAudit, type RouteAudit } from '../route-audit.ts';
 import {
   recordPermissionDenied,
   type DenialReason,
@@ -35,113 +50,157 @@ import {
 import { operatorOf, type OperatorSession } from './session.ts';
 
 export type RefineName = 'displayPatchFields' | 'tagScopeFromBody' | 'tagScopeFromRow';
-export type RouteRule =
+/** The keys a route needs. */
+export type KeyRule =
   | { readonly all: readonly PermissionKey[] }
   | { readonly any: readonly PermissionKey[]; readonly refine: RefineName };
+/** A row of the table: the keys, and what the route's own work audits (D3). */
+export type RouteRule = KeyRule & { readonly audit: RouteAudit };
 export type Requirement =
   { readonly all: readonly PermissionKey[] } | { readonly any: readonly PermissionKey[] };
 
 declare module 'fastify' {
   interface FastifyRequest {
-    /** Set by `permissionGuard`: what the route needs from this request's role. */
-    permission: { readonly required: Requirement } | null;
+    /**
+     * Set by `permissionGuard`: what the route needs from this request's role, and what the
+     * route's row says it audits (for a refused attempt recorded on its own, ./refusal.ts).
+     */
+    permission: { readonly required: Requirement; readonly audit: RouteAudit } | null;
   }
 }
 
 // ------------------------------------------------------------------ route-to-key table
 
-const all = (...keys: PermissionKey[]): RouteRule => Object.freeze({ all: Object.freeze(keys) });
-const any = (refine: RefineName, ...keys: PermissionKey[]): RouteRule =>
+const all = (...keys: PermissionKey[]): KeyRule => Object.freeze({ all: Object.freeze(keys) });
+const any = (refine: RefineName, ...keys: PermissionKey[]): KeyRule =>
   Object.freeze({ any: Object.freeze(keys), refine });
+/** A route that only reads: it writes no audit row. */
+const read = (keys: KeyRule): RouteRule => Object.freeze({ ...keys, audit: noAudit('read_only') });
+/**
+ * A route that changes state, and every audit action its handler writes for it, on the
+ * transaction of the change. A refusal by its guards is recorded on its own
+ * (OPERATOR_GUARD_AUDIT in ../route-audit.ts).
+ */
+const write = (keys: KeyRule, ...actions: [AuditAction, ...AuditAction[]]): RouteRule =>
+  Object.freeze({ ...keys, audit: audits(...actions) });
 
 /**
- * Every operator route and the keys it needs (section 6.1): 62 entries, 27 GET and 35 writes.
- * Keyed by `${METHOD} ${pattern}` with the contract constants, so a renamed path breaks the
- * build. HEAD is read as GET (`routeKey`).
+ * Every operator route, the keys it needs (section 6.1) and what it audits (D3): 62 entries, 27
+ * GET and 35 writes. Keyed by `${METHOD} ${pattern}` with the contract constants, so a renamed
+ * path breaks the build. HEAD is read as GET (`routeKey`). A row is made with read() or
+ * write(), so a route cannot be added without saying what it audits.
  */
 export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteRule>> = Object.freeze({
-  [`GET ${ROUTES.sites}`]: all('org.read'),
-  [`GET ${ROUTES.displays}`]: all('org.read'),
-  [`POST ${ROUTES.displays}`]: all('screen.setup'),
-  [`GET ${ROUTES.displaysStatus}`]: all('org.read'),
-  [`GET ${ROUTES.displayPattern}`]: all('org.read'),
-  [`PATCH ${ROUTES.displayPattern}`]: any(
-    'displayPatchFields',
-    'screen.alerts',
-    'screen.assign',
-    'screen.details',
-    'screen.hours',
-    'screen.setup',
+  [`GET ${ROUTES.sites}`]: read(all('org.read')),
+  [`GET ${ROUTES.displays}`]: read(all('org.read')),
+  [`POST ${ROUTES.displays}`]: write(all('screen.setup'), 'display.create'),
+  [`GET ${ROUTES.displaysStatus}`]: read(all('org.read')),
+  [`GET ${ROUTES.displayPattern}`]: read(all('org.read')),
+  [`PATCH ${ROUTES.displayPattern}`]: write(
+    any(
+      'displayPatchFields',
+      'screen.alerts',
+      'screen.assign',
+      'screen.details',
+      'screen.hours',
+      'screen.setup',
+    ),
+    'display.update',
   ),
-  [`POST ${ROUTES.displayClaimPattern}`]: all('screen.pair'),
-  [`POST ${ROUTES.displayRevokePlayerPattern}`]: all('screen.pair'),
-  [`GET ${ROUTES.displayStatusPattern}`]: all('org.read'),
+  [`POST ${ROUTES.displayClaimPattern}`]: write(
+    all('screen.pair'),
+    'pairing.claim',
+    'player.revoke',
+  ),
+  [`POST ${ROUTES.displayRevokePlayerPattern}`]: write(all('screen.pair'), 'player.revoke'),
+  [`GET ${ROUTES.displayStatusPattern}`]: read(all('org.read')),
 
-  [`GET ${ROUTES.media}`]: all('org.read'),
-  [`POST ${ROUTES.media}`]: all('content.write'),
-  [`GET ${ROUTES.mediaItemPattern}`]: all('org.read'),
-  [`PATCH ${ROUTES.mediaItemPattern}`]: all('content.write'),
-  [`DELETE ${ROUTES.mediaItemPattern}`]: all('media.delete'),
-  [`GET ${ROUTES.mediaPreviewPattern}`]: all('org.read'),
-  [`GET ${ROUTES.mediaThumbnailPattern}`]: all('org.read'),
-  [`GET ${ROUTES.mediaUsagePattern}`]: all('org.read'),
+  [`GET ${ROUTES.media}`]: read(all('org.read')),
+  [`POST ${ROUTES.media}`]: write(all('content.write'), 'media.upload'),
+  [`GET ${ROUTES.mediaItemPattern}`]: read(all('org.read')),
+  [`PATCH ${ROUTES.mediaItemPattern}`]: write(all('content.write'), 'media.update'),
+  [`DELETE ${ROUTES.mediaItemPattern}`]: write(all('media.delete'), 'media.delete'),
+  [`GET ${ROUTES.mediaPreviewPattern}`]: read(all('org.read')),
+  [`GET ${ROUTES.mediaThumbnailPattern}`]: read(all('org.read')),
+  [`GET ${ROUTES.mediaUsagePattern}`]: read(all('org.read')),
 
-  [`GET ${ROUTES.apps}`]: all('org.read'),
-  [`POST ${ROUTES.apps}`]: all('content.write'),
-  [`GET ${ROUTES.appPattern}`]: all('org.read'),
-  [`PATCH ${ROUTES.appPattern}`]: all('content.write'),
-  [`DELETE ${ROUTES.appPattern}`]: all('content.delete'),
+  [`GET ${ROUTES.apps}`]: read(all('org.read')),
+  [`POST ${ROUTES.apps}`]: write(all('content.write'), 'app.create'),
+  [`GET ${ROUTES.appPattern}`]: read(all('org.read')),
+  [`PATCH ${ROUTES.appPattern}`]: write(all('content.write'), 'app.update'),
+  [`DELETE ${ROUTES.appPattern}`]: write(all('content.delete'), 'app.delete'),
 
-  [`GET ${ROUTES.schedules}`]: all('org.read'),
-  [`POST ${ROUTES.schedules}`]: all('content.write'),
-  [`GET ${ROUTES.schedulePattern}`]: all('org.read'),
-  [`PUT ${ROUTES.schedulePattern}`]: all('content.write'),
-  [`DELETE ${ROUTES.schedulePattern}`]: all('content.delete'),
+  [`GET ${ROUTES.schedules}`]: read(all('org.read')),
+  [`POST ${ROUTES.schedules}`]: write(all('content.write'), 'schedule.create'),
+  [`GET ${ROUTES.schedulePattern}`]: read(all('org.read')),
+  [`PUT ${ROUTES.schedulePattern}`]: write(all('content.write'), 'schedule.update'),
+  [`DELETE ${ROUTES.schedulePattern}`]: write(all('content.delete'), 'schedule.delete'),
 
-  [`GET ${ROUTES.layouts}`]: all('org.read'),
-  [`POST ${ROUTES.layouts}`]: all('content.write'),
-  [`GET ${ROUTES.layoutPattern}`]: all('org.read'),
-  [`PUT ${ROUTES.layoutPattern}`]: all('content.write'),
-  [`DELETE ${ROUTES.layoutPattern}`]: all('content.delete'),
+  [`GET ${ROUTES.layouts}`]: read(all('org.read')),
+  [`POST ${ROUTES.layouts}`]: write(all('content.write'), 'layout.create'),
+  [`GET ${ROUTES.layoutPattern}`]: read(all('org.read')),
+  [`PUT ${ROUTES.layoutPattern}`]: write(all('content.write'), 'layout.update'),
+  [`DELETE ${ROUTES.layoutPattern}`]: write(all('content.delete'), 'layout.delete'),
 
-  [`GET ${ROUTES.tags}`]: all('org.read'),
-  [`POST ${ROUTES.tags}`]: any('tagScopeFromBody', 'content.write', 'screen.setup'),
-  [`PATCH ${ROUTES.tagPattern}`]: any('tagScopeFromRow', 'content.write', 'screen.setup'),
-  [`DELETE ${ROUTES.tagPattern}`]: any('tagScopeFromRow', 'content.delete', 'screen.setup'),
+  [`GET ${ROUTES.tags}`]: read(all('org.read')),
+  [`POST ${ROUTES.tags}`]: write(
+    any('tagScopeFromBody', 'content.write', 'screen.setup'),
+    'tag.create',
+  ),
+  [`PATCH ${ROUTES.tagPattern}`]: write(
+    any('tagScopeFromRow', 'content.write', 'screen.setup'),
+    'tag.update',
+  ),
+  [`DELETE ${ROUTES.tagPattern}`]: write(
+    any('tagScopeFromRow', 'content.delete', 'screen.setup'),
+    'tag.delete',
+  ),
 
-  [`GET ${ROUTES.folders}`]: all('org.read'),
-  [`POST ${ROUTES.folders}`]: all('content.write'),
-  [`PATCH ${ROUTES.folderPattern}`]: all('content.write'),
-  [`DELETE ${ROUTES.folderPattern}`]: all('content.delete'),
+  [`GET ${ROUTES.folders}`]: read(all('org.read')),
+  [`POST ${ROUTES.folders}`]: write(all('content.write'), 'folder.create'),
+  [`PATCH ${ROUTES.folderPattern}`]: write(all('content.write'), 'folder.update'),
+  [`DELETE ${ROUTES.folderPattern}`]: write(all('content.delete'), 'folder.delete'),
 
-  [`GET ${ROUTES.playlists}`]: all('org.read'),
-  [`POST ${ROUTES.playlists}`]: all('content.write'),
-  [`GET ${ROUTES.playlistPattern}`]: all('org.read'),
-  [`PUT ${ROUTES.playlistPattern}`]: all('content.write'),
-  [`DELETE ${ROUTES.playlistPattern}`]: all('content.delete'),
-  [`POST ${ROUTES.playlistDuplicatePattern}`]: all('content.write'),
+  [`GET ${ROUTES.playlists}`]: read(all('org.read')),
+  [`POST ${ROUTES.playlists}`]: write(all('content.write'), 'playlist.create'),
+  [`GET ${ROUTES.playlistPattern}`]: read(all('org.read')),
+  [`PUT ${ROUTES.playlistPattern}`]: write(all('content.write'), 'playlist.update'),
+  [`DELETE ${ROUTES.playlistPattern}`]: write(all('content.delete'), 'playlist.delete'),
+  [`POST ${ROUTES.playlistDuplicatePattern}`]: write(all('content.write'), 'playlist.create'),
   // Kept for scripts and tests; no portal caller. A cleanup card retires it.
-  [`POST ${ROUTES.playlistPublishPattern}`]: all('push.publish', 'screen.assign'),
+  [`POST ${ROUTES.playlistPublishPattern}`]: write(
+    all('push.publish', 'screen.assign'),
+    'publication.create',
+  ),
 
-  [`GET ${ROUTES.push}`]: all('org.read'),
-  [`POST ${ROUTES.push}`]: all('push.publish'),
-  [`GET ${ROUTES.overview}`]: all('org.read'),
+  [`GET ${ROUTES.push}`]: read(all('org.read')),
+  [`POST ${ROUTES.push}`]: write(all('push.publish'), 'publication.create'),
+  [`GET ${ROUTES.overview}`]: read(all('org.read')),
   // The handler narrows the log to the activity categories without audit.read; it never refuses.
-  [`GET ${ROUTES.audit}`]: all('activity.read'),
+  [`GET ${ROUTES.audit}`]: read(all('activity.read')),
 
-  [`GET ${ROUTES.members}`]: all('member.read'),
-  [`GET ${ROUTES.memberNames}`]: all('activity.read'),
+  [`GET ${ROUTES.members}`]: read(all('member.read')),
+  [`GET ${ROUTES.memberNames}`]: read(all('activity.read')),
   // The people routes then apply the rank rule (routes/members.ts).
-  [`PATCH ${ROUTES.memberPattern}`]: all('member.manage'),
-  [`POST ${ROUTES.memberRemovePattern}`]: all('member.manage'),
-  [`POST ${ROUTES.memberSignOutPattern}`]: all('member.manage'),
-  [`GET ${ROUTES.invites}`]: all('member.read'),
-  [`POST ${ROUTES.invites}`]: all('member.manage'),
-  [`POST ${ROUTES.inviteCancelPattern}`]: all('member.manage'),
+  [`PATCH ${ROUTES.memberPattern}`]: write(
+    all('member.manage'),
+    'membership.role_change',
+    'membership.update',
+    'invite.cancel',
+  ),
+  [`POST ${ROUTES.memberRemovePattern}`]: write(
+    all('member.manage'),
+    'membership.remove',
+    'invite.cancel',
+  ),
+  [`POST ${ROUTES.memberSignOutPattern}`]: write(all('member.manage'), 'membership.sessions_end'),
+  [`GET ${ROUTES.invites}`]: read(all('member.read')),
+  [`POST ${ROUTES.invites}`]: write(all('member.manage'), 'invite.create'),
+  [`POST ${ROUTES.inviteCancelPattern}`]: write(all('member.manage'), 'invite.cancel'),
 
-  [`GET ${ROUTES.alertRecipients}`]: all('alerts.manage'),
-  [`POST ${ROUTES.alertRecipients}`]: all('alerts.manage'),
-  [`DELETE ${ROUTES.alertRecipientPattern}`]: all('alerts.manage'),
+  [`GET ${ROUTES.alertRecipients}`]: read(all('alerts.manage')),
+  [`POST ${ROUTES.alertRecipients}`]: write(all('alerts.manage'), 'alert_recipient.add'),
+  [`DELETE ${ROUTES.alertRecipientPattern}`]: write(all('alerts.manage'), 'alert_recipient.remove'),
 } satisfies Record<string, RouteRule>);
 
 /** `${METHOD} ${pattern}`, with HEAD read as GET (Fastify registers a HEAD twin of every GET). */
@@ -362,8 +421,9 @@ export function permissionGuard(
       else failed = keysOf(candidate);
     }
 
-    if (required !== null) {
-      request.permission = { required };
+    // A requirement was resolved only from a row, so the row is there.
+    if (required !== null && rule !== undefined) {
+      request.permission = { required, audit: rule.audit };
       return;
     }
     if (!SAFE_METHODS.has(request.method)) {
@@ -388,7 +448,7 @@ export function permissionGuard(
  * ended): 401. Role lacks the keys: 403 (reason `role_changed`).
  */
 export async function assertStillAllowed(
-  tx: Tx,
+  tx: OrgTx,
   session: OperatorSession,
   required: Requirement,
 ): Promise<Role> {
@@ -423,7 +483,7 @@ function requirementOf(
 
 /**
  * A lock timeout (55P03) as 503 service_unavailable with retry-after 2; anything else unchanged.
- * For a write outside withOrgAllowed that waits for a row lock, such as the public alert
+ * For a write outside changeAsOperator that waits for a row lock, such as the public alert
  * confirmation (review findings SEC-3, BEH-3), so it answers as every other write does.
  */
 export function lockTimeoutAsUnavailable(request: FastifyRequest, error: unknown): unknown {
@@ -451,40 +511,63 @@ async function settle(
   return lockTimeoutAsUnavailable(request, error);
 }
 
+/** What a write may ask of the role guard beyond the route's own row. */
+export interface WriteOptions {
+  /** The requirement a handler narrowed from a stored row; the guard's otherwise. */
+  readonly required?: Requirement;
+  /** Take the organisation's membership lock before the role is read again. */
+  readonly lockMembership?: boolean;
+}
+
 /**
- * withOrg for writes: [lockOrgMembership when lockMembership] → assertStillAllowed → fn(tx, role).
+ * The permit of this request's write, from what `permissionGuard` resolved for it: the one place
+ * a `WritePermit` is issued (SCR-34). Its re-check is [lockOrgMembership when lockMembership] →
+ * assertStillAllowed, and hands the change the role it read. It also carries what the route's
+ * row says it audits, which `changeOrg` holds the change to.
+ */
+function writePermit(
+  request: FastifyRequest,
+  session: OperatorSession,
+  options: WriteOptions | undefined,
+): WritePermit<Role> {
+  const required = requirementOf(request, options);
+  const key = routeKey(request.method, request.routeOptions.url ?? '');
+  const rule = ruleOf(key, ROUTE_PERMISSIONS);
+  // The guard marks every request it lets through, and lets none through without a row. A
+  // requirement the handler brought itself does not stand in for that.
+  if (request.permission === null || rule === undefined) {
+    throw new Error('a write ran outside the permission guard');
+  }
+  return issueWritePermit({
+    recheck: async (tx) => {
+      if (options?.lockMembership === true) await lockOrgMembership(tx);
+      return assertStillAllowed(tx, session, required);
+    },
+    stated: rule.audit,
+    statedIn: `the row of ${key} in ROUTE_PERMISSIONS (apps/api/src/auth/permissions.ts)`,
+  });
+}
+
+/**
+ * A change by the signed-in operator, on `changeOrg`: [lockOrgMembership when lockMembership] →
+ * assertStillAllowed → fn(tx, role) → the audit rows `fn` returned → COMMIT. `fn` returns
+ * `{ value, audit }` and writes no audit row itself.
  * A PermissionDeniedError thrown anywhere inside rolls back, is recorded with
  * recordPermissionDenied in its own transaction, and is rethrown. A lock timeout (55P03)
  * raised anywhere inside (membership lock, actor row, target row, any other lock) becomes
  * 503 service_unavailable with retry-after 2.
  */
-export async function withOrgAllowed<T>(
+export async function changeAsOperator<T>(
   ctx: AppContext,
   request: FastifyRequest,
-  fn: (tx: Tx, role: Role) => Promise<T>,
-  options?: { readonly required?: Requirement; readonly lockMembership?: boolean },
+  fn: (tx: OrgTx, role: Role) => Promise<Change<T>>,
+  options?: WriteOptions,
 ): Promise<T> {
   const session = operatorOf(request);
-  const required = requirementOf(request, options);
+  const permit = writePermit(request, session, options);
   try {
-    return await withOrg(ctx.pool, session.orgId, async (tx) => {
-      if (options?.lockMembership === true) await lockOrgMembership(tx);
-      const role = await assertStillAllowed(tx, session, required);
-      return fn(tx, role);
-    });
+    return await changeOrg(ctx.pool, session.orgId, permit, fn);
   } catch (error) {
     throw await settle(ctx, request, session, error);
   }
-}
-
-/** The same around withOrgDecision: commits a refusal's trace, then throws the refusal. */
-export async function withOrgDecisionAllowed<T>(
-  ctx: AppContext,
-  request: FastifyRequest,
-  fn: (tx: Tx, role: Role) => Promise<Decision<T>>,
-  options?: { readonly required?: Requirement; readonly lockMembership?: boolean },
-): Promise<T> {
-  const decision = await withOrgAllowed(ctx, request, fn, options);
-  if (!decision.ok) throw decision.error;
-  return decision.value;
 }
