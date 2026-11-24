@@ -51,12 +51,13 @@ None.
 
 | Id | Card | Agreed | PR | Since |
 |---|---|---|---|---|
-| CMS-30 | Poteto pyramid refactor, group B: the database API (steps 13 to 22 of the adoption plan), built locally first | Michael 23 Nov | - | 23 Nov |
 | CMS-4 | Real-hardware check on Raspberry Pi 5 (8GB) under Linux: the browser player in Chromium kiosk mode on a monitor | Michael 23 Nov | - | 23 Nov |
 
 ## In review
 
-None.
+| Id | Card | Agreed | PR | Since |
+|---|---|---|---|---|
+| CMS-30 | Poteto pyramid refactor, group B: the database API (steps 13 to 22 of the adoption plan), built locally first | Michael 23 Nov | #38 | 24 Nov |
 
 ## Done, last 14 days
 
