@@ -93,7 +93,7 @@ function clearLoginCookie(ctx: AppContext, reply: FastifyReply): void {
 
 export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void {
   const authRateLimit = { rateLimit: perMinute(ctx, 30) };
-  const unscoped = poolAsTx(ctx.pool);
+  const unscoped = poolAsTx(ctx.db);
 
   app.get(
     ROUTES.authLogin,
@@ -154,7 +154,7 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
         (await loginStateTake(unscoped, loginStateKey(ctx, preAuth, state, 'normal')));
       const forced = reauthStored !== null;
       if (stored === null) {
-        await auditStandalone(ctx.pool, {
+        await auditStandalone(ctx.db, {
           actorType: 'anonymous',
           actorId: null,
           action: 'auth.login',
@@ -180,7 +180,7 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
           { reason: error instanceof Error ? error.message : 'unknown' },
           'sign-in was not completed',
         );
-        await auditStandalone(ctx.pool, {
+        await auditStandalone(ctx.db, {
           actorType: 'anonymous',
           actorId: null,
           action: 'auth.login',
@@ -197,7 +197,7 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
         amrValues: ctx.config.oidc.mfaAmrValues,
       });
       if (!mfa.ok) {
-        await auditStandalone(ctx.pool, {
+        await auditStandalone(ctx.db, {
           actorType: 'anonymous',
           actorId: null,
           action: 'auth.login',
@@ -222,7 +222,7 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
       let created: SessionCreateResult;
       try {
         created = await changePreOrg(
-          ctx.pool,
+          ctx.db,
           statement,
           async (pre, enterOrg): Promise<Change<SessionCreateResult>> => {
             // The member row is locked first (sec.session_create), the previous session row after
@@ -292,7 +292,7 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
         // transaction's audit row included, so the failed sign-in is recorded on its own.
         if (pgErrorCode(error) === '55P03') {
           request.log.warn({ pgCode: '55P03' }, 'sign-in waited too long for the member row');
-          await auditStandalone(ctx.pool, {
+          await auditStandalone(ctx.db, {
             actorType: 'anonymous',
             actorId: null,
             action: 'auth.login',
@@ -357,7 +357,7 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
       request.log.error('session with an unknown role');
       return { authenticated: false };
     }
-    const name = await readOrg(ctx.pool, session.orgId, (tx) =>
+    const name = await readOrg(ctx.db, session.orgId, (tx) =>
       tx.query<{ display_name: string | null }>(
         'SELECT display_name FROM membership WHERE id = $1 AND org_id = app_org_id()',
         [session.membershipId],
@@ -391,7 +391,7 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
       const statement = routeStatement(request);
       let revoked;
       try {
-        revoked = await changePreOrg(ctx.pool, statement, async (pre, enterOrg) => {
+        revoked = await changePreOrg(ctx.db, statement, async (pre, enterOrg) => {
           const ended = await sessionRevoke(pre, session.idHash);
           // No live session left to end (another request ended it first): nothing changed.
           if (ended === null) return { value: null, audit: unaudited('nothing_changed') };
@@ -412,7 +412,7 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
       } catch (error) {
         // Ending a session is the safe direction, so a sign-out that cannot be audited still
         // ends it. Sign-in and pairing do the opposite: no audit event, no credential.
-        const ended = await sessionRevokeUnaudited(ctx.pool, session.idHash).then(
+        const ended = await sessionRevokeUnaudited(ctx.db, session.idHash).then(
           () => true,
           (revokeError: unknown) => {
             request.log.error({ err: revokeError }, 'sign-out could not end the session either');

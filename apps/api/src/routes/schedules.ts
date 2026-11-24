@@ -230,12 +230,12 @@ const scheduleInUse = (message: string, details?: { path: string; message: strin
   new HttpError(409, 'schedule_in_use', message, details === undefined ? {} : { details });
 
 export function registerScheduleRoutes(app: FastifyInstance, ctx: AppContext): void {
-  const { pool } = ctx;
+  const { db } = ctx;
 
   // shortcut: no pagination, the list is capped at ABSOLUTE.maxListItems; page it when an organisation has more schedules than that.
   app.get(ROUTES.schedules, async (request): Promise<ScheduleListResponse> => {
     const session = operatorOf(request);
-    return readOrg(pool, session.orgId, async (tx) => {
+    return readOrg(db, session.orgId, async (tx) => {
       const { rows } = await tx.query<ScheduleRow>(
         `SELECT ${SCHEDULE_COLUMNS} FROM ${SCHEDULE_FROM}
          WHERE s.org_id = app_org_id()
@@ -271,7 +271,7 @@ export function registerScheduleRoutes(app: FastifyInstance, ctx: AppContext): v
   app.get(ROUTES.schedulePattern, async (request): Promise<ScheduleDto> => {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
-    return readOrg(pool, session.orgId, async (tx) => {
+    return readOrg(db, session.orgId, async (tx) => {
       const dto = await loadScheduleDto(tx, id);
       if (dto === null) throw notFound('The schedule');
       return dto;

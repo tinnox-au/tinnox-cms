@@ -15,6 +15,7 @@ import type { IdentityProvider } from '@tinnox/api/test-support';
 import type { AuditAction } from '@tinnox/contracts';
 import {
   removeAuditFault,
+  waitForLockWaiters,
   whileAuditFails as whileAuditRowsFail,
   whileUnauditedAllowed,
 } from '@tinnox/db/testing';
@@ -41,6 +42,14 @@ async function asMigrator<T>(work: (client: pg.Client) => Promise<T>): Promise<T
   } finally {
     await client.end();
   }
+}
+
+/** The backend of `client`, read on that connection. */
+async function backendPid(client: pg.Client): Promise<number> {
+  const { rows } = await client.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+  const pid = rows[0]?.pid;
+  if (pid === undefined) throw new Error('no backend pid');
+  return pid;
 }
 
 /**
@@ -278,21 +287,20 @@ describe('credential changes and their audit events', () => {
         [leaving.csrfToken],
       );
       expect(held.rowCount).toBe(1);
-      // One at a time, so no request's activity stamp waits on another's.
+      const holderPid = await backendPid(holder);
+      // One at a time, so no request's activity stamp waits on another's. Only waits that lead
+      // back to this holder count, so a lock wait elsewhere on the server changes nothing (TST-3).
       for (let i = 1; i <= requests; i += 1) {
         answers.push(leaving.fetch('/api/auth/logout', { method: 'POST' }));
-        const deadline = Date.now() + 10_000;
-        let waiting = 0;
-        while (waiting < i && Date.now() < deadline) {
-          await new Promise((resolve) => setTimeout(resolve, 20));
-          waiting = await asMigrator(async (client) => {
-            const { rows } = await client.query<{ n: number }>(
-              'SELECT count(DISTINCT pid)::int AS n FROM pg_locks WHERE NOT granted',
-            );
-            return rows[0]?.n ?? 0;
-          });
-        }
-        expect(waiting, `sign-out ${String(i)} never waited for the session row`).toBe(i);
+        const waiting = await asMigrator((client) =>
+          waitForLockWaiters(
+            client,
+            holderPid,
+            i,
+            `sign-out ${String(i)} never waited for the session row`,
+          ),
+        );
+        expect(waiting).toHaveLength(i);
       }
     } finally {
       await holder.query('ROLLBACK');

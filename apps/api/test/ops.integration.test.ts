@@ -1,10 +1,10 @@
 /**
- * The readiness route (`GET /readyz`): its database check is `ping(pool)` from @tinnox/db, the
+ * The readiness route (`GET /readyz`): its database check is `ping(ctx.db)` from @tinnox/db, the
  * one statement the API sends on the pool itself (adoption plan step 15, AG-2.1). The route
  * reports each dependency as true or false and nothing else: no error text, no configuration.
  */
 import { ROUTES } from '@tinnox/contracts';
-import type { Pool } from '@tinnox/db';
+import type { Pool } from '@tinnox/db/testing';
 import { afterEach, describe, expect, it } from 'vitest';
 import { startTestApp, type TestApp } from './support.ts';
 

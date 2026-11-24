@@ -173,7 +173,9 @@ for (const scheme of ['light', 'dark'] as const) {
       try {
         const visitor = await context.newPage();
         await visitor.goto(`${PORTAL_URL}/alerts/confirm#not-a-valid-code`);
-        await expect(visitor.getByText('This link is not valid any more')).toBeVisible();
+        await expect(
+          visitor.getByText('This link is not valid any more', { exact: true }),
+        ).toBeVisible();
         await expectAccessible(visitor, `alert confirm page, not valid (${scheme})`);
       } finally {
         await context.close();

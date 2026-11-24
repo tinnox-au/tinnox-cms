@@ -11,7 +11,12 @@
  * pre-customer-release checklist) is what adds a host. It also exits 1 when PostgreSQL does not
  * answer at start-up.
  */
-import { assertConnectionRole, assertRuntimeRole, createPool, RuntimeRoleError } from '@tinnox/db';
+import {
+  assertConnectionRole,
+  assertRuntimeRole,
+  createDatabase,
+  RuntimeRoleError,
+} from '@tinnox/db';
 import { runDisplayAlerts } from './alerts.ts';
 import { ConfigError, loadConfig, runtimeEnv } from './config.ts';
 import { createLogger } from './logger.ts';
@@ -35,7 +40,7 @@ async function main(): Promise<number> {
     logger.error('SMTP_HOST is not set: e-mail alerts are off');
     return 1;
   }
-  const pool = createPool({
+  const db = createDatabase({
     connectionString: config.databaseUrl,
     applicationName: 'tinnox-alerts-once',
     max: 2,
@@ -44,7 +49,7 @@ async function main(): Promise<number> {
     // Before the run (AG-1.3): the session must be tinnox_app as infra/postgres/init/01-roles.sh
     // makes it, read from the catalogue. The problems never carry the connection string.
     try {
-      await assertRuntimeRole(pool);
+      await assertRuntimeRole(db);
     } catch (error) {
       if (error instanceof RuntimeRoleError) {
         console.error('TINNOX alert check database role is not acceptable:');
@@ -58,7 +63,7 @@ async function main(): Promise<number> {
       return 1;
     }
     const result = await runDisplayAlerts({
-      pool,
+      db,
       now: new Date(),
       mail,
       portalOrigin: config.portalOrigin,
@@ -70,7 +75,7 @@ async function main(): Promise<number> {
     logger.error({ err: error }, 'display alert check failed');
     return 1;
   } finally {
-    await pool.end();
+    await db.end();
   }
 }
 

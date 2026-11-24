@@ -1,5 +1,6 @@
 export * from './ids.ts';
 export * from './limits.ts';
+export * from './loopback.ts';
 export * from './text.ts';
 export * from './refs.ts';
 export * from './schedule.ts';

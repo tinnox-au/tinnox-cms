@@ -124,7 +124,7 @@ describe(
       expect(run.stderr).toContain(
         `eslint.config.js loads the lint rules in scripts/eslint-rules/*.ts, and this Node (${process.version}) does not run TypeScript files`,
       );
-      expect(run.stderr).toContain('Use the Node that .nvmrc names');
+      expect(run.stderr).toContain('Use Node 22.18 or later, the floor of package.json engines');
       expect(run.stderr).not.toContain('ERR_UNKNOWN_FILE_EXTENSION');
     });
   },

@@ -113,7 +113,7 @@ async function seedOrganisation(pool: MigratorPool, org: SeedOrg): Promise<strin
   const subjects = org.members.map((member) => requireEnv(member.subjectEnv));
   // Row-level security is forced even for the table owner, so the seed sets the
   // tenant context exactly like the application does: one transaction for the organisation.
-  // It writes no audit row, as today (development_seed, the step 20 ruling): the data is
+  // It writes no audit row, as today (development_seed, kept as built at step 20): the data is
   // synthetic, and seedStatement() is the one statement changeOrgAsMigrator lets say so.
   return changeOrgAsMigrator(pool, org.orgId, seedStatement(), async (tx) => {
     await tx.query(

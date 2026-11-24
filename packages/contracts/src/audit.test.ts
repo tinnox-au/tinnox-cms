@@ -82,7 +82,7 @@ describe('the reasons for writing no audit row (D3)', () => {
     expectTypeOf<'development_seed'>().not.toExtend<NoAuditReason>();
   });
 
-  it('the three writes the step 20 ruling leaves unaudited (DEC-38) name their write and the open decision', () => {
+  it('the three writes step 20 kept unaudited as built name their write and the open decision', () => {
     // Today's behaviour, recorded so it can be searched for; not a decision that it needs no
     // audit row (CMS-36 for the first two).
     expect(UNAUDITED_REASONS.alert_closed_silently).toMatch(/display_alert.*CMS-36/);

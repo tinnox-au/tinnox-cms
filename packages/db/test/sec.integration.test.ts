@@ -13,6 +13,8 @@ import {
   heartbeatLogPurge,
   loginStatePut,
   loginStateTake,
+  anyOf,
+  MEDIA_PROCESSING_JOBS_CAP,
   mediaProcessingJobs,
   membershipByOidcSub,
   pairingCancelClaims,
@@ -28,9 +30,15 @@ import {
   sessionRevokeUnaudited,
   sha256,
   type Autocommit,
-  type Pool,
 } from '../src/index.ts';
-import { auditScoped, auditUnscoped, withOrg, withoutOrg } from '../src/testing.ts';
+import {
+  auditScoped,
+  auditUnscoped,
+  withOrg,
+  withoutOrg,
+  type Pool,
+  databaseOn,
+} from '../src/testing.ts';
 import {
   appPool,
   asDefiner,
@@ -56,7 +64,7 @@ let b: TestOrg;
 
 beforeAll(async () => {
   pool = appPool('calls the sec.* functions directly, as the runtime role', 8);
-  db = poolAsTx(pool);
+  db = poolAsTx(databaseOn(pool));
   migrator = await migratorClient();
   a = await createOrg(migrator, 'Sec A');
   b = await createOrg(migrator, 'Sec B');
@@ -1074,7 +1082,7 @@ describe('audit helpers', () => {
 describe('the two writes outside a transaction (D2, CX-01)', () => {
   it('auditStandalone commits a refusal on its own, where no organisation can read it (D2)', async () => {
     const marker = `standalone-${randomUUID()}`;
-    await auditStandalone(pool, {
+    await auditStandalone(databaseOn(pool), {
       actorType: 'player',
       actorId: null,
       action: 'player.auth_rejected',
@@ -1113,7 +1121,7 @@ describe('the two writes outside a transaction (D2, CX-01)', () => {
     const marker = `standalone-${randomUUID()}`;
     // Defined outside the callback: lint reports the form it can read.
     const writeRefusal = (): Promise<void> =>
-      auditStandalone(pool, {
+      auditStandalone(databaseOn(pool), {
         actorType: 'anonymous',
         actorId: null,
         action: 'auth.login',
@@ -1151,10 +1159,10 @@ describe('the two writes outside a transaction (D2, CX-01)', () => {
     };
     const before = await auditRows();
     expect(await sessionByIdHash(db, idHash, 1800)).not.toBeNull();
-    expect(await sessionRevokeUnaudited(pool, idHash)).toBe(true);
+    expect(await sessionRevokeUnaudited(databaseOn(pool), idHash)).toBe(true);
     expect(await sessionByIdHash(db, idHash, 1800)).toBeNull();
-    expect(await sessionRevokeUnaudited(pool, idHash)).toBe(false);
-    expect(await sessionRevokeUnaudited(pool, hash())).toBe(false);
+    expect(await sessionRevokeUnaudited(databaseOn(pool), idHash)).toBe(false);
+    expect(await sessionRevokeUnaudited(databaseOn(pool), hash())).toBe(false);
     expect(await auditRows()).toBe(before);
   });
 });
@@ -1216,24 +1224,52 @@ describe('the device-registration and media-queue lookups (AG-2.2)', () => {
     const older = await waiting(a, '20 years');
     const newer = await waiting(b, '19 years');
     try {
-      const jobs = await mediaProcessingJobs(db, 2);
+      const listed = await mediaProcessingJobs(db, 2);
+      // Two rows came back under a limit of two: the list may be cut off (SCX-02).
+      expect(listed.complete).toBe(false);
+      const jobs = anyOf(listed);
       expect(jobs.map((job) => ({ mediaId: job.mediaId, orgId: job.orgId }))).toEqual([
         { mediaId: older, orgId: a.orgId },
         { mediaId: newer, orgId: b.orgId },
       ]);
       expect(jobs[0]?.createdAt).toBeInstanceOf(Date);
       expect(jobs[0]?.createdAt.getTime()).toBeLessThan(jobs[1]?.createdAt.getTime() ?? 0);
-      expect(await mediaProcessingJobs(db, 1)).toHaveLength(1);
+      expect(anyOf(await mediaProcessingJobs(db, 1))).toHaveLength(1);
       // The function clamps the limit to at least one row (migration 0003).
-      expect(await mediaProcessingJobs(db, 0)).toHaveLength(1);
+      expect(anyOf(await mediaProcessingJobs(db, 0))).toHaveLength(1);
     } finally {
       // Left waiting, they would lengthen the media pipeline's queue for the files after this.
       await settle(a, older);
       await settle(b, newer);
     }
-    const left = (await mediaProcessingJobs(db, 5000)).map((job) => job.mediaId);
+    const all = await mediaProcessingJobs(db, 5000);
+    // Far fewer rows than the cap: the list is the whole set, and the sweep may rely on it.
+    expect(all.complete).toBe(true);
+    const left = anyOf(all).map((job) => job.mediaId);
     expect(left).not.toContain(older);
     expect(left).not.toContain(newer);
+  });
+
+  it('MEDIA_PROCESSING_JOBS_CAP is the cap sec.media_processing_jobs applies (SCX-02)', async () => {
+    // The listing is labelled complete by comparing its length with this constant, so it must
+    // match the function's own clamp: a lower cap in SQL would mark a cut-off list complete and
+    // the sweep would delete the files of pending jobs. The rows are inserted in a transaction
+    // that is rolled back, so no other test file ever sees this queue.
+    const rolledBack = new Error('rolled back on purpose');
+    const outcome = withOrg(pool, a.orgId, async (tx) => {
+      await tx.query(
+        `INSERT INTO media (org_id, kind, status, original_name, created_at)
+         SELECT app_org_id(), 'image', 'processing', 'queued', now() - interval '30 years'
+         FROM generate_series(1, $1::integer)`,
+        [MEDIA_PROCESSING_JOBS_CAP + 1],
+      );
+      const listed = await mediaProcessingJobs(tx, MEDIA_PROCESSING_JOBS_CAP + 1);
+      // A higher cap in SQL returns more rows; a lower one returns fewer and reads as complete.
+      expect(anyOf(listed)).toHaveLength(MEDIA_PROCESSING_JOBS_CAP);
+      expect(listed.complete).toBe(false);
+      throw rolledBack;
+    });
+    await expect(outcome).rejects.toBe(rolledBack);
   });
 });
 

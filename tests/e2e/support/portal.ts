@@ -95,7 +95,8 @@ export async function createScreenInWizard(
 export async function pairInWizard(page: Page, code: string): Promise<void> {
   await page.getByLabel('Pairing code shown on the player').fill(code);
   await page.getByRole('button', { name: 'Pair player' }).click();
-  await expect(page.getByText('Code accepted')).toBeVisible();
+  // Exact, as for the banner on the screen page: a sentence that contains the words would match.
+  await expect(page.getByText('Code accepted', { exact: true })).toBeVisible();
 }
 
 /** Leaves the wizard from the pairing step without choosing content; lands on the screen page. */

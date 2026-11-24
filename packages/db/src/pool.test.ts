@@ -6,11 +6,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   createPool,
-  ping,
   RuntimeRoleError,
   runtimeRoleProblems,
   startupSettingsProblem,
-  type Pool,
   type RuntimeRoleFacts,
 } from './pool.ts';
 
@@ -172,29 +170,5 @@ describe('startupSettingsProblem: a connection string must not replace what crea
     expect(() =>
       createPool({ connectionString: `${BASE}?options=-c%20row_security%3Doff` }),
     ).toThrow(/^the database connection string sets options in its query/);
-  });
-});
-
-describe('ping (the liveness probe of /readyz)', () => {
-  const answering = (answer: () => Promise<unknown>) => {
-    const sent: unknown[][] = [];
-    const pool = {
-      query: (...args: unknown[]) => {
-        sent.push(args);
-        return answer();
-      },
-    } as unknown as Pool;
-    return { pool, sent };
-  };
-
-  it('sends one statement that reads no table, on the pool itself', async () => {
-    const { pool, sent } = answering(() => Promise.resolve({ rows: [{ '?column?': 1 }] }));
-    await expect(ping(pool)).resolves.toBeUndefined();
-    expect(sent).toEqual([['SELECT 1']]);
-  });
-
-  it('rejects with what the pool failed with, so the caller can report the database as down', async () => {
-    const { pool } = answering(() => Promise.reject(new Error('Connection terminated')));
-    await expect(ping(pool)).rejects.toThrow('Connection terminated');
   });
 });

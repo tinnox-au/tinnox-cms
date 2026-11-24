@@ -18,8 +18,8 @@ import {
   termsOfStatement,
   type Change,
   type OrgId,
+  type Database,
   type OrgTx,
-  type Pool,
 } from '@tinnox/db';
 import { jobStatement, type JobName } from './route-audit.ts';
 
@@ -32,7 +32,7 @@ import { jobStatement, type JobName } from './route-audit.ts';
  * audit row itself; a run that found nothing to do returns `unaudited('nothing_changed')`.
  */
 export async function changeAsJob<T>(
-  pool: Pool,
+  db: Database,
   job: JobName,
   orgId: OrgId,
   fn: (tx: OrgTx) => Promise<Change<T>>,
@@ -44,5 +44,5 @@ export async function changeAsJob<T>(
     // Nothing to read again: no member, and no credential, stands behind a job.
     recheck: () => Promise.resolve(),
   });
-  return changeOrg(pool, orgId, permit, (tx) => fn(tx));
+  return changeOrg(db, orgId, permit, (tx) => fn(tx));
 }

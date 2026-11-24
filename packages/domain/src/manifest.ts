@@ -9,6 +9,7 @@ import {
   type Limits,
   type Manifest,
 } from '@tinnox/contracts';
+import { markPlanned, type PlannedPublication } from './planned.ts';
 import { buildPublicationDraft } from './playlist.ts';
 import type {
   AppRecord,
@@ -175,8 +176,11 @@ export interface PlanPublicationInput {
   readonly route: PublicationValidator;
 }
 
+// The type only: markPlanned stays off the package's entry (planned.ts, DEC-23).
+export type { PlannedPublication } from './planned.ts';
+
 export type PlanPublicationResult =
-  | { readonly ok: true; readonly draft: PublicationDraft }
+  | { readonly ok: true; readonly draft: PlannedPublication }
   | { readonly ok: false; readonly issues: readonly PublishIssue[] };
 
 /**
@@ -197,7 +201,7 @@ export function planPublication(input: PlanPublicationInput): PlanPublicationRes
   if (!built.ok) return built;
   const issues = input.route.validate(built.draft);
   if (issues.length > 0) return { ok: false, issues };
-  return { ok: true, draft: built.draft };
+  return { ok: true, draft: markPlanned(built.draft) };
 }
 
 /** Distinct asset ids of a manifest's media items, in first-use order. */

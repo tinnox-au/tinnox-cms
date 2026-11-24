@@ -4,7 +4,7 @@ import { appendFile, mkdir, rm, stat, symlink, unlink, utimes, writeFile } from 
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import type { MediaJobResult } from '@tinnox/contracts';
-import { withOrg } from '@tinnox/db/testing';
+import { withOrg, databaseOn } from '@tinnox/db/testing';
 import { LocalObjectStorage } from '@tinnox/storage';
 import sharp from 'sharp';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -543,7 +543,7 @@ describe('upload limits and validation results', () => {
     const silent = { info: () => undefined, warn: () => undefined, error: () => undefined };
     const pipeline = new MediaPipeline({
       jobsDir: t.jobsDir,
-      pool,
+      db: databaseOn(pool),
       storage: await LocalObjectStorage.create({ root: t.mediaRoot }),
       limits: t.config.limits,
       logger: silent,
@@ -692,7 +692,7 @@ describe('upload limits and validation results', () => {
     const silent = { info: () => undefined, warn: () => undefined, error: () => undefined };
     const pipeline = new MediaPipeline({
       jobsDir: t.jobsDir,
-      pool: losingCommitAnswers(t.pool, /SET status = 'ready'/),
+      db: databaseOn(losingCommitAnswers(t.pool, /SET status = 'ready'/)),
       storage: await LocalObjectStorage.create({ root: t.mediaRoot }),
       limits: t.config.limits,
       logger: silent,
@@ -788,7 +788,7 @@ describe('upload limits and validation results', () => {
     let offset = 0;
     const restarted = new MediaPipeline({
       jobsDir: t.jobsDir,
-      pool: t.pool,
+      db: t.ctx.db,
       storage,
       limits: t.config.limits,
       logger: silent,
@@ -821,7 +821,7 @@ describe('upload limits and validation results', () => {
     offset = 0;
     const later = new MediaPipeline({
       jobsDir: t.jobsDir,
-      pool: t.pool,
+      db: t.ctx.db,
       storage,
       limits: t.config.limits,
       logger: silent,

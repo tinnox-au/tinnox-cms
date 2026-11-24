@@ -20,6 +20,10 @@ const REMEDY = `${SECOND} Pass the outer tx to the helper: give it a \`tx: OrgTx
 const AUDIT_REMEDY = `${SECOND} Write the event on the outer transaction instead: return it from that change as { value, audit }, and changeOrg or changePreOrg (or the wrapper the route calls: changeAsOperator, changeAsDevice, changeAsJob) writes it there. auditStandalone is only for a refusal that no transaction carries: call it after the outer call has returned or thrown.`;
 const REVOKE_REMEDY = `${SECOND} End the session on the outer tx instead: sessionRevoke(tx, idHash) (from @tinnox/db), with its audit row on the same tx. sessionRevokeUnaudited is only for the sign-out fallback: call it after the outer call has returned or thrown.`;
 const REFUSAL_REMEDY = `${SECOND} A refusal that commits with what the outer transaction wrote is returned from it, as { value: refuse(error), audit: event } (refuse from apps/api/src/db-helpers.ts): the wrapper writes the event there. recordRefusal is for a refusal that changed nothing: throw the refusal, and call it after the outer call has rolled back (SCR-32).`;
+// CHK-3: withSessionLock and ping open no transaction, but each checks out a connection of its own.
+const OPEN = 'where a transaction is already open.';
+const LOCK_REMEDY = `${OPEN} It checks out a connection of its own and holds it while the outer transaction holds another, so with every connection held that way the pool never answers. Take the lock first and open the transactions inside its work, as runDisplayAlerts in apps/api/src/alerts.ts does: withSessionLock(ctx.db, name, (signal) => readOrg(...)). A lock that only guards the statements of this transaction is pg_advisory_xact_lock on the outer tx.`;
+const PING_REMEDY = `${OPEN} It sends its statement on another connection of the pool, which waits while the outer transaction holds one. Call ping(ctx.db) from the liveness probe, outside any transaction; inside one, the statements of the outer tx already show that the database answers.`;
 const inCallback = (opener: string, outer: string, remedy = REMEDY) =>
   `${opener}() is called inside the callback of ${outer}(), ${remedy}`;
 const withHandle = (opener: string, handle: string, remedy = REMEDY) =>
@@ -27,6 +31,16 @@ const withHandle = (opener: string, handle: string, remedy = REMEDY) =>
 
 tester.run('no-nested-transaction (U-3)', rule, {
   valid: [
+    {
+      name: 'CHK-3: transactions inside the work of withSessionLock, and ping on its own',
+      code: `
+        await withSessionLock(ctx.db, 'display_alerts', async (signal) => {
+          await readOrg(ctx.db, orgId, (tx) => tx.query('SELECT 1'));
+          await changeAsJob(ctx.db, 'display_alerts', orgId, change);
+        });
+        await ping(ctx.db);
+      `,
+    },
     {
       name: 'one transaction after another',
       code: `
@@ -127,6 +141,23 @@ tester.run('no-nested-transaction (U-3)', rule, {
     },
   ],
   invalid: [
+    {
+      name: 'CHK-3: withSessionLock and ping inside a transaction, or in a function that takes one',
+      code: `
+        await readOrg(ctx.db, orgId, async (tx) => {
+          await withSessionLock(ctx.db, 'display_alerts', work);
+          await ping(ctx.db);
+        });
+        export async function inside(tx: OrgTx): Promise<void> {
+          await db.withSessionLock(ctx.db, 'display_alerts', work);
+        }
+      `,
+      errors: [
+        { message: inCallback('withSessionLock', 'readOrg', LOCK_REMEDY) },
+        { message: inCallback('ping', 'readOrg', PING_REMEDY) },
+        { message: withHandle('withSessionLock', 'tx: OrgTx', LOCK_REMEDY) },
+      ],
+    },
     {
       name: 'withOrg inside the callback of withOrg',
       code: `

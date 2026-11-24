@@ -1,8 +1,9 @@
+import { isLoopbackAddress } from '@tinnox/contracts';
+import { isIP } from 'node:net';
 import { describe, expect, it } from 'vitest';
 import {
   allowListedEnv,
   hostsOf,
-  isLoopbackAddress,
   isLoopbackTarget,
   localhostProblem,
   loopbackProblems,
@@ -12,35 +13,61 @@ import {
 
 const target = (name: string, value: string): Target => ({ name, value, source: 'the root .env' });
 
-describe('isLoopbackAddress (EAX-08, EAX-09)', () => {
-  it('accepts 127.0.0.0/8 and ::1 in every spelling', () => {
-    for (const host of ['127.0.0.1', '127.1.2.3', '127.255.255.255', '::1', '[::1]', '0:0::1']) {
-      expect(isLoopbackAddress(host), host).toBe(true);
+describe('isLoopbackAddress against node:net (EAX-08)', () => {
+  /** The rule the e2e copy had for ::1: node:net says IPv6, the URL parser says ::1. */
+  function viaNode(host: string): boolean {
+    if (isIP(host) !== 6) return false;
+    try {
+      return new URL(`http://[${host}]/`).hostname === '[::1]';
+    } catch {
+      return false;
     }
-  });
+  }
 
-  it('refuses names, private ranges, the unspecified address and a mapped address', () => {
-    for (const host of [
-      'localhost',
-      '10.0.0.5',
-      '192.168.1.10',
-      '172.16.0.1',
-      '0.0.0.0',
+  it('agrees with node:net and the URL parser on every spelling of ::1 and its near misses', () => {
+    const spellings = [
+      '::1',
+      '::01',
+      '::0001',
+      '0::1',
+      '0:0::1',
+      '0:0:0:0:0:0:0:1',
+      '0000:0000:0000:0000:0000:0000:0000:0001',
+      '0:0:0:0:0:0:0:01',
+      '::0:1',
+      '0::0:1',
+      '::A',
+      ':1',
+      '::1::',
+      ':::1',
+      '1::',
       '::',
+      '::2',
+      '1::1',
+      '::1:0',
+      '::10001',
+      '00000::1',
+      '::1.0.0.0',
       '::ffff:127.0.0.1',
-      '128.0.0.1',
-    ]) {
-      expect(isLoopbackAddress(host), host).toBe(false);
+      '::1%lo0',
+      '::1 ',
+      ' ::1',
+      '::g',
+      '0:0:0:0:0:0:0:0:1',
+      '0:0:0:0:0:0:1',
+      '0:0:0:0:0:0:0:0',
+    ];
+    for (const host of spellings) {
+      expect(isLoopbackAddress(host), host).toBe(viaNode(host));
     }
   });
 });
 
 describe('isLoopbackTarget and hostsOf (EAX-09)', () => {
-  it('accepts localhost, 127.0.0.0/8 and ::1, bare and in URLs', () => {
+  it('accepts localhost, 127.0.0.1 and ::1, bare and in URLs', () => {
     for (const value of [
       'localhost',
       '127.0.0.1',
-      '127.9.9.9',
       '::1',
       'http://localhost:5173',
       'http://127.0.0.1:8025/api/v1',
@@ -60,6 +87,9 @@ describe('isLoopbackTarget and hostsOf (EAX-09)', () => {
       'http://10.1.2.3:4000',
       'relay.localhost',
       'localhost.example.com',
+      // Only 127.0.0.1 is loopback now; the rest of 127.0.0.0/8 was the e2e copy's alone (EAX-08).
+      '127.0.0.2',
+      'http://127.9.9.9:4000',
       '127.0.0.1.nip.io',
       'http://127.0.0.1.example.com/',
       // The userinfo trick: the host is what follows the last @.

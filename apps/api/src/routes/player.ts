@@ -110,9 +110,9 @@ function playerKey(request: FastifyRequest): string {
 }
 
 export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext): Promise<void> {
-  const { pool, config } = ctx;
+  const { db, config } = ctx;
   const limits = config.limits;
-  const unscoped = poolAsTx(pool);
+  const unscoped = poolAsTx(db);
 
   // D7: exactly the player origin, only under /player, no credentials (the device token
   // travels in the Authorization header, never in a cookie).
@@ -147,7 +147,7 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
     request: FastifyRequest,
     record: { count: number; crossedLimit: boolean },
   ): Promise<void> {
-    await auditStandalone(pool, {
+    await auditStandalone(db, {
       actorType: 'player',
       actorId: null,
       action: 'player.auth_rejected',
@@ -217,7 +217,7 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
         const code = randomPairingCode();
         // One transaction: the pairing session and its audit event commit together, so a
         // failed audit leaves no session behind (round 3, SCU-01 and SCX-04).
-        const result = await changePreOrg<PairingCreateResult>(pool, statement, async (pre) => {
+        const result = await changePreOrg<PairingCreateResult>(db, statement, async (pre) => {
           const created = await pairingCreate(pre, {
             code,
             pollingTokenHash: sha256(pollingToken),
@@ -227,9 +227,14 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
             windowSeconds: limits.pairingSessionWindowSeconds,
           });
           if (created.outcome !== 'created') {
-            // Rate-limited, or the code was taken: no session was made. All that
-            // sec.pairing_create can have written is the mark on the pending sessions whose
-            // time had passed, which is not audited, as before (the step 20 ruling, CMS-36).
+            // Rate-limited (rate_limited), or the code was taken (code_collision): no session
+            // was made, and the refusal is not audited anywhere (open, as is the 503 after five
+            // collisions below; a B11 residual in docs/security/control-matrix.md). All that
+            // sec.pairing_create can have written is the mark on the pending sessions whose time
+            // had passed, and it may have marked none. The reason is given for every such run, not only for one
+            // that marked a session, because the run cannot tell (it returns no row count) and
+            // the write is not audited, as built at step 20 and open on CMS-36. It is
+            // "may have marked", not "marked".
             return { value: created, audit: unaudited('pairing_expired_by_time') };
           }
           return {
@@ -289,7 +294,7 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
       // event commit together (round 3, SCX-04). The answer is decided after the commit;
       // throwing inside would roll back the counted attempt.
       const statement = routeStatement(request);
-      const poll = await changePreOrg(pool, statement, async (pre) => {
+      const poll = await changePreOrg(db, statement, async (pre) => {
         const polled = await pairingPoll(pre, {
           pairingId: id,
           pollingTokenHash,
@@ -318,7 +323,7 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
           return { value: polled, audit: unaudited('counter_under_threshold') };
         }
         // sec.pairing_poll marks the session expired once its time has passed, which is not
-        // audited, as before (the step 20 ruling, CMS-36).
+        // audited, as before (kept as built at step 20, open on CMS-36).
         if (polled.outcome === 'expired') {
           return { value: polled, audit: unaudited('pairing_expired_by_time') };
         }
@@ -350,7 +355,7 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
       // One transaction: the registration and its audit event commit together, and a failure
       // leaves the pairing claimed, so the player's next poll can still collect.
       const deviceToken = randomToken();
-      const paired = await changePreOrg(pool, statement, async (pre, enterOrg) => {
+      const paired = await changePreOrg(db, statement, async (pre, enterOrg) => {
         const done = await pairingComplete(pre, {
           pairingId: id,
           pollingTokenHash,
@@ -460,7 +465,7 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
     { config: credentialLimit(240) },
     async (request, reply): Promise<ManifestResponse | undefined> => {
       const device = await authenticate(request);
-      const row = await readOrg(pool, device.orgId, async (tx) => {
+      const row = await readOrg(db, device.orgId, async (tx) => {
         const { rows } = await tx.query<{ id: string; manifest: unknown }>(
           `SELECT p.id, p.manifest
            FROM display_delivery dd
@@ -502,7 +507,7 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
       const device = await authenticate(request);
       const input = parseInput(MediaUrlsRequestSchema, request.body, 'request');
       const wanted = [...new Set(input.assetIds)];
-      const found = await readOrg(pool, device.orgId, async (tx) => {
+      const found = await readOrg(db, device.orgId, async (tx) => {
         // Only the publication currently assigned to this credential's display.
         const current = await tx.query(
           `SELECT 1 FROM display_delivery
@@ -589,7 +594,7 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
         throw new HttpError(401, 'device_revoked', 'This device registration is no longer valid.');
       }
 
-      const asset = await readOrg(pool, device.orgId, async (tx) => {
+      const asset = await readOrg(db, device.orgId, async (tx) => {
         const { rows } = await tx.query<{
           storage_key: string | null;
           mime_type: string | null;

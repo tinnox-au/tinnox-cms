@@ -107,7 +107,7 @@ const TESTS = [
 ] as const;
 
 const OFF_TRANSACTION =
-  /^Do not call query\(\) on .+: only a transaction handle with an organisation takes a statement \(the tx that the callback of readOrg or changeOrg receives, or that enterOrg returns inside changePreOrg\)\. .* Use readOrg\(pool, orgId, \(tx\) => tx\.query\(\.\.\.\)\) for a read, changeAsOperator\(ctx, request, fn\) from apps\/api\/src\/auth\/permissions\.ts for an operator change, a typed sec\.\* wrapper from @tinnox\/db .*, or ping\(pool\) for a liveness probe\. An offline tool that reads across organisations sends the statement on the handle asDefiner gives its work \(@tinnox\/db\/migrate\)\.$/;
+  /^Do not call query\(\) on .+: only a transaction handle with an organisation takes a statement \(the tx that the callback of readOrg or changeOrg receives, or that enterOrg returns inside changePreOrg\)\. .* Use readOrg\(ctx\.db, orgId, \(tx\) => tx\.query\(\.\.\.\)\) for a read, changeAsOperator\(ctx, request, fn\) from apps\/api\/src\/auth\/permissions\.ts for an operator change, a typed sec\.\* wrapper from @tinnox\/db .*, or ping\(ctx\.db\) for a liveness probe\. An offline tool that reads across organisations sends the statement on the handle asDefiner gives its work \(@tinnox\/db\/migrate\)\.$/;
 
 // The first case of each describe may be the one that loads eslint.config.js, which a busy CI
 // runner can stretch towards the unit project's 5 s default (GAP-1).
@@ -134,21 +134,8 @@ describe('query() off a transaction (AG-2.1)', { timeout: 30_000 }, () => {
     expect(isOff(await entryFor(path, QUERY))).toBe(true);
   });
 
-  const SESSION_LOCK = 'session lock; removed by `withSessionLock` in step 22';
-
-  it('lists the two session-lock statements of the alert check, with the reason, and nothing else', async () => {
-    expect(await exported('QUERY_OFF_TRANSACTION')).toEqual({
-      'apps/api/src/alerts.ts': [
-        {
-          sql: '^SELECT pg_try_advisory_lock\\(hashtextextended\\(\\$1, 0\\)\\) AS ok$',
-          reason: SESSION_LOCK,
-        },
-        {
-          sql: '^SELECT pg_advisory_unlock\\(hashtextextended\\(\\$1, 0\\)\\) AS ok$',
-          reason: SESSION_LOCK,
-        },
-      ],
-    });
+  it('lists no statement: the alert check takes its session lock through withSessionLock (EAX-06)', async () => {
+    expect(await exported('QUERY_OFF_TRANSACTION')).toEqual({});
   });
 
   it('keeps no entry whose statement its file no longer sends', async () => {
@@ -164,26 +151,16 @@ describe('query() off a transaction (AG-2.1)', { timeout: 30_000 }, () => {
     }
   });
 
-  it('lets the alert check send those two statements on its lock connection, and nothing else', async () => {
+  it('refuses the old session-lock statements on a connection in the alert check (EAX-06)', async () => {
     const path = 'apps/api/src/alerts.ts';
-    const allowed = `
+    const old = `
       await client.query('SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS ok', [KEY]);
       await client.query('SELECT pg_advisory_unlock(hashtextextended($1, 0)) AS ok', [KEY]);
     `;
-    expect(await flagged(path, allowed, QUERY)).toEqual([]);
-    const other = `
-      await client.query('SELECT id FROM display');
-      await deps.pool.query('SELECT 1');
-      await client.query('SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS ok; DELETE FROM display');
-    `;
-    expect(await flagged(path, other, QUERY)).toEqual([
-      expect.stringMatching(OFF_TRANSACTION),
+    expect(await flagged(path, old, QUERY)).toEqual([
       expect.stringMatching(OFF_TRANSACTION),
       expect.stringMatching(OFF_TRANSACTION),
     ]);
-    // The entries belong to that file only.
-    expect(await flagged('apps/api/src/housekeeping.ts', allowed, QUERY)).toHaveLength(2);
-    expect(await flagged('scripts/lib/provision.ts', allowed, QUERY)).toHaveLength(2);
   });
 });
 
@@ -311,6 +288,9 @@ describe('raw sec.* SQL (AG-2.2)', { timeout: 30_000 }, () => {
     ['a template', 'export const q = `SELECT media_id FROM sec.media_processing_jobs($1)`;'],
     ['a template after an interpolation', 'export const q = `SELECT ${COLUMNS} FROM sec.x ($1)`;'],
     ['a call without FROM', "export const q = 'SELECT sec.session_purge_expired() AS n';"],
+    // CHK-10: the schema quoted, or spaced from the dot.
+    ['a quoted schema', 'export const q = \'SELECT "sec".session_revoke($1)\';'],
+    ['a schema spaced from the dot', "export const q = 'SELECT sec . session_revoke($1)';"],
   ])('flags %s', async (_name, code) => {
     expect(await flagged('apps/api/src/routes/fixture.ts', code, SYNTAX)).toEqual([
       expect.stringMatching(RAW_SEC),
@@ -362,7 +342,8 @@ describe('the role switch (D25)', { timeout: 30_000 }, () => {
     "'set session role tinnox_definer'",
     "'  SET  LOCAL  ROLE tinnox_definer'",
     "'RESET ROLE'",
-    "'BEGIN; SET LOCAL ROLE tinnox_definer'",
+    // 'BEGIN; SET LOCAL ROLE ...' is refused by both rules: the transaction text cases below.
+    "'SELECT 1; SET LOCAL ROLE tinnox_definer'",
     "'SET SESSION AUTHORIZATION postgres'",
     "'RESET SESSION AUTHORIZATION'",
     '"SELECT set_config(\'role\', $1, true)"',
@@ -414,6 +395,296 @@ describe('the role switch (D25)', { timeout: 30_000 }, () => {
       expect.stringMatching(/^Do not cast to MigratorPool/),
     ]);
   });
+});
+
+// CHK-12 (group B review): a file excused from an entry of a no-restricted-syntax list is the one
+// place for what that entry refuses. An excusal whose file no longer does the thing would keep
+// the entry off it for nothing, so each excused entry must still fire on its file's own text.
+describe('the one-place excusals are each still needed (CHK-12)', { timeout: 30_000 }, () => {
+  it('lists the files of packages/db, the planner of @tinnox/domain and the API configuration', async () => {
+    expect(Object.keys(await exported('ONE_PLACE_EXCUSALS')).sort()).toEqual([
+      'apps/api/src/config.ts',
+      'packages/db/src/definer.ts',
+      'packages/db/src/migrate.ts',
+      'packages/db/src/org-id.ts',
+      'packages/db/src/sec.ts',
+      'packages/db/src/sql.ts',
+      'packages/domain/src/planned.ts',
+    ]);
+  });
+
+  it('fires each excused entry on the current text of its file', async () => {
+    for (const [file, entries] of Object.entries(await exported('ONE_PLACE_EXCUSALS'))) {
+      expect(Array.isArray(entries) && entries.length > 0, `${file} excuses nothing`).toBe(true);
+      for (const entry of entries as Linter.RuleEntry[]) {
+        const fixture = new ESLint({
+          cwd: repoRoot,
+          overrideConfigFile: true,
+          overrideConfig: [
+            {
+              files: ['**/*.ts'],
+              languageOptions: { sourceType: 'module', parser: tseslint.parser },
+              rules: { [SYNTAX]: ['error', entry] },
+            },
+          ],
+        });
+        const [result] = await fixture.lintText(source(file), { filePath: file });
+        const message = isRecord(entry) ? String(entry['message']).slice(0, 60) : '';
+        expect(
+          (result?.messages ?? []).length,
+          `${file} no longer needs its excusal from "${message}...": remove it from ONE_PLACE_EXCUSALS (and the list it comes from) in eslint.config.js`,
+        ).toBeGreaterThan(0);
+      }
+    }
+  });
+});
+
+// SEC-1 (group B review): run() sets the organisation of a transaction and begins and ends it;
+// SQL text sent on the handle does neither, in API source and the offline tools.
+describe('organisation and transaction text (SEC-1)', { timeout: 30_000 }, () => {
+  const ORG_TEXT =
+    /^Do not set app\.org_id in SQL text \(SEC-1\): run\(\) in packages\/db\/src\/tx\.ts sets the organisation of a transaction once, from the OrgId its opener took, and row-level security trusts it\. Read with readOrg\(ctx\.db, orgId, fn\) and change through changeAsOperator\(ctx, request, fn\)/;
+  const TX_TEXT =
+    /^Do not begin, end or mark a transaction in SQL text \(SEC-1\): run\(\) in packages\/db\/src\/tx\.ts begins the transaction before its callback and commits or rolls it back after, so the audit rows the change returns commit with it \(AGENTS\.md section 3\)\. Return from the callback to commit, and throw to roll back\./;
+  // API source and the offline tools; packages/db/src, where run() is, and the media worker,
+  // which has no database, are outside.
+  const API_AND_SCRIPTS = PRODUCT_AND_SCRIPTS.filter(
+    (path) => path.startsWith('apps/api/') || path.startsWith('scripts/'),
+  );
+
+  it.each([
+    'await tx.query("SELECT set_config(\'app.org_id\', $1, true)", [request.params.id]);',
+    "await tx.query('SET LOCAL app.org_id = $1', [id]);",
+    "await tx.query('set app.org_id = 1');",
+    "await tx.query('RESET app.org_id');",
+    "await tx.query(`SELECT 1 FROM ${TABLE}; SET LOCAL app.org_id = '1'`);",
+    'export const q = "SELECT 1, set_config( \'app.org_id\', $1, true)";',
+    // The name in any quoting: each form re-points the organisation as tinnox_app.
+    'await tx.query(\'SET LOCAL "app.org_id" = $1\', [id]);',
+    'await tx.query(\'SET app."org_id" TO DEFAULT\');',
+    'await tx.query(\'reset "app" . "org_id"\');',
+    // pg_settings sets the session's value on the pooled connection.
+    'await tx.query("UPDATE pg_settings SET setting = $1 WHERE name = \'app.org_id\'", [id]);',
+    'export const q = "update pg_catalog.pg_settings set setting = $1 where name = \'app.org_id\'";',
+  ])('flags the organisation set in %s', async (code) => {
+    expect(await flagged('apps/api/src/routes/fixture.ts', code, SYNTAX)).toEqual([
+      expect.stringMatching(ORG_TEXT),
+    ]);
+  });
+
+  it.each([
+    "await tx.query('COMMIT');",
+    "await tx.query('BEGIN');",
+    "await tx.query('BEGIN READ ONLY');",
+    "await tx.query('START TRANSACTION ISOLATION LEVEL SERIALIZABLE');",
+    "await tx.query('END;');",
+    "await tx.query('ROLLBACK TO SAVEPOINT a');",
+    "await tx.query('SAVEPOINT a');",
+    "await tx.query('RELEASE SAVEPOINT a');",
+    "await tx.query('SET TRANSACTION READ WRITE');",
+    "await tx.query('UPDATE folder SET name = $1; COMMIT', [name]);",
+    'await tx.query(`UPDATE ${TABLE} SET name = $1; COMMIT`, [name]);',
+    "export const DONE = 'COMMIT';",
+    'const ROLLBACK_SQL = `ROLLBACK;`;',
+    "export const phase = 'BEGIN READ ONLY';",
+    // In any case where it is the statement given to query().
+    "await tx.query('commit');",
+    'await tx.query(`rollback`);',
+  ])('flags the transaction statement in %s', async (code) => {
+    expect(await flagged('apps/api/src/routes/fixture.ts', code, SYNTAX)).toEqual([
+      expect.stringMatching(TX_TEXT),
+    ]);
+  });
+
+  it('flags both a transaction statement and a role switch in one string', async () => {
+    const code = "export const q = 'BEGIN; SET LOCAL ROLE tinnox_definer';";
+    expect(await flagged('scripts/lib/fixture.ts', code, SYNTAX)).toEqual([
+      expect.stringMatching(/^Do not switch the database role here/),
+      expect.stringMatching(TX_TEXT),
+    ]);
+  });
+
+  it('leaves alone a read of the setting, event names, sentences and a column', async () => {
+    const code = [
+      'export const a = "SELECT current_setting(\'app.org_id\', true) AS org";',
+      "signal.addEventListener('abort', stop);",
+      "stream.on('end', done);",
+      "export const b = 'Commit the change first, then begin the next one';",
+      "export const c = 'BEGIN and COMMIT are added by the runner';",
+      "export const d = 'END of list';",
+      "export const e = 'UPDATE job SET commit_sha = $1 WHERE id = $2';",
+      "export const f = 'the organisation is app.org_id, set by run()';",
+      "// await tx.query('COMMIT');",
+      'export const g = "SELECT setting FROM pg_settings WHERE name = \'app.org_id\'";',
+      // A bare word that is no statement: a literal type, a value of it, a comparison, a note.
+      "type Phase = 'COMMIT' | 'ROLLBACK';",
+      "export const phase: Phase = 'COMMIT';",
+      "export const note = 'END';",
+      "if (phase === 'ROLLBACK') stop();",
+      "switch (phase) { case 'BEGIN': break; }",
+    ].join('\n');
+    expect(await flagged('apps/api/src/routes/fixture.ts', code, SYNTAX)).toEqual([]);
+  });
+
+  it.each(API_AND_SCRIPTS)('flags both in %s', async (path) => {
+    const code = "await tx.query('RESET app.org_id'); await tx.query('ROLLBACK');";
+    expect(await flagged(path, code, SYNTAX)).toEqual([
+      expect.stringMatching(ORG_TEXT),
+      expect.stringMatching(TX_TEXT),
+    ]);
+  });
+
+  it.each([
+    ...TESTS,
+    'packages/db/src/tx.ts',
+    'packages/db/src/pool.ts',
+    'packages/db/src/migrate.ts',
+    'apps/media-worker/src/fixture.ts',
+  ])('leaves %s alone', async (path) => {
+    const code =
+      "await client.query('BEGIN'); await client.query(\"SELECT set_config('app.org_id', $1, true)\", [org]);";
+    expect(await flagged(path, code, SYNTAX)).toEqual([]);
+  });
+});
+
+// CHK-6 (group B review): a file of a list may not hand the name it holds to a file on no list.
+describe('re-exports of a gated name (CHK-6)', { timeout: 30_000 }, () => {
+  const REEXPORT =
+    /^Do not re-export a name the import rules hold to a list \(CHK-6\): poolAsTx and the cross-organisation sec\.\* wrappers \(UNSCOPED_HELPER_FILES\), issueWritePermit \(WRITE_PERMIT_ISSUERS\), issueAuditStatement \(STATEMENT_ISSUERS\), changePreOrg \(PRE_ORG_CHANGE_FILES\), newOrgId \(NEW_ORG_ID_FILES\) and changeAsJob \(JOB_CHANGE_FILES\), all in eslint\.config\.js\. A re-export hands the name to files on no list\. Import it in the file that calls it/;
+
+  it.each([
+    ['apps/api/src/alerts.ts', "export { poolAsTx } from '@tinnox/db';"],
+    ['apps/api/src/alerts.ts', "export { changeAsJob } from './jobs.ts';"],
+    ['apps/api/src/alerts.ts', "export { changeAsJob as change } from './jobs.js';"],
+    [
+      'apps/api/src/alerts.ts',
+      "import { displayAlertOrgs } from '@tinnox/db'; export { displayAlertOrgs };",
+    ],
+    [
+      'apps/api/src/routes/player.ts',
+      "export { deviceByRegistrationId, changePreOrg } from '@tinnox/db';",
+    ],
+    [
+      'apps/api/src/auth/permissions.ts',
+      "import { issueWritePermit } from '@tinnox/db'; export { issueWritePermit as issue };",
+    ],
+    ['apps/api/src/route-audit.ts', "export { issueAuditStatement } from '@tinnox/db';"],
+    ['apps/api/src/media/pipeline.ts', "export * from '../jobs.ts';"],
+    ['apps/api/src/housekeeping.ts', "export * from '@tinnox/db';"],
+    ['scripts/lib/provision.ts', "export { newOrgId } from '@tinnox/db/migrate';"],
+    ['scripts/seed.ts', "export * from '@tinnox/db/migrate';"],
+  ])('flags it in %s: %s', async (path, code) => {
+    const messages = await flagged(path, code, SYNTAX);
+    expect(messages.length).toBeGreaterThan(0);
+    for (const message of messages) expect(message).toMatch(REEXPORT);
+  });
+
+  const BY_NAME =
+    /^Import a name the import rules hold to a list under its own name, and @tinnox\/db, @tinnox\/db\/migrate and the entry of the jobs \(apps\/api\/src\/jobs\.ts\) by name, not as a namespace \(CHK-6\): the re-export check reads the name of what a file exports/;
+
+  // A selector cannot follow `export { alias }` back to its import, so the alias and the
+  // namespace are refused where they are made.
+  it.each([
+    [
+      'apps/api/src/alerts.ts',
+      "import { poolAsTx as pAlias } from '@tinnox/db'; export { pAlias };",
+    ],
+    [
+      'apps/api/src/alerts.ts',
+      "import { changeAsJob as cjAlias } from './jobs.ts'; export { cjAlias };",
+    ],
+    ['apps/api/src/alerts.ts', "import { changeAsJob as run } from './jobs.js';"],
+    ['apps/api/src/alerts.ts', "import * as jobs from './jobs.ts'; export { jobs };"],
+    ['apps/api/src/media/pipeline.ts', "import * as jobs from '../jobs.js'; export { jobs };"],
+    ['apps/api/src/housekeeping.ts', "import * as db from '@tinnox/db'; export { db };"],
+    ['scripts/lib/provision.ts', "import * as m from '@tinnox/db/migrate'; export { m };"],
+    [
+      'apps/api/src/auth/permissions.ts',
+      "import { issueWritePermit as issue } from '@tinnox/db'; export { issue };",
+    ],
+  ])('flags the alias or namespace in %s: %s', async (path, code) => {
+    expect(await flagged(path, code, SYNTAX)).toEqual([expect.stringMatching(BY_NAME)]);
+  });
+
+  it('leaves alone an alias of another name and a namespace of another module', async () => {
+    const code = [
+      "import { readOrg as read } from '@tinnox/db';",
+      "import * as rows from './rows.ts';",
+      "import * as jobsheet from './jobsheet.ts';",
+      "import { poolAsTx } from '@tinnox/db';",
+      'void read; void rows; void jobsheet; void poolAsTx;',
+    ].join('\n');
+    for (const path of ['apps/api/src/alerts.ts', 'scripts/lib/provision.ts']) {
+      expect(await flagged(path, code, SYNTAX), path).toEqual([]);
+    }
+  });
+
+  it('leaves alone a re-export of other names, and an export of what the file makes', async () => {
+    const code = [
+      "export { readOrg, type OrgId } from '@tinnox/db';",
+      "export * from './rows.ts';",
+      'export async function changeAsJobLater(): Promise<void> {}',
+      "export * from './jobsheet.ts';",
+    ].join('\n');
+    for (const path of ['apps/api/src/alerts.ts', 'scripts/lib/provision.ts']) {
+      expect(await flagged(path, code, SYNTAX), path).toEqual([]);
+    }
+  });
+});
+
+describe('session advisory locks (EAX-06)', { timeout: 30_000 }, () => {
+  const SESSION_LOCK =
+    /^Take a session lock through withSessionLock, so work on other connections stops when the lock is lost \(EAX-06\): withSessionLock\(ctx\.db, name, \(signal\) => work\) from @tinnox\/db \(packages\/db\/src\/session-lock\.ts\)/;
+  // packages/db/src holds the helper and the migration runner's lock.
+  const OUTSIDE_DB = PRODUCT_AND_SCRIPTS.filter((path) => !path.startsWith('packages/db/'));
+
+  it.each([
+    "'SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS ok'",
+    "'SELECT pg_advisory_unlock(hashtextextended($1, 0)) AS ok'",
+    "'SELECT pg_advisory_lock($1)'",
+    "'select PG_ADVISORY_LOCK (1)'",
+    "'SELECT pg_try_advisory_lock_shared(1)'",
+    "'SELECT pg_advisory_unlock_shared(1)'",
+    "'SELECT pg_advisory_unlock_all()'",
+    '`SELECT pg_try_advisory_lock(hashtextextended(${KEY}, 0))`',
+    '`SELECT ${COLUMNS}, pg_advisory_lock(1)`',
+  ])('flags %s', async (text) => {
+    const code = `export const q = ${text};`;
+    expect(await flagged('apps/api/src/routes/fixture.ts', code, SYNTAX)).toEqual([
+      expect.stringMatching(SESSION_LOCK),
+    ]);
+  });
+
+  it('leaves alone a transaction lock and a sentence that names the lock', async () => {
+    const code = [
+      "export const a = 'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))';",
+      "export const b = 'SELECT pg_try_advisory_xact_lock(1) AS got';",
+      "export const c = 'another runner holds the advisory lock; pg_advisory_lock is not taken';",
+      '// SELECT pg_advisory_lock(1)',
+    ].join('\n');
+    expect(await flagged('apps/api/src/routes/fixture.ts', code, SYNTAX)).toEqual([]);
+  });
+
+  it.each(OUTSIDE_DB)('flags it in %s', async (path) => {
+    const code = "export const q = 'SELECT pg_try_advisory_lock(1) AS ok';";
+    expect(await flagged(path, code, SYNTAX)).toEqual([expect.stringMatching(SESSION_LOCK)]);
+  });
+
+  it.each(TESTS)('leaves the test file %s alone', async (path) => {
+    const code = "await holder.query('SELECT pg_advisory_lock(1)');";
+    expect(await flagged(path, code, SYNTAX)).toEqual([]);
+  });
+
+  it.each(['packages/db/src/session-lock.ts', 'packages/db/src/pool.ts', ...ONE_PLACES])(
+    'lets %s take one, and keeps that file the rest of its list',
+    async (path) => {
+      const code = "export const q = 'SELECT pg_try_advisory_lock(1) AS ok';";
+      expect(await flagged(path, code, SYNTAX)).toEqual([]);
+      expect(await flagged(path, 'export const v = a!;', SYNTAX)).toEqual([
+        expect.stringMatching(/^Do not assert a value is not null/),
+      ]);
+    },
+  );
 });
 
 describe('raw audit inserts (AG-3.1, D25)', { timeout: 30_000 }, () => {
@@ -577,8 +848,28 @@ describe('casts to SqlFragment (OTH-12)', { timeout: 30_000 }, () => {
 describe('the unscoped helpers (AG-2.2)', { timeout: 30_000 }, () => {
   const unscoped = (name: string): RegExp =>
     new RegExp(
-      `^'${name}' import from '@tinnox/db' is restricted from being used by a pattern\\. poolAsTx runs without an organisation \\(AG-2\\.2\\)\\. Use readOrg\\(pool, orgId, fn\\) for a read, or changeAsOperator\\(ctx, request, fn\\) from apps/api/src/auth/permissions\\.ts for an operator change .* add this file to UNSCOPED_HELPER_FILES in eslint\\.config\\.js with its reason, and say why in the pull request\\.$`,
+      `^'${name}' import from '@tinnox/db' is restricted from being used by a pattern\\. poolAsTx runs without an organisation \\(AG-2\\.2\\)\\. Use readOrg\\(ctx\\.db, orgId, fn\\) for a read, or changeAsOperator\\(ctx, request, fn\\) from apps/api/src/auth/permissions\\.ts for an operator change .* add this file to UNSCOPED_HELPER_FILES in eslint\\.config\\.js with its reason, and say why in the pull request\\.$`,
     );
+  const CROSS_ORG = [
+    'displayAlertOrgs',
+    'mediaProcessingJobs',
+    'deviceByRegistrationId',
+    'sessionPurgeExpired',
+    'pairingPurge',
+    'heartbeatLogPurge',
+    'membershipByOidcSub',
+  ];
+  const CROSS_ORG_MESSAGE =
+    'is restricted from being used by a pattern\\. This sec\\.\\* wrapper reads or changes every organisation \\(SEC-2\\): it names an OrgId the caller did not prove, or deletes across organisations with no audit row\\. A route reads its own organisation with readOrg\\(ctx\\.db, operatorOf\\(request\\)\\.orgId, fn\\), and a player route resolves its device with verifyDeviceCredential \\(apps/api/src/auth/device\\.ts\\)\\. Only the files of UNSCOPED_HELPER_FILES in eslint\\.config\\.js call these: .* A new caller is added there with its reason, in its pull request\\.$';
+  const crossOrg = (name: string): RegExp =>
+    new RegExp(`^'${name}' import from '@tinnox/db' ${CROSS_ORG_MESSAGE}`);
+  const CROSS_ORG_NAMESPACE = new RegExp(
+    `^\\* import is invalid because ${CROSS_ORG.slice(0, -1)
+      .map((name) => `'${name}'`)
+      .join(
+        ', ',
+      )}, and '${CROSS_ORG.at(-1) ?? ''}' from '@tinnox/db' are restricted from being used by a pattern\\. This sec\\.\\* wrapper reads or changes every organisation \\(SEC-2\\)`,
+  );
   // withoutOrg left this rule in step 20: @tinnox/db no longer exports it, and
   // tinnox/no-legacy-transaction refuses the name (scripts/lib/legacy-transaction-lint.test.ts).
   const BOTH = "import { poolAsTx, readOrg, type Pool } from '@tinnox/db';";
@@ -624,6 +915,8 @@ describe('the unscoped helpers (AG-2.2)', { timeout: 30_000 }, () => {
       expect.stringMatching(
         /^\* import is invalid because 'poolAsTx' from '@tinnox\/db' is restricted from being used by a pattern\. poolAsTx runs without an organisation/,
       ),
+      // ...the sec.* wrappers that work across organisations (SEC-2)...
+      expect.stringMatching(CROSS_ORG_NAMESPACE),
       // A namespace also carries the maker of a WritePermit, which only the role guard imports
       // (step 19; scripts/lib/legacy-transaction-lint.test.ts).
       expect.stringMatching(
@@ -640,6 +933,75 @@ describe('the unscoped helpers (AG-2.2)', { timeout: 30_000 }, () => {
         /^\* import is invalid because 'changePreOrg' from '@tinnox\/db' is restricted from being used by a pattern\. changePreOrg is for a transaction that starts before the organisation is known/,
       ),
     ]);
+  });
+
+  // SEC-2 (group B review): the wrappers that read or change every organisation take any handle,
+  // so only the files of UNSCOPED_HELPER_FILES may import them.
+  it.each(CROSS_ORG)(
+    'refuses %s in a route file, under its name and another, and as a re-export',
+    async (name) => {
+      for (const code of [
+        `import { ${name}, readOrg } from '@tinnox/db';`,
+        `import { ${name} as lookup } from '@tinnox/db';`,
+        `export { ${name} } from '@tinnox/db';`,
+      ]) {
+        for (const path of ['apps/api/src/routes/fixture.ts', 'apps/api/src/routes/displays.ts']) {
+          expect(await flagged(path, code, IMPORTS), `${path}: ${code}`).toEqual([
+            expect.stringMatching(crossOrg(name)),
+          ]);
+        }
+      }
+    },
+  );
+
+  it('refuses them in the offline tools and the other API files too', async () => {
+    const code = "import { deviceByRegistrationId, displayAlertOrgs } from '@tinnox/db';";
+    for (const path of ['scripts/lib/fixture.ts', 'scripts/seed.ts', 'apps/api/src/fixture.ts']) {
+      expect(await flagged(path, code, IMPORTS), path).toEqual([
+        expect.stringMatching(crossOrg('deviceByRegistrationId')),
+        expect.stringMatching(crossOrg('displayAlertOrgs')),
+      ]);
+    }
+  });
+
+  it('lets the files of the list import them, each the one its reason names', async () => {
+    const uses: Record<string, string> = {
+      'apps/api/src/alerts.ts': 'displayAlertOrgs',
+      'apps/api/src/media/pipeline.ts': 'mediaProcessingJobs',
+      'apps/api/src/routes/player.ts': 'deviceByRegistrationId',
+      'apps/api/src/housekeeping.ts': 'sessionPurgeExpired',
+    };
+    const list = await exported('UNSCOPED_HELPER_FILES');
+    for (const [file, name] of Object.entries(uses)) {
+      expect(await flagged(file, `import { ${name} } from '@tinnox/db';`, IMPORTS), file).toEqual(
+        [],
+      );
+      // The reason names what the file reads across organisations, and the file still does.
+      expect(String(list[file]), `${file}: its reason`).toContain(name);
+      expect(source(file), file).toMatch(new RegExp(`\\b${name}\\(`));
+    }
+  });
+
+  it('every importer of a cross-organisation wrapper outside packages/db is on the list or a test', () => {
+    const listed = new Set(ALLOW_LIST);
+    const files = ts.sys
+      .readDirectory(join(repoRoot, 'apps'), ['.ts'], ['**/node_modules/**'], ['**/*'])
+      .concat(ts.sys.readDirectory(join(repoRoot, 'scripts'), ['.ts'], [], ['**/*']))
+      .map((file) => file.slice(repoRoot.length + 1))
+      .filter((file) => !/\.test(-support)?\.ts$|(^|\/)test\//.test(file));
+    const importers = files.filter((file) => {
+      const imports = [...source(file).matchAll(/import\s*\{([^}]*)\}\s*from\s*'@tinnox\/db';/g)]
+        .map((match) => match[1] ?? '')
+        .join(',');
+      return CROSS_ORG.some((name) => new RegExp(`\\b${name}\\b`).test(imports));
+    });
+    expect(importers.length).toBeGreaterThan(0);
+    for (const file of importers) {
+      expect(
+        listed.has(file),
+        `${file} imports a cross-organisation wrapper but is not in UNSCOPED_HELPER_FILES`,
+      ).toBe(true);
+    }
   });
 
   it('leaves the scoped openers and the rest of the entry alone', async () => {
@@ -766,7 +1128,7 @@ describe('newOrgId (D25)', { timeout: 30_000 }, () => {
 
 describe('the entries of @tinnox/db (AG-1.10)', { timeout: 30_000 }, () => {
   const MIGRATE =
-    /^'@tinnox\/db\/migrate' import is restricted from being used by a pattern\. @tinnox\/db\/migrate is for the offline tools that connect as tinnox_migrator: .* The API holds only the tinnox_app connection: use createPool, readOrg, changeOrg \(through changeAsOperator in apps\/api\/src\/auth\/permissions\.ts\) and the typed sec\.\* wrappers from @tinnox\/db\./;
+    /^'@tinnox\/db\/migrate' import is restricted from being used by a pattern\. @tinnox\/db\/migrate is for the offline tools that connect as tinnox_migrator: .* The API holds only the tinnox_app connection, as the Database of createDatabase \(AppContext\.db\): use readOrg, changeOrg \(through changeAsOperator in apps\/api\/src\/auth\/permissions\.ts\) and the typed sec\.\* wrappers from @tinnox\/db\./;
   const TESTING =
     /^'@tinnox\/db\/testing' import is restricted from being used by a pattern\. @tinnox\/db\/testing is for test files only\. Outside a test, open the transaction with readOrg or changeOrg from @tinnox\/db \(an operator route calls changeAsOperator\(ctx, request, fn\) from apps\/api\/src\/auth\/permissions\.ts\), or with changePreOrg while a credential is still being resolved to its organisation \(the files of PRE_ORG_CHANGE_FILES in eslint\.config\.js\)\./;
   const importOf = (specifier: string) => `import { x } from '${specifier}';`;

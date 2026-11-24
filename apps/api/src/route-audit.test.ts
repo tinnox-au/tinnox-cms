@@ -125,7 +125,7 @@ async function builtApp(): Promise<FastifyInstance> {
     OIDC_POST_LOGOUT_REDIRECT_URI: 'http://localhost:5173/',
   });
   // Registering the routes reads the configuration only; nothing else here is ever called.
-  const ctx = { config, pool: {}, now: () => new Date(0), rateLimitScale: 1 } as AppContext;
+  const ctx = { config, db: {}, now: () => new Date(0), rateLimitScale: 1 } as AppContext;
   return buildApp(ctx, { logger: false });
 }
 
@@ -224,7 +224,7 @@ describe('the statements of the changes with no operator behind them (D3)', () =
     );
   });
 
-  it('grants each write the step 20 ruling leaves unaudited to what makes it, and to nothing else (DEC-38, CMS-36)', () => {
+  it('grants each write step 20 kept unaudited as built to what makes it, and to nothing else (open on CMS-36)', () => {
     // Who may say unaudited(reason) for a write that changed something: the pairing routes for
     // the expiry mark of sec.pairing_create and sec.pairing_poll, the alert check for its silent
     // close. The seed's reason is granted by no table: only by the offline permit

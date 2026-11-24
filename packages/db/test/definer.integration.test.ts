@@ -6,8 +6,8 @@
  * tests/integration/provision-member.test.ts.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { Pool, PreOrgTx } from '../src/index.ts';
-import { withOrg, withoutOrg, withResolvedOrg } from '../src/testing.ts';
+import type { PreOrgTx } from '../src/index.ts';
+import { withOrg, withoutOrg, withResolvedOrg, type Pool } from '../src/testing.ts';
 import { asDefiner, connectMigrator, type MigratorPool } from '../src/migrate.ts';
 import {
   appPool,

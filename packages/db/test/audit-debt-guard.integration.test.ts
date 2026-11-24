@@ -9,7 +9,6 @@ import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
-  createPool,
   heartbeatLogPurge,
   loginStatePut,
   loginStateTake,
@@ -24,7 +23,6 @@ import {
   sessionRevoke,
   sessionRevokeUnaudited,
   type OrgTx,
-  type Pool,
 } from '../src/index.ts';
 import { readSchemaFacts, schemaInvariantProblems } from '../src/schema-invariants.ts';
 import {
@@ -39,6 +37,9 @@ import {
   withOrg,
   withoutOrg,
   withResolvedOrg,
+  createPool,
+  type Pool,
+  databaseOn,
 } from '../src/testing.ts';
 import {
   appPool,
@@ -227,7 +228,7 @@ describe('the audit-debt guard refuses a change with no audit row (D3)', () => {
 
   it('refuses a statement that commits on its own: the session revoked with no audit row', async () => {
     const idHash = await newSession();
-    const message = await refusalOf(sessionRevokeUnaudited(judged, idHash));
+    const message = await refusalOf(sessionRevokeUnaudited(databaseOn(judged), idHash));
     expect(message).toContain('changed public.session (UPDATE) as tinnox_app');
     // The same revocation with its audit row.
     await withoutOrg(judged, async (tx) => {
@@ -283,24 +284,24 @@ describe('what D3 exempts owes nothing', () => {
       ]);
     });
     // The purge of that history, in a statement of its own as housekeeping sends it.
-    expect(await heartbeatLogPurge(poolAsTx(judged), 3600)).toBeGreaterThanOrEqual(1);
+    expect(await heartbeatLogPurge(poolAsTx(databaseOn(judged)), 3600)).toBeGreaterThanOrEqual(1);
   });
 
   it('login state, put and taken', async () => {
     const stateHash = hash();
-    await loginStatePut(poolAsTx(judged), {
+    await loginStatePut(poolAsTx(databaseOn(judged)), {
       stateHash,
       codeVerifier: 'v'.repeat(43),
       nonce: 'n'.repeat(43),
       returnTo: null,
       ttlSeconds: 60,
     });
-    expect(await loginStateTake(poolAsTx(judged), stateHash)).not.toBeNull();
+    expect(await loginStateTake(poolAsTx(databaseOn(judged)), stateHash)).not.toBeNull();
   });
 
   it('session activity: last_seen_at alone', async () => {
     const idHash = await newSession();
-    expect(await sessionByIdHash(poolAsTx(judged), idHash, 3600)).not.toBeNull();
+    expect(await sessionByIdHash(poolAsTx(databaseOn(judged)), idHash, 3600)).not.toBeNull();
   });
 
   it('the wrong-attempt counter of a pairing poll, but not the attempt that locks the session', async () => {
@@ -328,16 +329,16 @@ describe('what D3 exempts owes nothing', () => {
       `UPDATE public.pairing_session SET created_at = now() - interval '2 hours' WHERE id = $1`,
       [pairing.id],
     );
-    expect(await sessionPurgeExpired(poolAsTx(judged))).toBeGreaterThanOrEqual(1);
-    expect(await pairingPurge(poolAsTx(judged), 3600)).toBeGreaterThanOrEqual(1);
+    expect(await sessionPurgeExpired(poolAsTx(databaseOn(judged)))).toBeGreaterThanOrEqual(1);
+    expect(await pairingPurge(poolAsTx(databaseOn(judged)), 3600)).toBeGreaterThanOrEqual(1);
   });
 });
 
-// The step 20 ruling (DEC-38) keeps two writes unaudited as they are today, each named by a
+// Step 20 kept as built two writes unaudited as they are today, each named by a
 // reason of UNAUDITED_REASONS; whether they are audited is open (CMS-36). The guard does not take
 // a declared reason's word: EXEMPT_SHAPES lets through the shape of today's write, and these
 // cases show it is that narrow, the neighbouring writes on the same tables still refused.
-describe('the writes the step 20 ruling leaves unaudited owe nothing, in their shape only (DEC-38, CMS-36)', () => {
+describe('the writes step 20 kept unaudited as built owe nothing, in their shape only (open on CMS-36)', () => {
   const status = async (id: string): Promise<string | undefined> => {
     const [row] = await asDefiner<{ status: string }>(
       migrator,
@@ -491,9 +492,19 @@ describe('the writes the step 20 ruling leaves unaudited owe nothing, in their s
     // tinnox_app has no privilege on the table, so a throwaway function of tinnox_definer makes
     // the write: an expiry alone, as the pairing functions make it, or one that also changes the
     // client key. It is dropped before the test ends, so no later invariant check sees it.
-    await migrator.query(
-      `BEGIN;
-       SET LOCAL ROLE tinnox_definer;
+    // The shared migrator client is rolled back when a statement fails, so the later tests of
+    // this file report their own outcome, not "current transaction is aborted" (TST-8).
+    const definerDdl = async (ddl: string): Promise<void> => {
+      try {
+        await migrator.query(`BEGIN; SET LOCAL ROLE tinnox_definer; ${ddl} RESET ROLE; COMMIT`);
+      } catch (error) {
+        await migrator.query('ROLLBACK');
+        throw error;
+      }
+    };
+    // IF EXISTS: one left by an attempt that was killed before its DROP does not fail this one.
+    await definerDdl(
+      `DROP FUNCTION IF EXISTS sec.guard_probe_expire(uuid, boolean);
        CREATE FUNCTION sec.guard_probe_expire(p_id uuid, p_touch boolean) RETURNS void
          LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
          UPDATE public.pairing_session
@@ -502,9 +513,7 @@ describe('the writes the step 20 ruling leaves unaudited owe nothing, in their s
          WHERE id = p_id
        $$;
        REVOKE ALL ON FUNCTION sec.guard_probe_expire(uuid, boolean) FROM PUBLIC;
-       GRANT EXECUTE ON FUNCTION sec.guard_probe_expire(uuid, boolean) TO tinnox_app;
-       RESET ROLE;
-       COMMIT`,
+       GRANT EXECUTE ON FUNCTION sec.guard_probe_expire(uuid, boolean) TO tinnox_app;`,
     );
     const expire = async (id: string, touch: boolean): Promise<void> => {
       const client = await judged.connect();
@@ -527,13 +536,7 @@ describe('the writes the step 20 ruling leaves unaudited owe nothing, in their s
       expect(touching).toContain('public.pairing_session (UPDATE)');
       expect(await status(touched.id)).toBe('pending');
     } finally {
-      await migrator.query(
-        `BEGIN;
-         SET LOCAL ROLE tinnox_definer;
-         DROP FUNCTION sec.guard_probe_expire(uuid, boolean);
-         RESET ROLE;
-         COMMIT`,
-      );
+      await definerDdl('DROP FUNCTION IF EXISTS sec.guard_probe_expire(uuid, boolean);');
     }
   });
 });
@@ -564,11 +567,11 @@ describe('whom the guard judges', () => {
       async () => {
         // Another table is judged as ever.
         await refusalOf(withOrg(judged, org.orgId, (tx) => newFolder(tx, 'Still judged')));
-        return sessionRevokeUnaudited(judged, idHash);
+        return sessionRevokeUnaudited(databaseOn(judged), idHash);
       },
     );
     expect(ended).toBe(true);
-    await refusalOf(sessionRevokeUnaudited(judged, await newSession()));
+    await refusalOf(sessionRevokeUnaudited(databaseOn(judged), await newSession()));
     await expect(
       whileUnauditedAllowed(migratorUrl(), 'session', 'because', () => Promise.resolve()),
     ).rejects.toThrow(/needs the decision that leaves this path unaudited/);

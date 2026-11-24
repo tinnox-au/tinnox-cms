@@ -9,6 +9,7 @@
  * In a file of its own because it ends every session in the test database. Files run one
  * at a time, and every other file signs in again in its own beforeAll.
  */
+import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import pg from 'pg';
@@ -58,19 +59,28 @@ async function waitForLockWait(pid: number): Promise<void> {
   });
 }
 
-/** A runbook script as psql would run it, with its `-v name=value` variables filled in. */
-async function runScript(
+/** The text of a runbook script with its `-v name=value` variables filled in, as psql does. */
+async function scriptText(
   client: pg.Client,
   name: string,
   variables: Record<string, string> = {},
-): Promise<void> {
+): Promise<string> {
   let script = await readFile(join(repoRoot, 'scripts', name), 'utf8');
   for (const [variable, value] of Object.entries(variables)) {
     const placeholder = `:'${variable}'`;
     if (!script.includes(placeholder)) throw new Error(`${name} has no ${placeholder}`);
     script = script.split(placeholder).join(client.escapeLiteral(value));
   }
-  await client.query(script);
+  return script;
+}
+
+/** A runbook script as psql would run it, sent as one message. */
+async function runScript(
+  client: pg.Client,
+  name: string,
+  variables: Record<string, string> = {},
+): Promise<void> {
+  await client.query(await scriptText(client, name, variables));
 }
 
 /** The member's cut-off and the membership.sessions_end rows of the incident script. */
@@ -224,6 +234,67 @@ describe('signing every operator out', () => {
       // Ending the holder releases the row, so the script finishes before its client ends.
       await holder.end();
       await running?.catch(() => undefined);
+      await script.end();
+    }
+  });
+
+  it('the incident script changes nothing for a subject with no membership', async () => {
+    const bystander = await createOrg('Revoke one, unknown subject');
+    const session = await signIn(t, bystander);
+    const count = () =>
+      asSuperuser(async (client) => {
+        const { rows } = await client.query<{ n: string }>(
+          `SELECT count(*) AS n FROM public.audit_event
+           WHERE detail->>'reason' = 'incident_revocation'`,
+        );
+        return Number(rows[0]?.n);
+      });
+    const before = await count();
+
+    await asSuperuser((client) =>
+      runScript(client, 'revoke-subject-sessions.sql', { subject: `nobody-${randomUUID()}` }),
+    );
+
+    expect(await count()).toBe(before);
+    expect(await cutOff(bystander)).toEqual({ cutOff: null, events: [] });
+    expect((await session.fetch('/api/displays')).status).toBe(200);
+  });
+
+  it('the incident script stops, with nothing changed, when the member is provisioned between its lookup and its call (RFX-01)', async () => {
+    const org = await createOrg('Revoke one, provisioned meanwhile');
+    const subject = `provisioned-meanwhile-${randomUUID()}`;
+    const script = await superuserClient();
+    try {
+      // Statement by statement, as psql sends a file: the lookup, then the call.
+      const text = await scriptText(script, 'revoke-subject-sessions.sql', { subject });
+      const call = text.indexOf('WITH cut AS');
+      if (call === -1) throw new Error('the script no longer calls the function in "WITH cut AS"');
+      await script.query(text.slice(0, call));
+      const added = await asSuperuser(async (client) => {
+        const { rows } = await client.query<{ id: string }>(
+          `INSERT INTO public.membership (org_id, oidc_sub, role) VALUES ($1, $2, 'editor')
+           RETURNING id`,
+          [org.orgId, subject],
+        );
+        return rows[0]?.id;
+      });
+      if (added === undefined) throw new Error('the member was not added');
+
+      // The lookup found nobody, so no organisation is set: the function refuses, and psql
+      // (ON_ERROR_STOP) ends there. It never stamps a row it did not lock.
+      await expect(script.query(text.slice(call))).rejects.toMatchObject({
+        code: '42501',
+        message: 'session_revoke_membership requires an organisation context',
+      });
+      await script.query('ROLLBACK');
+
+      expect(await cutOff({ ...org, membershipId: added })).toEqual({ cutOff: null, events: [] });
+      // Run again, it finds the member.
+      await runScript(script, 'revoke-subject-sessions.sql', { subject });
+      const again = await cutOff({ ...org, membershipId: added });
+      expect(again.cutOff).toBeInstanceOf(Date);
+      expect(again.events).toEqual([incidentCutOff({ ...org, membershipId: added })]);
+    } finally {
       await script.end();
     }
   });

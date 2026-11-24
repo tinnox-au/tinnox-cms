@@ -3,14 +3,17 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
-import { createPool, violatedConstraint, type OrgId, type Pool } from '../src/index.ts';
-import { testOrgId, unjudgedSql } from '../src/testing.ts';
+import { violatedConstraint, type OrgId } from '../src/index.ts';
+import { testOrgId, unjudgedSql, createPool, type Pool } from '../src/testing.ts';
 
 // The helper that opens a real transaction for the wrappers and the audit writer that take a
 // `PreOrgTx` (D2), the one that names a test's organisation, and the one that lets a test send
 // its own statements where no organisation is set. They live in the package's testing entry, so
 // tests outside this package use the same ones.
 export { inTx, testOrgId, withNoOrgSet } from '../src/testing.ts';
+// Two connections in open transactions, and whether one side still waits on the other's lock:
+// the pattern of a two-connection test (SCX-05).
+export { stillWaiting, twoTransactions } from '../src/testing.ts';
 
 const envFile = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '.env');
 if (existsSync(envFile)) process.loadEnvFile(envFile);
@@ -327,39 +330,6 @@ export async function asSuperuser<T>(work: (client: pg.Client) => Promise<T>): P
     return await work(client);
   } finally {
     await client.end();
-  }
-}
-
-/** Resolves to true when the promise is still pending after a short wait. */
-export async function stillWaiting(promise: Promise<unknown>): Promise<boolean> {
-  let settled = false;
-  const mark = () => {
-    settled = true;
-  };
-  promise.then(mark, mark);
-  await new Promise((resolve) => setTimeout(resolve, 300));
-  return !settled;
-}
-
-/** Two tinnox_app connections of `pool`, each in an open transaction for `orgId`. */
-export async function twoTransactions(
-  pool: Pool,
-  orgId: string,
-  work: (first: pg.PoolClient, second: pg.PoolClient) => Promise<void>,
-): Promise<void> {
-  const first = await pool.connect();
-  const second = await pool.connect();
-  try {
-    for (const client of [first, second]) {
-      await client.query('BEGIN');
-      await client.query("SELECT set_config('app.org_id', $1, true)", [orgId]);
-    }
-    await work(first, second);
-  } finally {
-    for (const client of [first, second]) {
-      await client.query('ROLLBACK').catch(() => undefined);
-      client.release();
-    }
   }
 }
 

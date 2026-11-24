@@ -26,8 +26,10 @@ import { createRule } from './create-rule.ts';
 // changeOrg and changePreOrg of packages/db/src/change.ts, changeOrgAsMigrator of the migrate
 // entry), and the API's wrappers around them (apps/api/src/auth/permissions.ts, refusal.ts and
 // device.ts there, apps/api/src/jobs.ts). withOrg, withoutOrg and withResolvedOrg are for tests
-// only since step 20 ('@tinnox/db/testing'), which this rule reads too. A new wrapper joins this
-// list.
+// only since step 20 ('@tinnox/db/testing'), which this rule reads too. withSessionLock
+// (packages/db/src/session-lock.ts) and ping (packages/db/src/database.ts) are no transactions,
+// but each checks out a connection of its own, which the outer transaction makes wait while it
+// holds another: the pool-exhaustion half of U-3 (CHK-3). A new wrapper joins this list.
 const OPENERS: ReadonlySet<string> = new Set([
   'withOrg',
   'withoutOrg',
@@ -43,23 +45,33 @@ const OPENERS: ReadonlySet<string> = new Set([
   'changeAsJob',
   'changeOrgAsMigrator',
   'recordRefusal',
+  'withSessionLock',
+  'ping',
 ]);
 
-// The openers that take no callback: a function passed to one of them is not inside a transaction.
+// The openers that take no callback, or whose callback runs in no transaction (the work of
+// withSessionLock opens its own): a function passed to one of them is not inside a transaction.
 const WITHOUT_CALLBACK: ReadonlySet<string> = new Set([
   'poolAsTx',
   'auditStandalone',
   'sessionRevokeUnaudited',
   'recordRefusal',
+  'withSessionLock',
+  'ping',
 ]);
 
 // The openers that take the pool and no tx. "Give the helper a tx parameter" does not fit them,
 // so each has a message that names the function doing the same work on the outer tx (plan
 // section 3.4).
-const BY_NAME: ReadonlyMap<string, 'standaloneAudit' | 'unauditedRevoke' | 'refusal'> = new Map([
+const BY_NAME: ReadonlyMap<
+  string,
+  'standaloneAudit' | 'unauditedRevoke' | 'refusal' | 'sessionLock' | 'ping'
+> = new Map([
   ['auditStandalone', 'standaloneAudit'],
   ['sessionRevokeUnaudited', 'unauditedRevoke'],
   ['recordRefusal', 'refusal'],
+  ['withSessionLock', 'sessionLock'],
+  ['ping', 'ping'],
 ]);
 
 // The types of a transaction handle (packages/db/src/tx.ts and definer.ts): a function that
@@ -178,6 +190,9 @@ export default createRule({
         '{{opener}}() is called inside {{outer}}, where a transaction is already open. This opens a second transaction on another connection that commits independently. End the session on the outer tx instead: sessionRevoke(tx, idHash) (from @tinnox/db), with its audit row on the same tx. sessionRevokeUnaudited is only for the sign-out fallback: call it after the outer call has returned or thrown.',
       refusal:
         '{{opener}}() is called inside {{outer}}, where a transaction is already open. This opens a second transaction on another connection that commits independently. A refusal that commits with what the outer transaction wrote is returned from it, as { value: refuse(error), audit: event } (refuse from apps/api/src/db-helpers.ts): the wrapper writes the event there. recordRefusal is for a refusal that changed nothing: throw the refusal, and call it after the outer call has rolled back (SCR-32).',
+      sessionLock:
+        '{{opener}}() is called inside {{outer}}, where a transaction is already open. It checks out a connection of its own and holds it while the outer transaction holds another, so with every connection held that way the pool never answers. Take the lock first and open the transactions inside its work, as runDisplayAlerts in apps/api/src/alerts.ts does: withSessionLock(ctx.db, name, (signal) => readOrg(...)). A lock that only guards the statements of this transaction is pg_advisory_xact_lock on the outer tx.',
+      ping: '{{opener}}() is called inside {{outer}}, where a transaction is already open. It sends its statement on another connection of the pool, which waits while the outer transaction holds one. Call ping(ctx.db) from the liveness probe, outside any transaction; inside one, the statements of the outer tx already show that the database answers.',
     },
   },
   create(context) {

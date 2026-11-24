@@ -108,10 +108,9 @@ export type NoAuditReason = keyof typeof NO_AUDIT_REASONS;
  *
  * Two reasons say "this was changed and deliberately not audited" because D3 says so
  * (telemetry, a counter under its threshold). Three more record what three writes do today,
- * by the ruling of adoption plan step 20 (made under the plan's delegation, DEC-38) that the
- * refactor does not change what is audited: `alert_closed_silently`, `pairing_expired_by_time`
- * and `development_seed`. They are not a judgement that the writes need no audit row; that is
- * still open (status card CMS-36 for the first two). A decision to audit one deletes its
+ * kept as built at adoption plan step 20 and open on status card CMS-36: `alert_closed_silently`,
+ * `pairing_expired_by_time` and `development_seed`. They are not a judgement that the writes need
+ * no audit row; that is still open. A decision to audit one deletes its
  * reason here, and its job or route states the action instead. Any other path like that has
  * no reason to give until it is decided: it is audited, or this list gains its reason.
  */
@@ -122,18 +121,18 @@ export const UNAUDITED_REASONS = {
     'this run repeated a request that an earlier one already carried out under the same Idempotency-Key: it returns what that one made and writes nothing; the earlier run wrote the audit row',
   telemetry: NO_AUDIT_REASONS.telemetry,
   counter_under_threshold:
-    'this run only counted a refused attempt that is still under its threshold: the wrong polling token of a pairing poll. The attempt that reaches the threshold locks the session and is audited as pairing.lock (D3)',
-  // Today's behaviour, kept by the step 20 ruling; CMS-36 decides whether it is audited instead.
+    'this run only counted a wrong polling token of a pairing poll that did not lock the session (counted only: a session that is already expired, completed or cancelled is counted too, without ever being locked). The attempt that reaches the threshold on a pending or claimed session locks it and is audited as pairing.lock (D3)',
+  // Today's behaviour, kept as built at step 20; CMS-36 decides whether it is audited instead.
   // One reason per write, not one for "ended by time or by no one", so a search for either
   // finds that write alone and a decision on one deletes only its own reason.
   alert_closed_silently:
     'this run of the alert check closed an offline episode without an e-mail (the screen reports again with the back-online e-mail off, alerts were switched off, or the screen was unpaired or re-paired): the DELETE on display_alert, with no actor. Recorded as today (docs/portal-v2/stage-c-alerts.md section 9 rows 7 and 22); whether it is audited is open (CMS-36)',
-  // Today's behaviour, kept by the step 20 ruling; CMS-36 decides whether it is audited instead.
+  // Today's behaviour, kept as built at step 20; CMS-36 decides whether it is audited instead.
   pairing_expired_by_time:
-    'this run marked expired a pairing session whose time had passed: sec.pairing_create does it for every pending session, sec.pairing_poll for the one it polls. Only the status changes, by the passing of time and with no actor. Recorded as today; whether it is audited is open (CMS-36)',
-  // Today's behaviour, kept by the step 20 ruling; a later decision may audit the seed instead.
+    'this run may have marked expired a pairing session whose time had passed (the run can have found none): sec.pairing_create does it for every pending session, sec.pairing_poll for the one it polls. Only the status changes, by the passing of time and with no actor. Recorded as today; whether it is audited is open (CMS-36)',
+  // Today's behaviour, kept as built at step 20; a later decision may audit the seed instead.
   development_seed:
-    'this run of the development seed (scripts/seed.ts) wrote synthetic development data: its organisations, sites and members, under fixed ids. It runs as tinnox_migrator against a development or test database, never production. Recorded as today; a later decision may audit it',
+    'this run of the development seed (scripts/seed.ts) wrote synthetic development data: its organisations, sites and members, under fixed ids. It is meant for a development or test database, as tinnox_migrator; nothing checks the target, so it must not be pointed at production. Recorded as today; a later decision may audit it',
 } as const;
 export type UnauditedReason = keyof typeof UNAUDITED_REASONS;
 

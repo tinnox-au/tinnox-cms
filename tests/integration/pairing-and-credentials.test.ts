@@ -83,7 +83,7 @@ describe('pairing codes and device credentials', () => {
     const late = await claim(alice, display.id, pairing.code);
     expect(late.status).toBeGreaterThanOrEqual(400);
     expect(late.status).toBeLessThan(500);
-    // The poll marks the session expired and writes no audit row, as today: the step 20 ruling
+    // The poll marks the session expired and writes no audit row, as today: step 20 kept it as built and
     // names it pairing_expired_by_time, and the audit-debt guard lets that shape through
     // (EXEMPT_SHAPES; whether it is audited is open, CMS-36).
     const poll = await pollPairing(t, pairing);

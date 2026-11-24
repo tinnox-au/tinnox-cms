@@ -96,7 +96,7 @@ interface SeededRows {
 /**
  * Counts the seed's rows as the superuser, who bypasses row-level security. The audit rows are
  * every row of this database's audit_event, scoped or not: the seed writes none (development_seed,
- * the D3 ruling of step 20), and nothing else writes here.
+ * kept as built at step 20), and nothing else writes here.
  */
 async function seededRows(): Promise<SeededRows> {
   const client = new pg.Client({ connectionString: superuserUrl(SEED_DB).toString() });

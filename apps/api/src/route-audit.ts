@@ -133,7 +133,7 @@ export const OTHER_ROUTE_AUDIT: Readonly<Record<string, OtherRouteAudit>> = Obje
 
   // sec.pairing_create first marks expired every pending session whose time has passed, also
   // when this request is then rate-limited and creates none: that mark is not audited, as
-  // today (pairing_expired_by_time; the step 20 ruling, CMS-36).
+  // today (pairing_expired_by_time; kept as built at step 20, open on CMS-36).
   [`POST ${ROUTES.playerPairing}`]: other(
     audits('pairing.create'),
     NO_GUARD,
@@ -142,7 +142,7 @@ export const OTHER_ROUTE_AUDIT: Readonly<Record<string, OtherRouteAudit>> = Obje
   // A GET that changes state: the poll that collects the credential completes the pairing, and
   // the wrong polling token that reaches the limit locks the session. A wrong token under the
   // limit is only counted, and that count is not audited (D3). A poll of a session whose time
-  // has passed marks it expired, unaudited as today (the step 20 ruling, CMS-36).
+  // has passed marks it expired, unaudited as today (kept as built at step 20, open on CMS-36).
   [`GET ${ROUTES.playerPairingPollPattern}`]: other(
     audits('pairing.complete', 'pairing.lock'),
     NO_GUARD,
@@ -199,7 +199,7 @@ export const JOB_AUDIT = Object.freeze({
     file: 'apps/api/src/alerts.ts',
     audit: audits('display.offline_alert', 'display.online_alert'),
     // An episode closed without an e-mail is not audited, as today (alert_closed_silently; the
-    // step 20 ruling, CMS-36; docs/portal-v2/stage-c-alerts.md section 9 rows 7 and 22).
+    // kept as built at step 20, open on CMS-36; docs/portal-v2/stage-c-alerts.md section 9 rows 7 and 22).
     grants: Object.freeze(['alert_closed_silently'] as const),
   }),
   media_pipeline: Object.freeze({

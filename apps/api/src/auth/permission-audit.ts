@@ -60,8 +60,11 @@ function guardOf(ctx: AppContext): AuthFailureGuard {
 
 /**
  * Writes the `security.permission_denied` row of a refused state-changing request, in its own
- * transaction. Refused reads are not recorded. A failure is logged and swallowed: the refusal
- * stands whether or not it could be recorded.
+ * transaction. Refused reads are not recorded. Any failure is logged and swallowed, a refusal
+ * of the row itself included because the route's refusal statement does not state it (a
+ * programming error that no test or guard sees, since nothing changed; AUD-9): the refusal
+ * stands whether or not it could be recorded. Every caller records only an unsafe method, and
+ * OPERATOR_GUARD_AUDIT (apps/api/src/route-audit.ts) states the row for all of them.
  */
 export async function recordPermissionDenied(
   ctx: AppContext,

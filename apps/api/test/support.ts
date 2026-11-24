@@ -35,15 +35,23 @@ import {
   type ScheduleEventInput,
 } from '@tinnox/contracts';
 import {
-  createPool,
+  anyOf,
+  MEDIA_PROCESSING_JOBS_CAP,
   mediaProcessingJobs,
   poolAsTx,
   sessionCreate,
   sha256,
   type OrgId,
-  type Pool,
 } from '@tinnox/db';
-import { testOrgId, unjudgedSql, withOrg, withoutOrg } from '@tinnox/db/testing';
+import {
+  testOrgId,
+  unjudgedSql,
+  withOrg,
+  withoutOrg,
+  createPool,
+  type Pool,
+  databaseOn,
+} from '@tinnox/db/testing';
 import { createDeliveryRegistry } from '@tinnox/delivery';
 import { LocalObjectStorage } from '@tinnox/storage';
 import type { FastifyInstance } from 'fastify';
@@ -142,7 +150,10 @@ export interface TestApp {
   readonly app: FastifyInstance;
   readonly ctx: AppContext;
   readonly config: AppConfig;
-  /** The application's own pool: every route, the media pipeline and the alert check use it. */
+  /**
+   * The application's own pool: every route, the media pipeline and the alert check use it,
+   * through `ctx.db`, the handle `databaseOn(pool)` of @tinnox/db/testing gave it.
+   */
   readonly pool: Pool;
   /**
    * A second pool as tinnox_app, for SQL a test writes itself: arranging rows no route makes,
@@ -208,6 +219,8 @@ export async function startTestApp(
     max: 12,
   });
   const pool = options.wrapPool?.(created) ?? created;
+  // What the API holds in place of the pool (AppContext.db), as createDatabase gives main.ts.
+  const db = databaseOn(pool);
   const testSqlPool = createPool({
     connectionString: config.databaseUrl,
     applicationName: unjudgedSql(
@@ -219,7 +232,7 @@ export async function startTestApp(
   const silent = { info: () => undefined, warn: () => undefined, error: () => undefined };
   const media = new MediaPipeline({
     jobsDir,
-    pool,
+    db,
     storage,
     limits: config.limits,
     logger: silent,
@@ -235,7 +248,7 @@ export async function startTestApp(
   };
   const ctx: AppContext = {
     config,
-    pool,
+    db,
     storage,
     delivery: createDeliveryRegistry({
       browser: {
@@ -820,7 +833,9 @@ export async function settleStrayMediaJobs(pool: Pool): Promise<number> {
   let settled = 0;
   for (;;) {
     // Through the typed wrapper: the organisation it names is what withOrg takes.
-    const jobs = await mediaProcessingJobs(poolAsTx(pool), 5000);
+    const jobs = anyOf(
+      await mediaProcessingJobs(poolAsTx(databaseOn(pool)), MEDIA_PROCESSING_JOBS_CAP),
+    );
     if (jobs.length === 0) return settled;
     const byOrg = new Map<OrgId, string[]>();
     for (const job of jobs) byOrg.set(job.orgId, [...(byOrg.get(job.orgId) ?? []), job.mediaId]);
@@ -889,8 +904,11 @@ export const isRoleCheck = (text: string): boolean =>
   text.includes('FROM membership WHERE id = $1 AND org_id = app_org_id() FOR SHARE');
 
 export interface StatementHold {
-  /** Resolves when the held statement arrives; it is not sent until `release`. */
-  readonly reached: Promise<void>;
+  /**
+   * Resolves when the held statement arrives, with the backend pid of the connection that sent
+   * it (for waitForLockWaiters of @tinnox/db/testing); it is not sent until `release`.
+   */
+  readonly reached: Promise<number>;
   release(): void;
 }
 
@@ -915,7 +933,7 @@ export function statementHolds(): StatementHolds {
   };
   let armed: {
     matches: (text: string) => boolean;
-    reached: () => void;
+    reached: (pid: number) => void;
     released: Promise<void>;
   } | null = null;
   return {
@@ -932,7 +950,10 @@ export function statementHolds(): StatementHolds {
                   const hold = armed;
                   if (hold !== null && typeof text === 'string' && hold.matches(text)) {
                     armed = null;
-                    hold.reached();
+                    // node-postgres keeps the backend's pid from the connection handshake.
+                    const pid: unknown = Reflect.get(real, 'processID');
+                    if (typeof pid !== 'number') throw new Error('the held connection has no pid');
+                    hold.reached(pid);
                     await hold.released;
                   }
                   return real.query(text, values);
@@ -943,9 +964,9 @@ export function statementHolds(): StatementHolds {
         },
       }),
     hold(matches) {
-      let reached: () => void = () => undefined;
+      let reached: (pid: number) => void = () => undefined;
       let release: () => void = () => undefined;
-      const atStatement = new Promise<void>((resolve) => {
+      const atStatement = new Promise<number>((resolve) => {
         reached = resolve;
       });
       const released = new Promise<void>((resolve) => {
@@ -965,7 +986,7 @@ export function checkAlerts(
   const mail = overrides.mail ?? t.ctx.mail;
   if (mail === null) throw new Error('this test app has no mailer');
   return runDisplayAlerts({
-    pool: t.pool,
+    db: t.ctx.db,
     now: t.ctx.now(),
     mail,
     portalOrigin: t.config.portalOrigin,

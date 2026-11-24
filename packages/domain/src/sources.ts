@@ -1,6 +1,6 @@
 import { contentTotalMessage } from './capability.ts';
-import type { PlanPublicationResult } from './manifest.ts';
-import type { PublicationDraft, PublicationValidator, PublishIssue } from './types.ts';
+import type { PlanPublicationResult, PlannedPublication } from './manifest.ts';
+import type { PublicationValidator, PublishIssue } from './types.ts';
 
 /**
  * One playlist for the target display: its name, its number of items, and `plan`, which plans
@@ -23,7 +23,7 @@ export interface PlanSource {
 }
 
 export type PlannedSources =
-  | { readonly ok: true; readonly drafts: readonly PublicationDraft[] }
+  | { readonly ok: true; readonly drafts: readonly PlannedPublication[] }
   | { readonly ok: false; readonly issues: readonly PublishIssue[] };
 
 /**
@@ -64,7 +64,7 @@ export function planSources(
 
   // shortcut: a display-level refusal (canvas, content rectangle) is repeated once per playlist; the browser route never raises one. De-duplicate when a route that can ships.
   const issues: PublishIssue[] = [];
-  const drafts: PublicationDraft[] = [];
+  const drafts: PlannedPublication[] = [];
   for (const { source, playlist } of found) {
     if (playlist === undefined) {
       issues.push({

@@ -48,11 +48,11 @@ function toPlanRow(assessment: DisplayAssessment): PushPlanRow {
 }
 
 export function registerPushRoutes(app: FastifyInstance, ctx: AppContext): void {
-  const { pool } = ctx;
+  const { db } = ctx;
 
   app.get(ROUTES.push, async (request): Promise<PushPlanResponse> => {
     const session = operatorOf(request);
-    return readOrg(pool, session.orgId, async (tx) => {
+    return readOrg(db, session.orgId, async (tx) => {
       const assessments = await loadPushPlan(tx, ctx);
       return { items: assessments.map(toPlanRow), pendingCount: pendingCount(assessments) };
     });
@@ -162,7 +162,7 @@ export function registerPushRoutes(app: FastifyInstance, ctx: AppContext): void 
 
       // Every id must be a display of this organisation before anything is written.
       // Another organisation's display is invisible here, so it answers like an unknown id.
-      const known = await readOrg(pool, session.orgId, async (tx) => {
+      const known = await readOrg(db, session.orgId, async (tx) => {
         const { rows } = await tx.query<{ id: string }>(
           'SELECT id FROM display WHERE org_id = app_org_id() AND id = ANY($1::uuid[])',
           [displayIds],

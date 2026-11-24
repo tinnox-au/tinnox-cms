@@ -16,6 +16,7 @@ import {
   type FixturePlaylist,
 } from './fixtures.test-support.ts';
 import { buildManifest, type PlanPublicationResult } from './manifest.ts';
+import { markPlanned, type PlannedPublication } from './planned.ts';
 import { buildPublicationDraft } from './playlist.ts';
 import { decidePushState, draftMatchesManifest, firstDraftManifestDifference } from './push.ts';
 import type {
@@ -508,7 +509,7 @@ describe('draftMatchesManifest with a schedule', () => {
   const lunch = { playlistId: ID.listLunch, days: WEEKDAYS, start: '11:30', end: '14:00' };
   const evening = { playlistId: ID.listEvening, days: EVERY_DAY, start: '18:00', end: '24:00' };
   const EVENTS: Events = [lunch, evening];
-  const scheduled = (events: Events = EVENTS, playlists = PLAYLISTS): PublicationDraft => {
+  const scheduled = (events: Events = EVENTS, playlists = PLAYLISTS): PlannedPublication => {
     const plan = planSchedule(playlists, { defaultPlaylistId: ID.listDefault, events });
     if (!plan.ok) throw new Error(`fixture schedule is not publishable: ${plan.issues[0]?.code}`);
     return plan.draft;
@@ -679,7 +680,7 @@ describe('draftMatchesManifest with a layout', () => {
     percent = 15,
     playlists = PLAYLISTS,
     target: DisplayTarget = display(),
-  ): PublicationDraft => {
+  ): PlannedPublication => {
     const plan = planLayout(playlists, bandZones(percent, ID.listDefault, ID.listBand), {
       display: target,
     });
@@ -773,7 +774,10 @@ describe('draftMatchesManifest with a layout', () => {
 });
 
 describe('decidePushState', () => {
-  const ok = (draft: PublicationDraft): PlanPublicationResult => ({ ok: true, draft });
+  const ok = (draft: PublicationDraft): PlanPublicationResult => ({
+    ok: true,
+    draft: markPlanned(draft),
+  });
   const refused: PlanPublicationResult = {
     ok: false,
     issues: [{ index: null, code: 'playlist_empty', message: 'The playlist has no items.' }],

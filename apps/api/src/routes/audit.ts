@@ -65,7 +65,7 @@ export function registerAuditRoutes(app: FastifyInstance, ctx: AppContext): void
     }
     if (query.result !== undefined) conditions.push(sql`result = ${parameter(query.result)}`);
     const where = joinSql(conditions, sql` AND `);
-    return readOrg(ctx.pool, session.orgId, async (tx) => {
+    return readOrg(ctx.db, session.orgId, async (tx) => {
       const { rows } = await tx.query<AuditRow>(
         `SELECT id, occurred_at, actor_type, actor_id, action, object_type, object_id, result, detail
          FROM audit_event

@@ -16,7 +16,13 @@ import {
   type TagDto,
   type TagListResponse,
 } from '@tinnox/contracts';
-import { readOrg, STAGE_A_CONSTRAINTS, violatedConstraint, type OrgReadTx } from '@tinnox/db';
+import {
+  readOrg,
+  STAGE_A_CONSTRAINTS,
+  violatedConstraint,
+  withCountedLimit,
+  type OrgReadTx,
+} from '@tinnox/db';
 import type { FastifyInstance } from 'fastify';
 import { changeAsOperator, requirePermission, tagScopeKey } from '../auth/permissions.ts';
 import { operatorOf } from '../auth/session.ts';
@@ -76,12 +82,12 @@ function isNameTaken(error: unknown): boolean {
 }
 
 export function registerTagRoutes(app: FastifyInstance, ctx: AppContext): void {
-  const { pool } = ctx;
+  const { db } = ctx;
 
   app.get(ROUTES.tags, async (request): Promise<TagListResponse> => {
     const session = operatorOf(request);
     const query = parseInput(TagListQuerySchema, request.query, 'query');
-    return readOrg(pool, session.orgId, async (tx) => {
+    return readOrg(db, session.orgId, async (tx) => {
       const { rows } = await tx.query<TagRow>(
         `SELECT ${TAG_COLUMNS} FROM tag t
          WHERE t.org_id = app_org_id() AND ($1::text IS NULL OR t.scope = $1)
@@ -99,27 +105,37 @@ export function registerTagRoutes(app: FastifyInstance, ctx: AppContext): void {
     let created: TagDto;
     try {
       created = await changeAsOperator(ctx, request, async (tx) => {
-        // One at a time per organisation, so the ceiling below cannot be passed by a burst.
-        await tx.query(
-          "SELECT pg_advisory_xact_lock(hashtextextended('tinnox.tag_count:' || app_org_id()::text, 0))",
+        // One at a time per organisation, so the ceiling cannot be passed by a burst.
+        const id = await withCountedLimit(
+          tx,
+          {
+            lock: 'tag_count',
+            count: async (counting) => {
+              const existing = await counting.query<{ n: string }>(
+                'SELECT count(*) AS n FROM tag WHERE org_id = app_org_id()',
+              );
+              return bigintToNumber(existing.rows[0]?.n ?? 0);
+            },
+            max: ABSOLUTE.maxListItems,
+            whenFull: () => {
+              throw new HttpError(
+                409,
+                'conflict',
+                `The organisation already has ${ABSOLUTE.maxListItems} tags, which is the most it can have. Delete tags that are no longer used.`,
+              );
+            },
+          },
+          async () => {
+            const inserted = await tx.query<{ id: string }>(
+              `INSERT INTO tag (org_id, scope, name, colour) VALUES (app_org_id(), $1, $2, $3)
+               RETURNING id`,
+              [input.scope, input.name, input.colour],
+            );
+            const row = inserted.rows[0];
+            if (row === undefined) throw new Error('tag insert returned no row');
+            return row.id;
+          },
         );
-        const existing = await tx.query<{ n: string }>(
-          'SELECT count(*) AS n FROM tag WHERE org_id = app_org_id()',
-        );
-        if (bigintToNumber(existing.rows[0]?.n ?? 0) >= ABSOLUTE.maxListItems) {
-          throw new HttpError(
-            409,
-            'conflict',
-            `The organisation already has ${ABSOLUTE.maxListItems} tags, which is the most it can have. Delete tags that are no longer used.`,
-          );
-        }
-        const inserted = await tx.query<{ id: string }>(
-          `INSERT INTO tag (org_id, scope, name, colour) VALUES (app_org_id(), $1, $2, $3)
-           RETURNING id`,
-          [input.scope, input.name, input.colour],
-        );
-        const id = inserted.rows[0]?.id;
-        if (id === undefined) throw new Error('tag insert returned no row');
         const dto = await loadTag(tx, id);
         if (dto === null) throw new Error('created tag is not visible');
         return {

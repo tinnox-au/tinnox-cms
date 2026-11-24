@@ -14,6 +14,7 @@ import {
   type AuditStatement,
   type Change,
 } from './change.ts';
+import { registerOwnHandle, type Database } from './database.ts';
 import { errorField } from './error-field.ts';
 import { mintOrgId } from './org-id.ts';
 import type { Pool } from './pool.ts';
@@ -49,8 +50,12 @@ declare const migratorBrand: unique symbol;
  * pool where a MigratorPool is wanted. It does not stop a deliberate cast by itself: lint
  * refuses a cast to MigratorPool outside this file (NO_MIGRATOR_POOL_CAST in eslint.config.js),
  * and what that rule cannot see is left to review.
+ *
+ * It is its own `Database` (adoption plan step 21), so a tool passes it to changePreOrg as the
+ * API passes AppContext.db, and the tool keeps the pool itself, which it ends and which asDefiner
+ * compares with the pool of its transaction. A runtime pool is not one.
  */
-export type MigratorPool = Pool & { readonly [migratorBrand]: true };
+export type MigratorPool = Pool & Database & { readonly [migratorBrand]: true };
 
 /** The pools connectMigrator returned, for what must not run on any other. */
 const checked = new WeakSet<Pool>();
@@ -97,12 +102,13 @@ export async function connectMigrator(
     throw error;
   }
   checked.add(pool);
+  registerOwnHandle(pool);
   return pool as MigratorPool;
 }
 
 /**
  * The statement of the development seed (scripts/seed.ts): it names no audit action, because the
- * seed writes no audit row, as today (the step 20 ruling, DEC-38). It is the one statement
+ * seed writes no audit row, as today (kept as built at step 20). It is the one statement
  * changeOrgAsMigrator grants unaudited('development_seed') to, and it grants nothing else. No
  * table can grant that reason (issueAuditStatement refuses it), so a route, a job or a
  * provisioning command, whose statements come from their tables, never can; and this entry,
@@ -149,7 +155,7 @@ export async function changeOrgAsMigrator<T>(
   }
   const permit = issueWritePermit({
     ...termsOfStatement('changeOrgAsMigrator', statement),
-    // The step 20 ruling (DEC-38) keeps the seed's synthetic data unaudited, as today, and
+    // Step 20 kept as built the seed's synthetic data unaudited, as today, and
     // names it development_seed. Only this permit grants it, and only to the seed's own
     // statement, told by identity: a statement that merely looks like it gets nothing.
     ...(statement === SEED_STATEMENT ? { grants: ['development_seed' as const] } : {}),

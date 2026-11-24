@@ -89,6 +89,13 @@ describe('with type information', { timeout: 30_000 }, () => {
         `),
       },
       {
+        name: 'CHK-8: a statement chosen between two literals, or a literal and a template that passes',
+        ...typedCase(`
+          await tx.query(lock ? 'SELECT id FROM folder FOR SHARE' : 'SELECT id FROM folder');
+          await tx.query(lock ? \`SELECT \${COLUMNS} FROM folder\` : 'SELECT id FROM folder', []);
+        `),
+      },
+      {
         name: 'a statement that is a SqlFragment chosen before the call',
         ...typedCase(`
           const lookup = lock
@@ -133,6 +140,20 @@ describe('with type information', { timeout: 30_000 }, () => {
           { message: interpolation("sets.join(', ')") },
           { message: interpolation('join.table') },
         ],
+      },
+      {
+        name: 'CHK-7: a template key is the same query call',
+        ...typedCase(`
+          await tx[\`query\`](\`SELECT 1 FROM folder WHERE name = '\${input}'\`);
+        `),
+        errors: [{ message: interpolation('input') }],
+      },
+      {
+        name: 'CHK-8: a choice whose branch is built from a value is still reported',
+        ...typedCase(`
+          await tx.query(lock ? 'SELECT 1' : \`SELECT \${input}\`);
+        `),
+        errors: [{ message: statement("lock ? 'SELECT 1' : `SELECT ${input}`") }],
       },
       {
         name: 'a constant in name only: lower case, declared in a function, or with let',

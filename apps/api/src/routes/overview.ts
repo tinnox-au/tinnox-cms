@@ -20,11 +20,11 @@ import { usedBytes } from '../media/rows.ts';
 import { loadPushPlan, pendingCount } from '../publishing.ts';
 
 export function registerOverviewRoutes(app: FastifyInstance, ctx: AppContext): void {
-  const { pool, config } = ctx;
+  const { db, config } = ctx;
 
   app.get(ROUTES.overview, async (request): Promise<OverviewResponse> => {
     const session = operatorOf(request);
-    return readOrg(pool, session.orgId, async (tx) => {
+    return readOrg(db, session.orgId, async (tx) => {
       // The same builder as the status routes, so the counters and the list agree.
       const statuses = await loadStatusViews(tx, ctx, null);
       const bySummary = Object.fromEntries(

@@ -1,9 +1,15 @@
 // AG-2.1 (adoption plan sections 2.4 and 3.2): in the API and the offline tools a statement is
 // sent only on a transaction handle: the `tx` that the callback of readOrg or changeOrg
 // receives, or that enterOrg returns inside changePreOrg. A statement on anything else runs
-// outside a transaction: on the pool or a pooled client with no organisation set, so row-level
+// outside a transaction: on a pool or a pooled client with no organisation set, so row-level
 // security shows a tenant read nothing and nobody notices; on the handle of poolAsTx as a
 // statement of its own, which is for the typed sec.* wrappers of packages/db/src/sec.ts only.
+//
+// Since adoption plan step 21 the API holds no pool: AppContext.db, the Database of
+// createDatabase, has no query, so the type checker refuses that call before this rule sees it.
+// What is left for the rule in the API is the handle of poolAsTx (the alert check's lock
+// connection went behind withSessionLock in step 22); in the offline tools, the MigratorPool and
+// its clients.
 //
 // With type information the receiver is judged by its type: it must carry the mark of a
 // transaction handle (packages/db/src/tx.ts, which only run() makes), or the mark of the handle
@@ -19,10 +25,12 @@
 // entries to the one file that needs them.
 //
 // Not seen, and left to review: query taken off the handle before it is called
-// (`const { query } = pool`, `pool.query.bind(pool)`), and a computed member name that is not a
-// literal (`pool[name](...)`).
+// (`const { query } = pool`, `pool.query.bind(pool)`, `pool.query.call(pool, text)`,
+// `pool.query.apply(pool, [text])`), and a computed member name that is not fixed text
+// (`pool[name](...)`; `pool['query']` and ``pool[`query`]`` are seen).
 import { AST_NODE_TYPES, type TSESTree } from '@typescript-eslint/utils';
 import { createRule } from './create-rule.ts';
+import { isQueryKey } from './sql-fragments.ts';
 import { brandReader } from './typed.ts';
 
 const TX = { symbol: 'inTransaction', file: 'packages/db/src/tx.ts' } as const;
@@ -38,7 +46,7 @@ type Options = [{ allowed?: readonly Allowed[] }];
 
 function isQueryMember(node: TSESTree.MemberExpression): boolean {
   return node.computed
-    ? node.property.type === AST_NODE_TYPES.Literal && node.property.value === 'query'
+    ? isQueryKey(node.property)
     : node.property.type === AST_NODE_TYPES.Identifier && node.property.name === 'query';
 }
 
@@ -73,7 +81,7 @@ export default createRule<Options, 'offTransaction'>({
     defaultOptions: [{}],
     messages: {
       offTransaction:
-        'Do not call query() on {{receiver}}: only a transaction handle with an organisation takes a statement (the tx that the callback of readOrg or changeOrg receives, or that enterOrg returns inside changePreOrg). On the pool, a pooled client or the handle of poolAsTx the statement runs outside any transaction and with no organisation. Use readOrg(pool, orgId, (tx) => tx.query(...)) for a read, changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts for an operator change, a typed sec.* wrapper from @tinnox/db (add it to packages/db/src/sec.ts if it is missing), or ping(pool) for a liveness probe. An offline tool that reads across organisations sends the statement on the handle asDefiner gives its work (@tinnox/db/migrate).',
+        'Do not call query() on {{receiver}}: only a transaction handle with an organisation takes a statement (the tx that the callback of readOrg or changeOrg receives, or that enterOrg returns inside changePreOrg). On the pool, a pooled client or the handle of poolAsTx the statement runs outside any transaction and with no organisation. Use readOrg(ctx.db, orgId, (tx) => tx.query(...)) for a read, changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts for an operator change, a typed sec.* wrapper from @tinnox/db (add it to packages/db/src/sec.ts if it is missing), or ping(ctx.db) for a liveness probe. An offline tool that reads across organisations sends the statement on the handle asDefiner gives its work (@tinnox/db/migrate).',
     },
   },
   defaultOptions: [{}],

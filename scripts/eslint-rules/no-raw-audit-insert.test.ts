@@ -14,7 +14,7 @@ RuleTester.it = it;
 const tester = new RuleTester({ languageOptions: { parser: tseslint.parser } });
 
 const MESSAGE =
-  'Do not write an audit row with a statement of your own: return the event from the change it records, as { value, audit }, and changeOrg or changePreOrg (or the wrapper the route calls: changeAsOperator, changeAsDevice, changeAsJob, changeOrgAsMigrator) writes it on the transaction of that change. The event is an AuditInput, so the action is a member of AUDIT_ACTIONS and the detail has the shape AuditEventShapes gives it (packages/contracts/src/audit.ts); add the action or the field there first. A refusal with no change to pair with is auditStandalone(pool, event).';
+  'Do not write an audit row with a statement of your own: return the event from the change it records, as { value, audit }, and changeOrg or changePreOrg (or the wrapper the route calls: changeAsOperator, changeAsDevice, changeAsJob, changeOrgAsMigrator) writes it on the transaction of that change. The event is an AuditInput, so the action is a member of AUDIT_ACTIONS and the detail has the shape AuditEventShapes gives it (packages/contracts/src/audit.ts); add the action or the field there first. A refusal with no change to pair with is auditStandalone(ctx.db, event).';
 
 // One whole statement, as eslint.config.js names provisioning's: anchored at both ends.
 const EXPIRY = [
@@ -74,6 +74,14 @@ describe('no-raw-audit-insert (AG-3.1, D25)', { timeout: 30_000 }, () => {
           await tx.query('INSERT  INTO\\n public . audit_event (action) VALUES ($1)', [action]);
         `,
         errors: [{ message: MESSAGE }, { message: MESSAGE }, { message: MESSAGE }],
+      },
+      {
+        name: 'CHK-10: MERGE INTO the table, and a block comment between INSERT and INTO',
+        code: `
+          await tx.query("MERGE INTO audit_event a USING src s ON false WHEN NOT MATCHED THEN INSERT (action) VALUES ('x.y')");
+          await tx.query('INSERT /* c */ INTO audit_event (action) VALUES ($1)', [action]);
+        `,
+        errors: [{ message: MESSAGE }, { message: MESSAGE }],
       },
       {
         name: 'the insert with the table or the schema quoted, and with another schema',

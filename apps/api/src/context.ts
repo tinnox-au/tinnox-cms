@@ -1,4 +1,4 @@
-import type { Pool } from '@tinnox/db';
+import type { Database } from '@tinnox/db';
 import type { DeliveryRegistry } from '@tinnox/delivery';
 import type { ObjectStorage } from '@tinnox/storage';
 import type { IdentityProvider } from './auth/oidc.ts';
@@ -9,7 +9,11 @@ import type { MediaPipeline } from './media/pipeline.ts';
 /** Everything a route needs. Built once in main.ts (or by a test) and passed to buildApp. */
 export interface AppContext {
   readonly config: AppConfig;
-  readonly pool: Pool;
+  /**
+   * The database, as createDatabase (@tinnox/db) made it: handed to readOrg, the change wrappers
+   * and the sec.* entry points, never queried itself (adoption plan step 21).
+   */
+  readonly db: Database;
   readonly storage: ObjectStorage;
   readonly delivery: DeliveryRegistry;
   readonly idp: IdentityProvider;

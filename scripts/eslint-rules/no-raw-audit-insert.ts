@@ -4,8 +4,9 @@
 // that action, and they take a Tx, so the row commits with the change it records. A statement
 // that inserts into audit_event itself has none of that: any action, any detail, any handle.
 //
-// Reported: a string, or the text of a template, that holds `INSERT INTO audit_event` (with or
-// without a schema, either name quoted or not), wherever it is written: the argument of query(),
+// Reported: a string, or the text of a template, that holds `INSERT INTO audit_event` or
+// `MERGE INTO audit_event` (with or without a schema, either name quoted or not, a block comment
+// between the verb and INTO; CHK-10), wherever it is written: the argument of query(),
 // a constant, a fragment. A template is read with each interpolation as a placeholder name too,
 // so `INSERT INTO ${SCHEMA}.audit_event` is seen.
 //
@@ -25,7 +26,7 @@ import { createRule } from './create-rule.ts';
 // interpolated schema is read as a placeholder name. The lookahead, not \b, ends the name, so
 // that a closing quote is allowed and audit_event_archive is not taken.
 const AUDIT_INSERT =
-  /\bINSERT\s+INTO\s+(?:"?[a-z_][a-z0-9_$]*"?\s*\.\s*)?"?audit_event"?(?![a-z0-9_$])/i;
+  /\b(?:INSERT|MERGE)\s+(?:\/\*[\s\S]*?\*\/\s*)*INTO\s+(?:"?[a-z_][a-z0-9_$]*"?\s*\.\s*)?"?audit_event"?(?![a-z0-9_$])/i;
 /** What an interpolation stands for when a template is read whole: a name. */
 const PLACEHOLDER = 'interpolated';
 
@@ -68,7 +69,7 @@ export default createRule<Options, 'rawInsert'>({
     defaultOptions: [{}],
     messages: {
       rawInsert:
-        'Do not write an audit row with a statement of your own: return the event from the change it records, as { value, audit }, and changeOrg or changePreOrg (or the wrapper the route calls: changeAsOperator, changeAsDevice, changeAsJob, changeOrgAsMigrator) writes it on the transaction of that change. The event is an AuditInput, so the action is a member of AUDIT_ACTIONS and the detail has the shape AuditEventShapes gives it (packages/contracts/src/audit.ts); add the action or the field there first. A refusal with no change to pair with is auditStandalone(pool, event).',
+        'Do not write an audit row with a statement of your own: return the event from the change it records, as { value, audit }, and changeOrg or changePreOrg (or the wrapper the route calls: changeAsOperator, changeAsDevice, changeAsJob, changeOrgAsMigrator) writes it on the transaction of that change. The event is an AuditInput, so the action is a member of AUDIT_ACTIONS and the detail has the shape AuditEventShapes gives it (packages/contracts/src/audit.ts); add the action or the field there first. A refusal with no change to pair with is auditStandalone(ctx.db, event).',
     },
   },
   defaultOptions: [{}],

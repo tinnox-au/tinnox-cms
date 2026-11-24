@@ -47,7 +47,7 @@ import {
   type MediaRecord,
   type PlanPlaylist,
   type PlanPublicationResult,
-  type PublicationDraft,
+  type PlannedPublication,
   type PublishIssue,
 } from '@tinnox/domain';
 import type { FastifyRequest } from 'fastify';
@@ -172,7 +172,7 @@ export interface DisplayAssessment {
    * What a push would publish now, for `never_pushed`, `changes` and `up_to_date`.
    * Always null when the caller did not ask to keep drafts (`keepDraft`).
    */
-  readonly draft: PublicationDraft | null;
+  readonly draft: PlannedPublication | null;
   /**
    * Why the content cannot be published. Non-empty exactly when `state` is `blocked`.
    * Complete when the caller keeps drafts; otherwise the first `MAX_ISSUE_DETAILS`.
@@ -817,8 +817,11 @@ export interface NewPublication {
   readonly scheduleId: string | null;
   /** The layout the draft was built from; null otherwise. Recorded in the audit event. */
   readonly layoutId: string | null;
-  /** The accepted plan (`planDraft(...).draft`, or the plan of a schedule or a layout). */
-  readonly draft: PublicationDraft;
+  /**
+   * The accepted plan (`planDraft(...).draft`, or the plan of a schedule or a layout). Only a
+   * planner returns a `PlannedPublication`, so the route's capability check has run (DEC-23).
+   */
+  readonly draft: PlannedPublication;
   readonly idempotencyKey: string;
   readonly membershipId: string;
   /** Which route asked: recorded in the audit event. */

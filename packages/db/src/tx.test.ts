@@ -15,7 +15,6 @@ import {
   type OrgId,
   type OrgReadTx,
   type OrgTx,
-  type Pool,
   type PreOrgTx,
   type Tx,
 } from './index.ts';
@@ -27,6 +26,8 @@ import {
   withOrg,
   withoutOrg,
   withResolvedOrg,
+  type Pool,
+  databaseOn,
 } from './testing.ts';
 
 const ORG = testOrgId('00000000-0000-4000-8000-000000000001');
@@ -329,12 +330,13 @@ const nested = (opener: string): string =>
 describe('a transaction inside another (U-3)', () => {
   const inItsOwnTransaction = (pool: Pool, text: string): Promise<unknown> =>
     withoutOrg(pool, (tx) => withNoOrgSet(tx).query(text));
-  const onThePool = (pool: Pool, text: string): Promise<unknown> => poolAsTx(pool).query(text);
+  const onThePool = (pool: Pool, text: string): Promise<unknown> =>
+    poolAsTx(databaseOn(pool)).query(text);
   const openers = [
     ['withOrg', (pool: Pool, fn: () => Promise<unknown>) => withOrg(pool, ORG, fn)],
     ['withoutOrg', (pool: Pool, fn: () => Promise<unknown>) => withoutOrg(pool, fn)],
     ['withResolvedOrg', (pool: Pool, fn: () => Promise<unknown>) => withResolvedOrg(pool, fn)],
-    ['readOrg', (pool: Pool, fn: () => Promise<unknown>) => readOrg(pool, ORG, fn)],
+    ['readOrg', (pool: Pool, fn: () => Promise<unknown>) => readOrg(databaseOn(pool), ORG, fn)],
   ] as const;
 
   it('refuses every opener inside every other, before a second connection is taken, and rolls the outer back', async () => {
@@ -366,7 +368,7 @@ describe('a transaction inside another (U-3)', () => {
     const { pool, onPool } = fakePool();
     await expect(
       withOrg(pool, ORG, () => onThePool(pool, 'SELECT sec.something()')),
-    ).rejects.toThrow(nested('poolAsTx(pool).query'));
+    ).rejects.toThrow(nested('poolAsTx(db).query'));
     expect(onPool).toEqual([]);
     // Outside a transaction it is sent as before.
     await onThePool(pool, 'SELECT sec.something()');
@@ -443,7 +445,7 @@ describe('Tx and Autocommit (D2)', () => {
 
   it('a pool is not a Tx, nor is the handle of poolAsTx, nor an object with a query method', () => {
     const { pool } = fakePool();
-    const autocommit = poolAsTx(pool);
+    const autocommit = poolAsTx(databaseOn(pool));
     const handMade = { query: autocommit.query };
     // @ts-expect-error a pool commits each statement on its own, so it is not a Tx
     needsTx(pool);
@@ -613,7 +615,7 @@ describe('readOrg (SCR-34)', () => {
   it('opens a READ ONLY transaction with the organisation set, and commits it', async () => {
     const { pool, statements, released, taken } = fakePool();
     expect(
-      await readOrg(pool, ORG, async (tx) => {
+      await readOrg(databaseOn(pool), ORG, async (tx) => {
         await tx.query('TENANT READ');
         return 'read';
       }),
@@ -630,20 +632,20 @@ describe('readOrg (SCR-34)', () => {
 
   it('rolls back when the read throws, takes an OrgId only, and closes its handle like any other', async () => {
     const { pool, statements } = fakePool();
-    await expect(readOrg(pool, ORG, () => Promise.reject(new Error('boom')))).rejects.toThrow(
-      'boom',
-    );
+    await expect(
+      readOrg(databaseOn(pool), ORG, () => Promise.reject(new Error('boom'))),
+    ).rejects.toThrow('boom');
     expect(statements).toEqual([
       'BEGIN READ ONLY',
       "SELECT set_config('app.org_id', $1, true)",
       'ROLLBACK',
     ]);
-    await expect(readOrg(pool, testOrgId('not-a-uuid'), () => Promise.resolve())).rejects.toThrow(
-      'readOrg requires a lower-case UUID organisation id',
-    );
+    await expect(
+      readOrg(databaseOn(pool), testOrgId('not-a-uuid'), () => Promise.resolve()),
+    ).rejects.toThrow('readOrg requires a lower-case UUID organisation id');
 
     const kept: OrgReadTx[] = [];
-    await readOrg(pool, ORG, async (tx) => {
+    await readOrg(databaseOn(pool), ORG, async (tx) => {
       kept.push(tx);
     });
     await expect(kept[0]?.query('LATE')).rejects.toThrow(HANDLE_CLOSED);

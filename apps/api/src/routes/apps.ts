@@ -35,11 +35,11 @@ const appInUse = (message: string, details?: { path: string; message: string }[]
   new HttpError(409, 'app_in_use', message, details === undefined ? {} : { details });
 
 export function registerAppRoutes(app: FastifyInstance, ctx: AppContext): void {
-  const { pool } = ctx;
+  const { db } = ctx;
 
   app.get(ROUTES.apps, async (request): Promise<AppListResponse> => {
     const session = operatorOf(request);
-    return readOrg(pool, session.orgId, async (tx) => {
+    return readOrg(db, session.orgId, async (tx) => {
       const { rows } = await tx.query<AppRow>(
         `SELECT ${APP_COLUMNS} FROM app a
          WHERE a.org_id = app_org_id()
@@ -89,7 +89,7 @@ export function registerAppRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.get(ROUTES.appPattern, async (request): Promise<AppDto> => {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
-    return readOrg(pool, session.orgId, async (tx) => {
+    return readOrg(db, session.orgId, async (tx) => {
       const dto = await loadApp(tx, id);
       if (dto === null) throw notFound('The app');
       return dto;

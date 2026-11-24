@@ -8,13 +8,13 @@ import {
   pairingPurge,
   poolAsTx,
   sessionPurgeExpired,
-  type Pool,
+  type Database,
 } from '@tinnox/db';
 import type { ObjectStorage } from '@tinnox/storage';
 import type { MediaPipeline } from './media/pipeline.ts';
 
 export interface HousekeepingDeps {
-  readonly pool: Pool;
+  readonly db: Database;
   readonly storage: ObjectStorage;
   readonly media: MediaPipeline;
   readonly limits: Limits;
@@ -29,7 +29,7 @@ export interface HousekeepingResult {
 }
 
 export async function runHousekeeping(deps: HousekeepingDeps): Promise<HousekeepingResult> {
-  const tx = poolAsTx(deps.pool);
+  const tx = poolAsTx(deps.db);
   const sessions = await sessionPurgeExpired(tx);
   const pairings = await pairingPurge(tx, 24 * 60 * 60);
   const temp = await deps.storage.removeStaleTempFiles(60 * 60 * 1000);

@@ -30,12 +30,12 @@ const typed = new RuleTester({
 const untyped = new RuleTester({ languageOptions: { parser: tseslint.parser } });
 
 const message = (receiver: string): string =>
-  `Do not call query() on ${receiver}: only a transaction handle with an organisation takes a statement (the tx that the callback of readOrg or changeOrg receives, or that enterOrg returns inside changePreOrg). On the pool, a pooled client or the handle of poolAsTx the statement runs outside any transaction and with no organisation. Use readOrg(pool, orgId, (tx) => tx.query(...)) for a read, changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts for an operator change, a typed sec.* wrapper from @tinnox/db (add it to packages/db/src/sec.ts if it is missing), or ping(pool) for a liveness probe. An offline tool that reads across organisations sends the statement on the handle asDefiner gives its work (@tinnox/db/migrate).`;
+  `Do not call query() on ${receiver}: only a transaction handle with an organisation takes a statement (the tx that the callback of readOrg or changeOrg receives, or that enterOrg returns inside changePreOrg). On the pool, a pooled client or the handle of poolAsTx the statement runs outside any transaction and with no organisation. Use readOrg(ctx.db, orgId, (tx) => tx.query(...)) for a read, changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts for an operator change, a typed sec.* wrapper from @tinnox/db (add it to packages/db/src/sec.ts if it is missing), or ping(ctx.db) for a liveness probe. An offline tool that reads across organisations sends the statement on the handle asDefiner gives its work (@tinnox/db/migrate).`;
 
 const HEAD = `
-  import { poolAsTx, type Autocommit, type OrgId, type OrgTx, type Pool } from '@tinnox/db';
+  import { poolAsTx, type Autocommit, type OrgId, type OrgTx } from '@tinnox/db';
   import { asDefiner, type DefinerTx, type MigratorPool } from '@tinnox/db/migrate';
-  import { withOrg, withResolvedOrg } from '@tinnox/db/testing';
+  import { withOrg, withResolvedOrg, type Pool } from '@tinnox/db/testing';
   declare const pool: Pool;
   declare const migrator: MigratorPool;
   declare const orgId: OrgId;
@@ -160,8 +160,14 @@ describe('with type information', { timeout: 30_000 }, () => {
           declare const maybe: Pool | undefined;
           await maybe?.query('SELECT 1');
           await pool['query']('SELECT 1');
+          await pool[\`query\`]('SELECT 1');
         `),
-        errors: [{ message: message('maybe') }, { message: message('pool') }],
+        errors: [
+          { message: message('maybe') },
+          { message: message('pool') },
+          // CHK-7: a template key with nothing interpolated is the same member.
+          { message: message('pool') },
+        ],
       },
       {
         name: 'an allowed statement opens nothing else: another statement, or the same one built at run time',

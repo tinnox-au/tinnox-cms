@@ -55,7 +55,7 @@ import type {
   UnauditedReason,
 } from '@tinnox/contracts';
 import { auditRowsOn } from './audit-note.ts';
-import type { Pool } from './pool.ts';
+import { poolOfDatabase, type Database } from './database.ts';
 import { auditScoped, auditUnscoped, type AuditInput } from './sec.ts';
 import { isAuditedInSql, receiptOf, type AuditedInSql } from './sql-audit.ts';
 import { withOrg, withResolvedOrg, type OrgId, type OrgTx, type PreOrgTx, type Tx } from './tx.ts';
@@ -74,7 +74,7 @@ export interface Unaudited {
  * nothing to change, `idempotent_replay` when an earlier request already did the work, and
  * `telemetry` or `counter_under_threshold` when what it stored is one of the things D3 leaves
  * unaudited, which only a route that states or grants the reason may give. The three writes the
- * step 20 ruling leaves as they are today (`alert_closed_silently`, `pairing_expired_by_time`,
+ * step 20 kept as built (`alert_closed_silently`, `pairing_expired_by_time`,
  * `development_seed`) are granted the same way, each to the job, routes or tool that makes it.
  * A new reason is a decision, recorded in that list. `read_only` is not one: a read
  * belongs in `readOrg`, whose transaction refuses a write. Nothing checks at run time that a
@@ -238,6 +238,13 @@ export interface WritePermit<Granted = unknown> {
  * `WritePermit` everywhere.
  */
 export function issueWritePermit<Granted>(held: PermitTerms<Granted>): WritePermit<Granted> {
+  // AUD-6: a route that states it only reads opens readOrg, whose transaction refuses a write. A
+  // permit would open a read-write one, where a write that returns nothing_changed would pass.
+  if ('none' in held.stated && held.stated.none === 'read_only') {
+    throw new Error(
+      `${held.statedIn} says the route only reads (read_only), so it gets no WritePermit (AUD-6): read with readOrg(db, orgId, fn) from @tinnox/db, whose transaction refuses a write. A route that writes says what it audits in that row instead.`,
+    );
+  }
   return Object.freeze({ [terms]: held });
 }
 
@@ -352,14 +359,14 @@ async function record<T>(
  * `changeOrgAsMigrator`).
  */
 export async function changeOrg<T, Granted>(
-  pool: Pool,
+  db: Database,
   orgId: OrgId,
   permit: WritePermit<Granted>,
   fn: (tx: OrgTx, granted: Granted) => Promise<Change<T>>,
 ): Promise<T> {
   const held = termsOf(permit);
   return withOrg(
-    pool,
+    poolOfDatabase(db),
     orgId,
     async (tx) => {
       const granted = await held.recheck(tx);
@@ -385,7 +392,7 @@ export async function changeOrg<T, Granted>(
  * `provisionStatement(command)` of scripts/lib/provision.ts. Only those make one (`AuditStatement`).
  */
 export async function changePreOrg<T>(
-  pool: Pool,
+  db: Database,
   statement: AuditStatement,
   fn: (tx: PreOrgTx, enterOrg: (orgId: OrgId) => Promise<OrgTx>) => Promise<Change<T>>,
 ): Promise<T> {
@@ -393,7 +400,7 @@ export async function changePreOrg<T>(
   // would otherwise run with no statement to be held to, or one it wrote itself.
   const held = termsOfStatement('changePreOrg', statement);
   return withResolvedOrg(
-    pool,
+    poolOfDatabase(db),
     async (pre, enterOrg) => {
       const entered: OrgTx[] = [];
       const change = await fn(pre, async (orgId) => {

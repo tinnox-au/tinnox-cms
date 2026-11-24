@@ -1,4 +1,5 @@
 import type { PlanPublicationResult } from './manifest.ts';
+import { markPlanned } from './planned.ts';
 import { planSources, type PlanPlaylist } from './sources.ts';
 import type { PublicationDraft, PublicationValidator } from './types.ts';
 
@@ -76,5 +77,5 @@ export function planSchedulePublication(input: SchedulePlanInput): PlanPublicati
   if (total.length > 0) {
     return { ok: false, issues: total.map((issue) => ({ ...issue, path: 'schedule' })) };
   }
-  return { ok: true, draft: combined };
+  return { ok: true, draft: markPlanned(combined) };
 }

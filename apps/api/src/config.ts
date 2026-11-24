@@ -30,6 +30,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseEnv } from 'node:util';
 import {
+  isLoopbackAddress,
   LIMIT_ENV_VARS,
   limitsFromEnv,
   ROUTES,
@@ -286,15 +287,14 @@ export interface LoadConfigOptions {
   readonly reviewedSmtpHosts?: readonly string[];
 }
 
-const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
-
+/**
+ * True for a URL on this machine: a loopback address (isLoopbackAddress, the one rule of
+ * @tinnox/contracts) or the name `localhost`, which the development configuration writes. Not
+ * `*.localhost` (EAX-08): a name is loopback only once resolved, and only this file may name
+ * `localhost` (NO_LOOPBACK_NAME in eslint.config.js).
+ */
 function isLoopback(url: URL): boolean {
-  return isLoopbackHost(url.hostname);
-}
-
-/** A host name or address on this machine (URL host form for IPv6, or a bare ::1). */
-export function isLoopbackHost(host: string): boolean {
-  return LOOPBACK_HOSTS.has(host) || host === '::1' || host.endsWith('.localhost');
+  return url.hostname === 'localhost' || isLoopbackAddress(url.hostname);
 }
 
 function looksLikeDevSecret(value: string): boolean {

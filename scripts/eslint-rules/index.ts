@@ -4,6 +4,7 @@
 // runs TypeScript files; index.test.ts fails when a rule file is missing here, has no test, or
 // is enabled in no block of eslint.config.js.
 import type { ESLint, Rule } from 'eslint';
+import exchangeFiles from './exchange-files.ts';
 import noLegacyTransaction from './no-legacy-transaction.ts';
 import noNestedTransaction from './no-nested-transaction.ts';
 import noQueryOffTransaction from './no-query-off-transaction.ts';
@@ -12,6 +13,7 @@ import sqlFragments from './sql-fragments.ts';
 
 // Each rule under its file's name; eslint.config.js enables it as tinnox/<name>.
 const rules: Record<string, Rule.RuleModule> = {
+  'exchange-files': exchangeFiles,
   'no-legacy-transaction': noLegacyTransaction,
   'no-nested-transaction': noNestedTransaction,
   'no-query-off-transaction': noQueryOffTransaction,

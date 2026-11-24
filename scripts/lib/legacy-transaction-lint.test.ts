@@ -118,13 +118,13 @@ await withOrg(pool, orgId, (tx) => auditScoped(tx, event));
 const NEW_CODE = `
 import { changePreOrg, readOrg, unaudited, type OrgReadTx } from '@tinnox/db';
 import { changeAsOperator } from '../auth/permissions.ts';
-await readOrg(pool, orgId, (tx) => tx.query('SELECT 1'));
+await readOrg(ctx.db, orgId, (tx) => tx.query('SELECT 1'));
 await changeAsOperator(ctx, request, async (tx) => ({ value: 1, audit: unaudited('nothing_changed') }));
 `;
-// Plan section 3.4, with the names as they are built: there is no `db` handle yet, so the
-// functions take the pool.
+// Plan section 3.4, with the names as they are built: the functions take the database handle of
+// step 21 (`ctx.db` in the API).
 const MESSAGE =
-  /^(auditScoped|withOrg|withResolvedOrg) is the legacy transaction API: it .*\. Use readOrg\(pool, orgId, fn\) for reads and changeOrg\(pool, orgId, permit, fn\) returning \{ value, audit \} for changes; the permit comes from the role guard: an operator route calls changeAsOperator\(ctx, request, fn\) \(apps\/api\/src\/auth\/permissions\.ts\), .* The legacy names are for packages\/db\/src, which builds the new API on them, and for tests \(@tinnox\/db\/testing\)\.$/;
+  /^(auditScoped|withOrg|withResolvedOrg) is the legacy transaction API: it .*\. Use readOrg\(ctx\.db, orgId, fn\) for reads and changeOrg\(ctx\.db, orgId, permit, fn\) returning \{ value, audit \} for changes; the permit comes from the role guard: an operator route calls changeAsOperator\(ctx, request, fn\) \(apps\/api\/src\/auth\/permissions\.ts\), .* The legacy names are for packages\/db\/src, which builds the new API on them, and for tests \(@tinnox\/db\/testing\)\.$/;
 
 // The first case loads eslint.config.js, which a busy CI runner can stretch towards the unit
 // project's 5 s default (GAP-1).
@@ -198,7 +198,7 @@ describe('the maker of a WritePermit (SCR-34)', { timeout: 30_000 }, () => {
   // Plan section 3.4: the message names what each kind of caller does instead.
   const refused = (name: string): RegExp =>
     new RegExp(
-      `^'${name}' import from '@tinnox/db' is restricted from being used by a pattern\\. Only what judges the caller of a change issues its WritePermit \\(SCR-34; the files of WRITE_PERMIT_ISSUERS in eslint\\.config\\.js\\)\\. An operator route calls changeAsOperator\\(ctx, request, fn\\) from apps/api/src/auth/permissions\\.ts and returns \\{ value, audit \\}; it never holds the permit\\. .* a player route calls changeAsDevice\\(ctx, request, device, fn\\) .* \\(apps/api/src/auth/device\\.ts\\), the alert check and the media pipeline call changeAsJob\\(pool, job, orgId, fn\\) \\(apps/api/src/jobs\\.ts\\), an offline tool calls changeOrgAsMigrator\\(pool, orgId, statement, fn\\) from @tinnox/db/migrate, and a refusal that changed nothing is written with recordRefusal\\(ctx, request, session, event\\) \\(apps/api/src/auth/refusal\\.ts\\)\\. .* a new entry of WRITE_PERMIT_ISSUERS\\.$`,
+      `^'${name}' import from '@tinnox/db' is restricted from being used by a pattern\\. Only what judges the caller of a change issues its WritePermit \\(SCR-34; the files of WRITE_PERMIT_ISSUERS in eslint\\.config\\.js\\)\\. An operator route calls changeAsOperator\\(ctx, request, fn\\) from apps/api/src/auth/permissions\\.ts and returns \\{ value, audit \\}; it never holds the permit\\. .* a player route calls changeAsDevice\\(ctx, request, device, fn\\) .* \\(apps/api/src/auth/device\\.ts\\), the alert check and the media pipeline call changeAsJob\\(db, job, orgId, fn\\) \\(apps/api/src/jobs\\.ts\\), an offline tool calls changeOrgAsMigrator\\(pool, orgId, statement, fn\\) from @tinnox/db/migrate, and a refusal that changed nothing is written with recordRefusal\\(ctx, request, session, event\\) \\(apps/api/src/auth/refusal\\.ts\\)\\. .* a new entry of WRITE_PERMIT_ISSUERS\\.$`,
     );
   const ROLE_GUARD = 'apps/api/src/auth/permissions.ts';
   /** The issuers the import rule reads: the API's and the offline tools', not packages/db. */
@@ -311,9 +311,13 @@ describe('the entry of the jobs (SCR-34)', { timeout: 30_000 }, () => {
     "import { changeAsJob } from './jobs.ts';",
     "import { changeAsJob as change } from '../jobs.ts';",
     "export { changeAsJob } from '../../src/jobs.ts';",
+    // SEC-3: TypeScript (NodeNext) and tsx resolve these spellings to jobs.ts too.
+    "import { changeAsJob } from './jobs.js';",
+    "import { changeAsJob } from '../jobs.js';",
+    "import * as jobs from '../jobs.mjs';",
   ];
   const REFUSED =
-    /^'(\.\.?\/)+(src\/)?jobs\.ts' import is restricted from being used by a pattern\. apps\/api\/src\/jobs\.ts is the entry of the jobs that run with no request \(SCR-34\): changeAsJob changes an organisation with no role check and no credential, so only the alert check and the media pipeline may import it \(JOB_CHANGE_FILES in eslint\.config\.js\)\. An operator route calls changeAsOperator\(ctx, request, fn\) from apps\/api\/src\/auth\/permissions\.ts, which checks the role again first; a player route calls changeAsDevice\(ctx, request, device, fn\) from apps\/api\/src\/auth\/device\.ts; a read calls readOrg\(pool, orgId, fn\) from @tinnox\/db\. A new job gets its row in JOB_AUDIT \(apps\/api\/src\/route-audit\.ts\) and its file in JOB_CHANGE_FILES with its reason, in its pull request\.$/;
+    /^'(\.\.?\/)+(src\/)?jobs\.m?[jt]s' import is restricted from being used by a pattern\. apps\/api\/src\/jobs\.ts is the entry of the jobs that run with no request \(SCR-34\): changeAsJob changes an organisation with no role check and no credential, so only the alert check and the media pipeline may import it \(JOB_CHANGE_FILES in eslint\.config\.js\)\. An operator route calls changeAsOperator\(ctx, request, fn\) from apps\/api\/src\/auth\/permissions\.ts, which checks the role again first; a player route calls changeAsDevice\(ctx, request, device, fn\) from apps\/api\/src\/auth\/device\.ts; a read calls readOrg\(ctx\.db, orgId, fn\) from @tinnox\/db\. A new job gets its row in JOB_AUDIT \(apps\/api\/src\/route-audit\.ts\) and its file in JOB_CHANGE_FILES with its reason, in its pull request\.$/;
   const JOB_FILES = ['apps/api/src/alerts.ts', 'apps/api/src/media/pipeline.ts'];
 
   it.each([
@@ -392,7 +396,7 @@ describe(
     ];
     const refused = (name: string): RegExp =>
       new RegExp(
-        `^'${name}' import from '@tinnox/db' is restricted from being used by a pattern\\. changePreOrg is for a transaction that starts before the organisation is known \\(SCR-34\\): .* An operator change calls changeAsOperator\\(ctx, request, fn\\) from apps/api/src/auth/permissions\\.ts, .* a read calls readOrg\\(pool, orgId, fn\\) from @tinnox/db\\. .* add it to PRE_ORG_CHANGE_FILES in eslint\\.config\\.js with its reason, and say why in the pull request\\.$`,
+        `^'${name}' import from '@tinnox/db' is restricted from being used by a pattern\\. changePreOrg is for a transaction that starts before the organisation is known \\(SCR-34\\): .* An operator change calls changeAsOperator\\(ctx, request, fn\\) from apps/api/src/auth/permissions\\.ts, .* a read calls readOrg\\(ctx\\.db, orgId, fn\\) from @tinnox/db\\. .* add it to PRE_ORG_CHANGE_FILES in eslint\\.config\\.js with its reason, and say why in the pull request\\.$`,
       );
 
     it.each([

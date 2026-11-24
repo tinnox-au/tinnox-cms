@@ -1,6 +1,7 @@
-import { AsyncLocalStorage } from 'node:async_hooks';
 import pg from 'pg';
+import { poolOfDatabase, type Database } from './database.ts';
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from './pool.ts';
+import { current, OPENERS, refuseNested, type Transaction } from './nesting.ts';
 import { keepStatements } from './pre-org.ts';
 import { rememberPool } from './tx-pool.ts';
 
@@ -83,36 +84,6 @@ export interface PreOrgTx {
  * names the one it needs: `tx: OrgTx`, or `tx: OrgReadTx` when it only reads.
  */
 export type Tx = OrgTx | PreOrgTx;
-
-/** The functions that open a transaction and give their callback its handle, for the messages. */
-const OPENERS = 'withOrg, withoutOrg, withResolvedOrg, readOrg, changeOrg or changePreOrg';
-
-/** One transaction of run(): `open` from BEGIN until its callback returns or throws. */
-interface Transaction {
-  open: boolean;
-}
-
-/**
- * The transaction whose callback is running on this asynchronous path, if any (U-3). The store
- * is entered around the callback only, and work the callback started keeps it after the
- * callback has ended, so `open` is what says whether the transaction is still there.
- */
-const current = new AsyncLocalStorage<Transaction>();
-
-/**
- * U-3: a second transaction takes another pooled connection, so it commits or rolls back on its
- * own (an audit row could commit while its change rolls back), it does not see the outer
- * transaction's rows, and the outer holds a connection while it waits for the inner. Checked
- * before a connection is taken. tinnox/no-nested-transaction reports the cases lint can read
- * (scripts/eslint-rules/no-nested-transaction.ts).
- */
-function refuseNested(opener: string, instead = 'Pass the outer tx to the helper.'): void {
-  if (current.getStore()?.open === true) {
-    throw new Error(
-      `${opener} was called while a transaction is open on the same asynchronous path (inside the callback of ${OPENERS}, or in a helper it called). This opens a second transaction on another connection that commits independently. ${instead}`,
-    );
-  }
-}
 
 /** The statements of one transaction: what a handle of run() sends, until the transaction ends. */
 function statementsOn(client: PoolClient, transaction: Transaction): Autocommit {
@@ -308,14 +279,14 @@ export async function withOrg<T>(
  * the route decided the read.
  */
 export async function readOrg<T>(
-  pool: Pool,
+  db: Database,
   orgId: OrgId,
   fn: (tx: OrgReadTx) => Promise<T>,
 ): Promise<T> {
   requireOrgId('readOrg', orgId);
   return run(
     'readOrg',
-    pool,
+    poolOfDatabase(db),
     async (client) => {
       await client.query("SELECT set_config('app.org_id', $1, true)", [orgId]);
     },
@@ -392,20 +363,22 @@ export interface StandaloneCaller {
 }
 
 /**
- * Adapts a pool for single-statement sec.* calls (each statement is its own transaction). So a
- * statement sent while a transaction is open on the same asynchronous path is refused, like
+ * Adapts the database for single-statement sec.* calls (each statement is its own transaction).
+ * So a statement sent while a transaction is open on the same asynchronous path is refused, like
  * any other second transaction (U-3). The handle is an `Autocommit`, never a `Tx`: an audit
  * writer or a wrapper that changes data does not accept it.
  */
-export function poolAsTx(pool: Pool, caller?: StandaloneCaller): Autocommit {
+export function poolAsTx(db: Database, caller?: StandaloneCaller): Autocommit {
   return {
     query: async <R extends QueryResultRow = QueryResultRow>(
       text: string,
       values?: readonly unknown[],
     ) => {
-      if (caller === undefined) refuseNested('poolAsTx(pool).query');
+      if (caller === undefined) refuseNested('poolAsTx(db).query');
       else refuseNested(caller.opener, caller.instead);
-      return pool.query<R>(text, values === undefined ? undefined : [...values]);
+      // Read at the statement, as the pool itself was: a route takes this handle when it is
+      // registered, before anything is sent.
+      return poolOfDatabase(db).query<R>(text, values === undefined ? undefined : [...values]);
     },
   };
 }

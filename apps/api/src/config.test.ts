@@ -85,6 +85,22 @@ describe('loadConfig in development', () => {
     ).toContain('OIDC_ISSUER may use http only on a loopback host');
   });
 
+  it.each([
+    ['a *.localhost name', 'http://idp.localhost:8080/realms/x'],
+    ['another 127.x address', 'http://127.0.0.2:8080/realms/x'],
+    ['a mapped address', 'http://[::ffff:127.0.0.1]:8080/realms/x'],
+  ])('refuses plain http for %s, which is not a loopback address (EAX-08)', (_label, issuer) => {
+    expect(problems({ ...development, OIDC_ISSUER: issuer }).join(' ')).toContain(
+      'OIDC_ISSUER may use http only on a loopback host',
+    );
+  });
+
+  it('accepts plain http on localhost, 127.0.0.1 and [::1] outside production (EAX-08)', () => {
+    for (const host of ['localhost', '127.0.0.1', '[::1]']) {
+      expect(problems({ ...development, OIDC_ISSUER: `http://${host}:8080/realms/x` })).toEqual([]);
+    }
+  });
+
   it('refuses the same origin for portal and player', () => {
     expect(
       problems({ ...development, PLAYER_ORIGIN: development['PORTAL_ORIGIN'] }).join(' '),

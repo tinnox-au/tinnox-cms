@@ -4,7 +4,12 @@
  * .env; it is never started with that whole file (D5 of the poteto pyramid plan). Refuses to
  * start on unsafe configuration (config.ts).
  */
-import { assertConnectionRole, assertRuntimeRole, createPool, RuntimeRoleError } from '@tinnox/db';
+import {
+  assertConnectionRole,
+  assertRuntimeRole,
+  createDatabase,
+  RuntimeRoleError,
+} from '@tinnox/db';
 import { createDeliveryRegistry } from '@tinnox/delivery';
 import { LocalObjectStorage } from '@tinnox/storage';
 import { runDisplayAlerts } from './alerts.ts';
@@ -37,7 +42,7 @@ async function main(): Promise<void> {
     config.logLevel,
     config.nodeEnv === 'development' && process.stdout.isTTY === true,
   );
-  const pool = createPool({
+  const db = createDatabase({
     connectionString: config.databaseUrl,
     applicationName: 'tinnox-api',
     max: 15,
@@ -45,7 +50,7 @@ async function main(): Promise<void> {
   // Before anything else uses the database and before the listener starts (AG-1.3): the session
   // must be tinnox_app as infra/postgres/init/01-roles.sh makes it, read from the catalogue.
   try {
-    await assertRuntimeRole(pool);
+    await assertRuntimeRole(db);
   } catch (error) {
     // The problems name roles and objects, never the connection string or a password.
     if (error instanceof RuntimeRoleError) {
@@ -54,7 +59,7 @@ async function main(): Promise<void> {
     } else {
       console.error('TINNOX API could not check its database role:', (error as Error).message);
     }
-    await pool.end();
+    await db.end();
     process.exit(1);
   }
   const storage = await LocalObjectStorage.create({ root: config.mediaRoot });
@@ -71,7 +76,7 @@ async function main(): Promise<void> {
   const now = (): Date => new Date();
   const media = new MediaPipeline({
     jobsDir: config.mediaJobsDir,
-    pool,
+    db,
     storage,
     limits,
     logger: logger.child({ module: 'media-pipeline' }),
@@ -79,7 +84,7 @@ async function main(): Promise<void> {
   });
   const ctx: AppContext = {
     config,
-    pool,
+    db,
     storage,
     delivery,
     idp: createIdentityProvider(config),
@@ -92,7 +97,7 @@ async function main(): Promise<void> {
 
   const housekeeping = async (): Promise<void> => {
     try {
-      const result = await runHousekeeping({ pool, storage, media, limits });
+      const result = await runHousekeeping({ db, storage, media, limits });
       logger.info(result, 'housekeeping finished');
     } catch (error) {
       logger.error({ err: error }, 'housekeeping failed');
@@ -109,7 +114,7 @@ async function main(): Promise<void> {
   let skippedInRow = 0;
   const alertLoop = (mail: Mailer): void => {
     alertRun = runDisplayAlerts({
-      pool,
+      db,
       now: ctx.now(),
       mail,
       portalOrigin: config.portalOrigin,
@@ -152,7 +157,7 @@ async function main(): Promise<void> {
       // The alert run stops claiming at its next organisation (shouldStop); the e-mails it has
       // already claimed get the shutdown budget alongside closing the server.
       await Promise.all([alertRun, app.close(), media.stop()]);
-      await pool.end();
+      await db.end();
       process.exit(0);
     } catch (error) {
       logger.error({ err: error }, 'shutdown failed');

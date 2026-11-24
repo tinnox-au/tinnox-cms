@@ -92,7 +92,7 @@ const DEEP = /Do not import a file inside another package\. Import its entry/;
 const TEST_CODE = /Product code does not import test code\. Move what both need into a module/;
 // LINT-3: the pg message names only what the file group may use instead.
 const PG =
-  /Only packages\/db talks to PostgreSQL\. Use createPool and the transaction openers of @tinnox\/db \(readOrg, changeOrg, changePreOrg\)/;
+  /Only packages\/db talks to PostgreSQL\. Use createDatabase and the transaction openers of @tinnox\/db \(readOrg, changeOrg, changePreOrg\)/;
 // The browser apps' sentence is true for their Node build files too (vite.config.ts, build/).
 const PG_BROWSER =
   /^(?!.*@tinnox\/db).*Only packages\/db talks to PostgreSQL, and apps\/(portal|player-web) has no database connection\. Its browser code calls the API through apps\/(portal\/src\/api|player-web\/src\/platform\/api\.ts); its build files .* run in Node/;
@@ -487,6 +487,10 @@ describe('test code (rule (h))', () => {
     ['apps/api/src/fixture.ts', '../test/support.ts'],
     ['apps/api/src/fixture.ts', './security.test.ts'],
     ['scripts/lib/fixture.ts', '../../tests/integration/support.ts'],
+    // SEC-3: TypeScript resolves these spellings to the .ts test files too.
+    ['apps/api/src/routes/fixture.ts', '../change.test-support.js'],
+    ['apps/api/src/fixture.ts', './security.test.js'],
+    ['packages/domain/src/fixture.ts', './fixtures.test-support.mjs'],
   ])('flags a test import in the non-test file %s', async (path, specifier) => {
     expect(await flagged(path, importOf(specifier))).toEqual([expect.stringMatching(TEST_CODE)]);
   });

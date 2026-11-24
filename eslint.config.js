@@ -12,7 +12,7 @@ import tseslint from 'typescript-eslint';
 // statement of this file runs and would fail first, with an error that names no remedy.
 if (!process.features.typescript) {
   throw new Error(
-    `eslint.config.js loads the lint rules in scripts/eslint-rules/*.ts, and this Node (${process.version}) does not run TypeScript files: type stripping is on by default from Node 22.18 and off here. Use the Node that .nvmrc names (nvm use; package.json engines says >=22.18.0), take --no-experimental-strip-types out of NODE_OPTIONS, and point an editor's ESLint extension at that Node (docs/dev-handoff.md).`,
+    `eslint.config.js loads the lint rules in scripts/eslint-rules/*.ts, and this Node (${process.version}) does not run TypeScript files: type stripping is on by default from Node 22.18 and off here. Use Node 22.18 or later, the floor of package.json engines (nvm install 22 && nvm use 22: .nvmrc names the 22 line, and an older 22 installed locally would fail here again), take --no-experimental-strip-types out of NODE_OPTIONS, and point an editor's ESLint extension at that Node (docs/dev-handoff.md).`,
   );
 }
 const { default: tinnox } = await import('./scripts/eslint-rules/index.ts');
@@ -289,7 +289,10 @@ const NO_MIGRATOR_POOL_CAST = [
 // OrgReadTx the read-only form of an OrgTx that the callback of readOrg receives (a cast from it
 // to OrgTx would hand a read-only handle to what writes), and DefinerTx the handle asDefiner
 // gives its work. Matched like MigratorPool above, with the same
-// three forms left to review (a value typed `any`, an alias of the type, `as never`).
+// three forms left to review (a value typed `any`, an alias of the type, `as never`), and the
+// forms every brand rule but OrgId's leaves (CHK-2): a cast to a type derived from the brand
+// (`as typeof tx`, an indexed access, ReturnType or Parameters), a generic identity helper given
+// the brand as its type argument (`brand<OrgTx>(raw)`), and a constructor's type arguments.
 const HANDLE = '/^(Tx|OrgTx|OrgReadTx|PreOrgTx|DefinerTx)$/';
 const TX = `:matches([typeName.name=${HANDLE}], [typeName.right.name=${HANDLE}])`;
 const NO_TX_CAST = [
@@ -299,13 +302,14 @@ const NO_TX_CAST = [
       `:matches(TSAsExpression, TSTypeAssertion) > .typeAnnotation TSTypeReference${TX}`,
     ].join(', '),
     message:
-      'Do not cast to a transaction handle (Tx, OrgTx, OrgReadTx, PreOrgTx, DefinerTx): the type says the handle is inside a transaction, so an audit row written on it commits with the change it records, and whether an organisation is set, so a tenant statement runs under row-level security. Use the tx that the callback of readOrg receives (an OrgReadTx) or of changeOrg (an OrgTx; an operator route calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts), or, before the organisation is known, the one the callback of changePreOrg receives (a PreOrgTx, for the sec.* wrappers) and the OrgTx its enterOrg returns, all from @tinnox/db. A test opens one with withOrg or inTx from @tinnox/db/testing. A refusal with no change to pair with is written with auditStandalone(pool, event).',
+      'Do not cast to a transaction handle (Tx, OrgTx, OrgReadTx, PreOrgTx, DefinerTx): the type says the handle is inside a transaction, so an audit row written on it commits with the change it records, and whether an organisation is set, so a tenant statement runs under row-level security. Use the tx that the callback of readOrg receives (an OrgReadTx) or of changeOrg (an OrgTx; an operator route calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts), or, before the organisation is known, the one the callback of changePreOrg receives (a PreOrgTx, for the sec.* wrappers) and the OrgTx its enterOrg returns, all from @tinnox/db. A test opens one with withOrg or inTx from @tinnox/db/testing. A refusal with no change to pair with is written with auditStandalone(ctx.db, event).',
   },
 ];
 // OTH-12: a SqlFragment says the text was written in the source (sql`...`, sqlParameter, joinSql
 // in packages/db/src/sql.ts), which is what lets tinnox/sql-fragments allow it inside a statement.
-// A cast would let any string in. Matched like the two above, with the same three forms left to
-// review; packages/db/src/sql.ts, where the three makers are, has its own block below.
+// A cast would let any string in. Matched like the two above, with the same forms left to
+// review (the three, and those CHK-2 lists above NO_TX_CAST); packages/db/src/sql.ts, where the
+// three makers are, has its own block below.
 const SQL_FRAGMENT = ":matches([typeName.name='SqlFragment'], [typeName.right.name='SqlFragment'])";
 const NO_SQL_FRAGMENT_CAST = [
   {
@@ -332,11 +336,20 @@ const NO_SQL_FRAGMENT_CAST = [
 //     `app.get<{ Params: { id: OrgId } }>(...)`): pg, zod and Fastify take such an argument on
 //     trust, so it is a cast by another name. expectTypeOf and its matchers (vitest) are let
 //     through: they only compare types.
+//   - the annotated type of a query result (`const r: QueryResult<{ org_id: OrgId }> =
+//     await tx.query(...)`, or destructured: `const { rows }: QueryResult<...>`), which fills in
+//     the row type the rule above refuses (SEC-4).
 // Not seen, and left to review: the three forms the MigratorPool rule leaves (a value typed
 // `any`, which the no-unsafe-* rules of typescript-eslint report where it is used; an alias of
 // the type; `as never`); a cast to a named type that contains an OrgId (`body as SessionLookup`);
-// a named row type given to query (`type Row = { org_id: OrgId }`, then `query<Row>`); and a
-// generic helper whose `as T` is inferred (`const id: OrgId = brand(value)`). A selector cannot
+// a cast to a type derived from one (`as typeof someOrg`, `as SessionLookup['orgId']`,
+// `as Parameters<typeof readOrg>[1]`, `as ReturnType<...>`); a named row type given to query
+// (`type Row = { org_id: OrgId }`, then `query<Row>`); a generic helper whose `as T` is inferred
+// (`const id: OrgId = brand(value)`); the type arguments of a constructor (`new Box<OrgId>()`,
+// left out on purpose: `new Map<OrgId, string[]>()` is a collection); a local function named
+// like a matcher of expectTypeOf; and TypeScript's own unsound forms (an overload signature that
+// returns OrgId over a body that returns a string, a string written into an OrgId[] through a
+// string[] alias of it, or into an object through a wider property type). A selector cannot
 // follow a named type to its declaration, and refusing OrgId in every interface would refuse the
 // fields that rightly carry one (ServeObjectInput.orgId). AGENTS.md section 2 lists them for review. A
 // cast to `import('@tinnox/db').OrgId` is refused by consistent-type-imports instead.
@@ -350,9 +363,10 @@ const NO_ORG_ID_FORGERY = [
       `:matches(TSAsExpression, TSTypeAssertion) > .typeAnnotation TSTypeReference${ORG_ID}`,
       `TSTypePredicate TSTypeReference${ORG_ID}`,
       `CallExpression:not(${TYPE_ONLY_CALL}) > TSTypeParameterInstantiation TSTypeReference${ORG_ID}`,
+      `VariableDeclarator > :matches(Identifier, ObjectPattern, ArrayPattern).id > TSTypeAnnotation TSTypeReference:matches([typeName.name='QueryResult'], [typeName.right.name='QueryResult']) TSTypeReference${ORG_ID}`,
     ].join(', '),
     message:
-      'Do not make an OrgId here (AG-2.3): not by a cast, a type predicate, or a type argument of a call such as the row type of query(). The type says the database named the organisation. In the API it comes from operatorOf(request).orgId, the device credential (deviceByTokenHash) or another lookup of packages/db/src/sec.ts, never from the request; a lookup that is missing is added there. An offline tool that creates an organisation calls newOrgId(), and one that looks a member or an invite up reads its org_id through asDefiner (both from @tinnox/db/migrate). A test names its organisation with testOrgId(id) from @tinnox/db/testing.',
+      'Do not make an OrgId here (AG-2.3): not by a cast, a type predicate, or a type argument of a call such as the row type of query(), nor by the annotated type of a query result (QueryResult<{ org_id: OrgId }>). The type says the database named the organisation. In the API it comes from operatorOf(request).orgId, the device credential (deviceByTokenHash) or another lookup of packages/db/src/sec.ts, never from the request; a lookup that is missing is added there. An offline tool that creates an organisation calls newOrgId(), and one that looks a member or an invite up reads its org_id through asDefiner (both from @tinnox/db/migrate). A test names its organisation with testOrgId(id) from @tinnox/db/testing.',
   },
 ];
 // SCR-34 (adoption plan steps 19 and 20): a WritePermit says that what judged the caller issued
@@ -361,7 +375,7 @@ const NO_ORG_ID_FORGERY = [
 // write past that check as far as the types go (changeOrg then refuses the value when it runs:
 // it holds no terms). In every file, tests included, and in packages/db too, where
 // issueWritePermit builds one without a cast. Matched like MigratorPool above, with the same
-// three forms left to review.
+// forms left to review (the three, and those CHK-2 lists above NO_TX_CAST).
 const WRITE_PERMIT = ":matches([typeName.name='WritePermit'], [typeName.right.name='WritePermit'])";
 const NO_WRITE_PERMIT_CAST = [
   {
@@ -378,7 +392,7 @@ const NO_WRITE_PERMIT_CAST = [
 // of a player's change to nothing else. A cast would let a handler that resolved no credential
 // change an organisation as far as the types go (changeAsDevice then refuses the value when it
 // runs: it carries no mark). In every file, tests included. Matched like MigratorPool above,
-// with the same three forms left to review.
+// with the same forms left to review (the three, and those CHK-2 lists above NO_TX_CAST).
 const VERIFIED_DEVICE =
   ":matches([typeName.name='VerifiedDevice'], [typeName.right.name='VerifiedDevice'])";
 const NO_VERIFIED_DEVICE_CAST = [
@@ -396,7 +410,7 @@ const NO_VERIFIED_DEVICE_CAST = [
 // and changeOrgAsMigrator hold a change to nothing else, as changeOrg holds one to its permit. A
 // cast would hold a change to a statement its caller wrote (both refuse the value when they run:
 // it carries no mark). In every file, tests included. Matched like MigratorPool above, with the
-// same three forms left to review.
+// same forms left to review (the three, and those CHK-2 lists above NO_TX_CAST).
 const AUDIT_STATEMENT =
   ":matches([typeName.name='AuditStatement'], [typeName.right.name='AuditStatement'])";
 const NO_AUDIT_STATEMENT_CAST = [
@@ -409,7 +423,25 @@ const NO_AUDIT_STATEMENT_CAST = [
       'Do not cast to AuditStatement: the type says the statement was read from the table of its route, job or command, so the change is compared with what that table says it audits (SCR-34). A route outside the operator table passes routeStatement(request), a job jobStatement(name), a refusal refusalStatement(request, audit) (all apps/api/src/route-audit.ts), and a provisioning command provisionStatement(command) (scripts/lib/provision.ts). A test makes one with issueAuditStatement({ stated, statedIn }) from @tinnox/db.',
   },
 ];
-// The types only packages/db may make.
+// DEC-23 (adoption plan step 22): a PlannedPublication says a planner of @tinnox/domain accepted
+// the draft, the route's capability check included, and createPublication (apps/api/src/
+// publishing.ts) takes nothing else. markPlanned, its one maker, is off the package entry; a cast
+// would forge one all the same. In every file, tests included; packages/domain/src/planned.ts,
+// where markPlanned is, has its own block below. Matched like MigratorPool above, with the same
+// forms left to review (the three, and those CHK-2 lists above NO_TX_CAST).
+const PLANNED_PUBLICATION =
+  ":matches([typeName.name='PlannedPublication'], [typeName.right.name='PlannedPublication'])";
+const NO_PLANNED_PUBLICATION_CAST = [
+  {
+    selector: [
+      `:matches(TSAsExpression, TSTypeAssertion) > TSTypeReference.typeAnnotation${PLANNED_PUBLICATION}`,
+      `:matches(TSAsExpression, TSTypeAssertion) > .typeAnnotation TSTypeReference${PLANNED_PUBLICATION}`,
+    ].join(', '),
+    message:
+      "Do not cast to PlannedPublication: the type says a planner accepted the draft, so the route's capability check ran (DEC-23). Pass the draft that planPublication, planSchedulePublication or planLayoutPublication from @tinnox/domain returned (in apps/api, the draft of planDraft or assessDisplays in apps/api/src/publishing.ts). A test of @tinnox/domain stands in for a planner with markPlanned from packages/domain/src/planned.ts.",
+  },
+];
+// The types only packages/db (and, for PlannedPublication, packages/domain) may make.
 const NO_BRAND_CAST = [
   ...NO_MIGRATOR_POOL_CAST,
   ...NO_TX_CAST,
@@ -418,6 +450,7 @@ const NO_BRAND_CAST = [
   ...NO_WRITE_PERMIT_CAST,
   ...NO_VERIFIED_DEVICE_CAST,
   ...NO_AUDIT_STATEMENT_CAST,
+  ...NO_PLANNED_PUBLICATION_CAST,
 ];
 
 // Adoption plan section 3.2: the API reads the time from one injected clock, so tests can set it.
@@ -468,13 +501,14 @@ const stringMatching = (regex) =>
 // needs (any handle for a lookup, a PreOrgTx or an OrgTx for a change) and what it returns.
 // Matched in string and template text of product code and scripts; packages/db/src/sec.ts has
 // its own block below.
-// Tests are outside: they call the functions raw to test them. Not seen: a name put together at
-// run time ('sec.' + name).
+// Tests are outside: they call the functions raw to test them. The schema may be quoted and
+// spaced from the dot (`"sec" . session_revoke(`, CHK-10). Not seen: a name put together at run
+// time ('sec.' + name).
 const NO_RAW_SEC = [
   {
-    selector: stringMatching('/\\bsec\\.[a-z_]+\\s*\\(/'),
+    selector: stringMatching('/\\b"?sec"?\\s*\\.\\s*"?[a-z_][a-z0-9_]*"?\\s*\\(/i'),
     message:
-      'Call sec.* through a typed wrapper in packages/db/src/sec.ts (exported from @tinnox/db); add the wrapper if it is missing. It names the function once, types what it returns (an organisation as an OrgId) and says which handle it takes: any handle for a lookup (poolAsTx(pool) or a tx), a PreOrgTx for a change before the organisation is known, an OrgTx for one that needs the organisation.',
+      'Call sec.* through a typed wrapper in packages/db/src/sec.ts (exported from @tinnox/db); add the wrapper if it is missing. It names the function once, types what it returns (an organisation as an OrgId) and says which handle it takes: any handle for a lookup (poolAsTx(ctx.db) or a tx), a PreOrgTx for a change before the organisation is known, an OrgTx for one that needs the organisation.',
   },
 ];
 
@@ -500,6 +534,122 @@ const NO_ROLE_SWITCH = [
     message:
       'Do not switch the database role here (D25): the only SET ROLE text is in asDefiner (packages/db/src/definer.ts, exported from @tinnox/db/migrate). An offline tool that holds a MigratorPool calls asDefiner(pool, tx, work) inside its transaction, and the switch ends with `work`. The API never switches role: it reads across organisations only through the typed sec.* wrappers of @tinnox/db.',
   },
+];
+
+// SEC-1 (group B review): run() in packages/db/src/tx.ts sets the organisation of a transaction
+// once, from the OrgId its opener took, and begins and ends the transaction around its callback,
+// so the audit rows commit with the change. tinnox_app may set any app.org_id, so the database
+// cannot refuse text sent on the handle that sets it again or ends the transaction early
+// (control matrix B4): this rule does, in API source and the offline tools; packages/db/src,
+// where run() is, is outside. Matched where a statement starts, as NO_ROLE_SWITCH is:
+//   - SET, SET LOCAL, SET SESSION or RESET of app.org_id, in any case and any quoting
+//     (`"app.org_id"`, `"app".org_id`, `app . "org_id"`), and anywhere in the text
+//     set_config('app.org_id' and an UPDATE of pg_settings that names 'app.org_id';
+//   - a transaction-control statement written in capitals, as every statement of this repository
+//     is (BEGIN, START TRANSACTION, COMMIT, END, ABORT, ROLLBACK, SAVEPOINT, RELEASE SAVEPOINT,
+//     SET TRANSACTION, PREPARE TRANSACTION), and the same in any case where it is the first
+//     argument of a call to query(). A bare word must stand alone (`'COMMIT'`, `'END;'`) or be
+//     followed by one of its own keywords, so a sentence that starts with one and an event name
+//     ('end', 'abort') pass. A string that is nothing but a bare word is not SQL until it is
+//     sent, so outside query() it counts only as the value of a constant in capitals
+//     (`const DONE = 'COMMIT'`), the form a statement is kept in; a literal type
+//     (`type Phase = 'COMMIT' | 'ROLLBACK'`), a comparison or a lower-case variable passes.
+// Tests are outside: they open and end transactions of their own to arrange data. Not seen: the
+// name of the setting passed as a parameter (`set_config($1, $2, true)`), a lower-case statement
+// kept in a variable, a bare word kept in a variable not named in capitals, the statement behind
+// a SQL comment or inside a DO block, and text put together at run time. AGENTS.md section 2
+// lists them for review.
+const ORG_STATEMENT =
+  '\\s*(SET\\s+((LOCAL|SESSION)\\s+)?|RESET\\s+)("app\\.org_id"|"?app"?\\s*\\.\\s*"?org_id\\b)|\\bset_config\\s*\\(\\s*\'app\\.org_id\'|\\bUPDATE\\s+("?pg_catalog"?\\s*\\.\\s*)?"?pg_settings\\b[\\s\\S]*\'app\\.org_id\'';
+const TRANSACTION_STATEMENT =
+  '\\s*(BEGIN(\\s*(;|$)|\\s+(WORK|TRANSACTION|READ|ISOLATION|NOT|DEFERRABLE)\\b)|START\\s+TRANSACTION\\b|(COMMIT|END|ABORT|ROLLBACK)(\\s*(;|$)|\\s+(WORK|TRANSACTION|AND|PREPARED|TO)\\b)|SAVEPOINT\\s+\\w|RELEASE\\s+SAVEPOINT\\b|SET\\s+(TRANSACTION|SESSION\\s+CHARACTERISTICS)\\b|PREPARE\\s+TRANSACTION\\b)';
+/** The statement given to query(), as a node of `type`. */
+const queryStatement = (type) =>
+  `CallExpression[callee.property.name='query'] > ${type}.arguments:first-child`;
+/** A whole string that is one transaction word and nothing else. */
+const BARE_TRANSACTION_WORD = '/^\\s*(BEGIN|COMMIT|END|ABORT|ROLLBACK)\\s*;?\\s*$/';
+/** A constant named in capitals, the form a statement is kept in. */
+const CONSTANT = 'VariableDeclarator[id.name=/^[A-Z][A-Z0-9_]*$/]';
+const NO_TRANSACTION_TEXT = [
+  {
+    selector: [
+      `Literal[value=/(^|;)${ORG_STATEMENT}/i]`,
+      `TemplateElement:first-child[value.raw=/(^|;)${ORG_STATEMENT}/i]`,
+      `TemplateElement:not(:first-child)[value.raw=/;${ORG_STATEMENT}/i]`,
+    ].join(', '),
+    message:
+      'Do not set app.org_id in SQL text (SEC-1): run() in packages/db/src/tx.ts sets the organisation of a transaction once, from the OrgId its opener took, and row-level security trusts it. Read with readOrg(ctx.db, orgId, fn) and change through changeAsOperator(ctx, request, fn) (apps/api/src/auth/permissions.ts), changeAsDevice, changeAsJob or changeOrgAsMigrator, each with the OrgId of a lookup of packages/db/src/sec.ts. Work in another organisation is a transaction of its own, opened after this one has returned.',
+  },
+  {
+    selector: [
+      `Literal:not(TSLiteralType > Literal)[value=/(^|;)${TRANSACTION_STATEMENT}/]:not([value=${BARE_TRANSACTION_WORD}])`,
+      `${CONSTANT} > Literal.init[value=${BARE_TRANSACTION_WORD}]`,
+      `TemplateElement:first-child[value.raw=/(^|;)${TRANSACTION_STATEMENT}/]:not([value.raw=${BARE_TRANSACTION_WORD}])`,
+      `${CONSTANT} > TemplateLiteral.init > TemplateElement:first-child[value.raw=${BARE_TRANSACTION_WORD}]`,
+      `TemplateElement:not(:first-child)[value.raw=/;${TRANSACTION_STATEMENT}/]`,
+      `${queryStatement('Literal')}[value=/(^|;)${TRANSACTION_STATEMENT}/i]`,
+      `${queryStatement('TemplateLiteral')} > TemplateElement:first-child[value.raw=/(^|;)${TRANSACTION_STATEMENT}/i]`,
+    ].join(', '),
+    message:
+      'Do not begin, end or mark a transaction in SQL text (SEC-1): run() in packages/db/src/tx.ts begins the transaction before its callback and commits or rolls it back after, so the audit rows the change returns commit with it (AGENTS.md section 3). Return from the callback to commit, and throw to roll back. Work that must commit on its own is a transaction of its own (readOrg, changeAsOperator, changeAsDevice, changeAsJob, changeOrgAsMigrator), opened after this one has returned.',
+  },
+];
+
+// EAX-06 (adoption plan step 22): a session-level advisory lock outlives the transactions that
+// work under it, so losing its connection loses the lock while that work goes on. It is taken by
+// withSessionLock in packages/db/src/session-lock.ts, which hands the work a signal that aborts
+// when the connection is lost and never returns the connection to the pool still holding the
+// lock. Matched in string and template text of product code and scripts, but packages/db/src,
+// where the helper and the migration runner's own lock (on the connection that does the work)
+// live: pg_advisory_lock, pg_try_advisory_lock, pg_advisory_unlock and their _shared forms, and
+// pg_advisory_unlock_all. The transaction locks (pg_advisory_xact_lock) do not match: they end
+// with their transaction. Tests are outside: they hold the lock as a second runner would. Not
+// seen: a name put together at run time.
+const NO_SESSION_LOCK = [
+  {
+    selector: stringMatching('/\\bpg_(try_)?advisory_(lock|unlock)(_shared|_all)?\\s*\\(/i'),
+    message:
+      'Take a session lock through withSessionLock, so work on other connections stops when the lock is lost (EAX-06): withSessionLock(ctx.db, name, (signal) => work) from @tinnox/db (packages/db/src/session-lock.ts) holds the lock on a connection of its own, aborts the signal when that connection is lost, and gives the lock back; add the name to its SessionLock type. A lock that only guards the statements of one transaction is pg_advisory_xact_lock in that transaction (withCountedLimit for a counted ceiling).',
+  },
+];
+
+// EAX-08: a security exemption is decided on an address, never on a name. A loopback name or
+// literal, in any case, is refused where API code compares a host with it: an equality test, a
+// switch case, a list or Set to look it up in, and the argument of endsWith, startsWith or
+// includes (`.localhost`, `127.`), which is how the old isLoopbackHost of config.ts was written,
+// and, since CHK-5, a constant that holds one (`const LOCAL = 'localhost'`), an object key to look
+// a host up by (`{ localhost: true }`) and a regular expression that names one
+// (`/^(localhost|127\.0\.0\.1)$/i`). Only the files in LOOPBACK_NAME_ALLOWED may. Not seen: a
+// prefix compared by equality (`host.slice(0, 4) === '127.'`) and text put together at run time.
+const LOOPBACK_TEXT = '/^(localhost|127\\.0\\.0\\.1|\\[?::1\\]?)$/i';
+const LOOPBACK_AFFIX = '/^(\\.?localhost|127\\.(0\\.0\\.1)?|\\[?::1\\]?)$/i';
+const NO_LOOPBACK_NAME = [
+  {
+    selector: [
+      `BinaryExpression[operator=/^[!=]==?$/] > Literal[value=${LOOPBACK_TEXT}]`,
+      `BinaryExpression[operator=/^[!=]==?$/] > TemplateLiteral > TemplateElement[value.raw=${LOOPBACK_TEXT}]`,
+      `SwitchCase > Literal.test[value=${LOOPBACK_TEXT}]`,
+      `SwitchCase > TemplateLiteral.test > TemplateElement[value.raw=${LOOPBACK_TEXT}]`,
+      `ArrayExpression > Literal[value=${LOOPBACK_TEXT}]`,
+      `ArrayExpression > TemplateLiteral > TemplateElement[value.raw=${LOOPBACK_TEXT}]`,
+      `CallExpression[callee.property.name=/^(endsWith|startsWith|includes)$/] > Literal.arguments[value=${LOOPBACK_AFFIX}]`,
+      `CallExpression[callee.property.name=/^(endsWith|startsWith|includes)$/] > TemplateLiteral.arguments > TemplateElement[value.raw=${LOOPBACK_AFFIX}]`,
+      `VariableDeclarator > Literal.init[value=${LOOPBACK_TEXT}]`,
+      `VariableDeclarator > TemplateLiteral.init > TemplateElement[value.raw=${LOOPBACK_TEXT}]`,
+      `Property > Literal.key[value=${LOOPBACK_TEXT}]`,
+      `Property > Identifier.key[name=/^localhost$/i]`,
+      `Literal[regex.pattern=/localhost|127\\\\?\\.0|::1/i]`,
+    ].join(', '),
+    message:
+      "Use isLoopbackAddress from '@tinnox/contracts': a name is loopback only once it is resolved, and the one rule for an address is shared with the end-to-end stack (EAX-08). Only the files in LOOPBACK_NAME_ALLOWED of eslint.config.js (apps/api/src/config.ts, for the development origins and issuer on 'localhost') may compare a host with a loopback name.",
+  },
+];
+
+// EAX-08: the API files that may compare a host with a loopback name, and why.
+const LOOPBACK_NAME_ALLOWED = [
+  // isLoopback accepts the development name `localhost` for an http origin and issuer
+  // (.env.example), beside isLoopbackAddress; it refuses *.localhost.
+  'apps/api/src/config.ts',
 ];
 
 // AG-1.9, AG-1.17 (D5): product code never names the migrator, superuser or provisioning
@@ -706,7 +856,7 @@ export const DB_ENTRIES = {
   migrate: {
     refusedIn: (dir) => dir.startsWith('apps/'),
     message:
-      '@tinnox/db/migrate is for the offline tools that connect as tinnox_migrator: the migration runner, the seed and provisioning under scripts/, and tests (AG-1.10). The API holds only the tinnox_app connection: use createPool, readOrg, changeOrg (through changeAsOperator in apps/api/src/auth/permissions.ts) and the typed sec.* wrappers from @tinnox/db. Work that needs the migrator is a script under scripts/, run from a controlled host.',
+      '@tinnox/db/migrate is for the offline tools that connect as tinnox_migrator: the migration runner, the seed and provisioning under scripts/, and tests (AG-1.10). The API holds only the tinnox_app connection, as the Database of createDatabase (AppContext.db): use readOrg, changeOrg (through changeAsOperator in apps/api/src/auth/permissions.ts) and the typed sec.* wrappers from @tinnox/db. Work that needs the migrator is a script under scripts/, run from a controlled host.',
   },
   // What only tests may use: refused in every file that is not a test.
   testing: {
@@ -732,8 +882,10 @@ function dbEntryPatterns(dir) {
 
 // AG-2.2: poolAsTx runs with no organisation, so row-level security shows a tenant read nothing
 // and nobody notices. It is for sec.* calls only, and only these files may import it, each with
-// its reason. Three of the reasons are not "before the organisation is known",
-// which is what the rule in AGENTS.md says: the list records what each file really does. A file
+// its reason. The same files hold the sec.* wrappers that read or change every organisation
+// (CROSS_ORG_WRAPPERS below, SEC-2): they take any handle, a transaction an operator route
+// already holds included, so the import is what keeps them to these files. Three of the reasons are not "before the organisation is known",
+// which is what the list was first written for: the list records what each file really does. A file
 // leaves the list when its use is gone. The handle of poolAsTx has a query, which
 // tinnox/no-query-off-transaction refuses in these files. withoutOrg, which ran with no
 // organisation too, is no longer exported by @tinnox/db since step 20 (tinnox/no-legacy-transaction
@@ -754,6 +906,22 @@ export const UNSCOPED_HELPER_FILES = {
     'not before the organisation is known, but across all of them: poolAsTx for mediaProcessingJobs, the queue of media waiting for validation; each job is then handled inside readOrg and changeAsJob',
 };
 const UNSCOPED_HELPERS = ['poolAsTx'];
+// SEC-2 (group B review): the wrappers of packages/db/src/sec.ts that work across organisations.
+// displayAlertOrgs and mediaProcessingJobs name an OrgId for every organisation, and
+// deviceByRegistrationId one for a registration id that is no secret, so readOrg would take
+// any of them from a route; the three purges delete in every organisation with no audit row;
+// membershipByOidcSub reads a member of any organisation by a subject the caller chose. A lookup
+// by the hash of a secret (sessionByIdHash, deviceByTokenHash, alertRecipientByTokenHash) proves
+// the caller holds that secret, and stays open to every file.
+const CROSS_ORG_WRAPPERS = [
+  'displayAlertOrgs',
+  'mediaProcessingJobs',
+  'deviceByRegistrationId',
+  'sessionPurgeExpired',
+  'pairingPurge',
+  'heartbeatLogPurge',
+  'membershipByOidcSub',
+];
 
 // SCR-34 (adoption plan steps 19 and 20): changeOrg of @tinnox/db runs no change without a
 // WritePermit, and issueWritePermit makes one from any re-check and any statement, so only what
@@ -853,19 +1021,9 @@ const DB_CALLER_FILES = DB_CALLERS.map((dir) =>
 
 // AG-2.1: the statements tinnox/no-query-off-transaction lets a file send off a transaction,
 // each with its reason. The rule takes a statement only when it is a string literal the pattern
-// matches, so an entry opens nothing else in its file.
-export const QUERY_OFF_TRANSACTION = {
-  'apps/api/src/alerts.ts': [
-    {
-      sql: '^SELECT pg_try_advisory_lock\\(hashtextextended\\(\\$1, 0\\)\\) AS ok$',
-      reason: 'session lock; removed by `withSessionLock` in step 22',
-    },
-    {
-      sql: '^SELECT pg_advisory_unlock\\(hashtextextended\\(\\$1, 0\\)\\) AS ok$',
-      reason: 'session lock; removed by `withSessionLock` in step 22',
-    },
-  ],
-};
+// matches, so an entry opens nothing else in its file. Empty since adoption plan step 22: the
+// alert check's session lock, the last entry, is taken by withSessionLock of @tinnox/db.
+export const QUERY_OFF_TRANSACTION = {};
 
 // AG-3.1, D25: the statements tinnox/no-raw-audit-insert lets a file write for itself, each with
 // its reason. Everything else returns its audit rows from its change, and changeOrg or
@@ -1134,7 +1292,7 @@ function pgMessage(dir) {
     const offline = dir.startsWith('apps/')
       ? ''
       : ' (connectMigrator from @tinnox/db/migrate for an offline tool that needs tinnox_migrator)';
-    return `Only packages/db talks to PostgreSQL. Use createPool and the transaction openers of @tinnox/db (readOrg, changeOrg, changePreOrg)${offline}; ${why}`;
+    return `Only packages/db talks to PostgreSQL. Use createDatabase and the transaction openers of @tinnox/db (readOrg, changeOrg, changePreOrg)${offline}; ${why}`;
   }
   // packages/app-render is bundled for the browser too, but a package may not import an app, so
   // it gets the package sentence below.
@@ -1168,7 +1326,8 @@ const IMPORT_FACETS = [
     ignores: TEST_FILES,
     patterns: (dir) => [
       {
-        regex: '(^|/)tests?/|\\.test(-support)?\\.tsx?$',
+        // Any extension spelling: TypeScript resolves './x.test.js' to x.test.ts (SEC-3).
+        regex: '(^|/)tests?/|\\.test(-support)?\\.[cm]?[jt]sx?$',
         message:
           'Product code does not import test code. Move what both need into a module that is not a test file, and import it from the test.',
       },
@@ -1187,7 +1346,13 @@ const IMPORT_FACETS = [
         regex: '^@tinnox/db$',
         importNames: UNSCOPED_HELPERS,
         message:
-          'poolAsTx runs without an organisation (AG-2.2). Use readOrg(pool, orgId, fn) for a read, or changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts for an operator change (it runs changeOrg of @tinnox/db), where row-level security limits every statement to that organisation. If the organisation really is not known yet (a credential is still being resolved, or a sec.* wrapper works across every organisation), add this file to UNSCOPED_HELPER_FILES in eslint.config.js with its reason, and say why in the pull request.',
+          'poolAsTx runs without an organisation (AG-2.2). Use readOrg(ctx.db, orgId, fn) for a read, or changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts for an operator change (it runs changeOrg of @tinnox/db), where row-level security limits every statement to that organisation. If the organisation really is not known yet (a credential is still being resolved, or a sec.* wrapper works across every organisation), add this file to UNSCOPED_HELPER_FILES in eslint.config.js with its reason, and say why in the pull request.',
+      },
+      {
+        regex: '^@tinnox/db$',
+        importNames: CROSS_ORG_WRAPPERS,
+        message:
+          'This sec.* wrapper reads or changes every organisation (SEC-2): it names an OrgId the caller did not prove, or deletes across organisations with no audit row. A route reads its own organisation with readOrg(ctx.db, operatorOf(request).orgId, fn), and a player route resolves its device with verifyDeviceCredential (apps/api/src/auth/device.ts). Only the files of UNSCOPED_HELPER_FILES in eslint.config.js call these: the alert check (displayAlertOrgs), the media pipeline (mediaProcessingJobs), the signed media URL of routes/player.ts (deviceByRegistrationId, after its signature is checked) and housekeeping (the purges). A new caller is added there with its reason, in its pull request.',
       },
     ],
   },
@@ -1201,7 +1366,7 @@ const IMPORT_FACETS = [
         regex: '^@tinnox/db$',
         importNames: PERMIT_MAKERS,
         message:
-          'Only what judges the caller of a change issues its WritePermit (SCR-34; the files of WRITE_PERMIT_ISSUERS in eslint.config.js). An operator route calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts and returns { value, audit }; it never holds the permit. A change with no operator behind it does not make a permit of its own either: a player route calls changeAsDevice(ctx, request, device, fn) with the device verifyDeviceCredential returned (apps/api/src/auth/device.ts), the alert check and the media pipeline call changeAsJob(pool, job, orgId, fn) (apps/api/src/jobs.ts), an offline tool calls changeOrgAsMigrator(pool, orgId, statement, fn) from @tinnox/db/migrate, and a refusal that changed nothing is written with recordRefusal(ctx, request, session, event) (apps/api/src/auth/refusal.ts). A caller of a kind none of these fits is decided in its pull request, as a new entry of WRITE_PERMIT_ISSUERS.',
+          'Only what judges the caller of a change issues its WritePermit (SCR-34; the files of WRITE_PERMIT_ISSUERS in eslint.config.js). An operator route calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts and returns { value, audit }; it never holds the permit. A change with no operator behind it does not make a permit of its own either: a player route calls changeAsDevice(ctx, request, device, fn) with the device verifyDeviceCredential returned (apps/api/src/auth/device.ts), the alert check and the media pipeline call changeAsJob(db, job, orgId, fn) (apps/api/src/jobs.ts), an offline tool calls changeOrgAsMigrator(pool, orgId, statement, fn) from @tinnox/db/migrate, and a refusal that changed nothing is written with recordRefusal(ctx, request, session, event) (apps/api/src/auth/refusal.ts). A caller of a kind none of these fits is decided in its pull request, as a new entry of WRITE_PERMIT_ISSUERS.',
       },
     ],
   },
@@ -1215,7 +1380,7 @@ const IMPORT_FACETS = [
         regex: '^@tinnox/db$',
         importNames: STATEMENT_MAKERS,
         message:
-          'Only the helpers that read a statement from its table make an AuditStatement (SCR-34; the files of STATEMENT_ISSUERS in eslint.config.js), so a change is never held to a statement its caller wrote. A route outside the operator table passes routeStatement(request) to changePreOrg, a job runs through changeAsJob(pool, job, orgId, fn) (jobStatement), a refusal through recordRefusal(ctx, request, session, event) (refusalStatement; all three in apps/api/src/route-audit.ts and its callers), and a provisioning command passes provisionStatement(command) from scripts/lib/provision.ts to changeOrgAsMigrator or changePreOrg. A new table of statements is decided in its pull request, as a new entry of STATEMENT_ISSUERS.',
+          'Only the helpers that read a statement from its table make an AuditStatement (SCR-34; the files of STATEMENT_ISSUERS in eslint.config.js), so a change is never held to a statement its caller wrote. A route outside the operator table passes routeStatement(request) to changePreOrg, a job runs through changeAsJob(db, job, orgId, fn) (jobStatement), a refusal through recordRefusal(ctx, request, session, event) (refusalStatement; all three in apps/api/src/route-audit.ts and its callers), and a provisioning command passes provisionStatement(command) from scripts/lib/provision.ts to changeOrgAsMigrator or changePreOrg. A new table of statements is decided in its pull request, as a new entry of STATEMENT_ISSUERS.',
       },
     ],
   },
@@ -1226,9 +1391,11 @@ const IMPORT_FACETS = [
     ignores: [...TEST_FILES, ...Object.keys(JOB_CHANGE_FILES)],
     patterns: [
       {
-        regex: '(^|/)jobs\\.ts$',
+        // The module whatever the extension spelling: TypeScript (NodeNext) and tsx resolve
+        // '../jobs.js' to jobs.ts (SEC-3).
+        regex: '(^|/)jobs(\\.[cm]?[jt]s)?$',
         message:
-          'apps/api/src/jobs.ts is the entry of the jobs that run with no request (SCR-34): changeAsJob changes an organisation with no role check and no credential, so only the alert check and the media pipeline may import it (JOB_CHANGE_FILES in eslint.config.js). An operator route calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts, which checks the role again first; a player route calls changeAsDevice(ctx, request, device, fn) from apps/api/src/auth/device.ts; a read calls readOrg(pool, orgId, fn) from @tinnox/db. A new job gets its row in JOB_AUDIT (apps/api/src/route-audit.ts) and its file in JOB_CHANGE_FILES with its reason, in its pull request.',
+          'apps/api/src/jobs.ts is the entry of the jobs that run with no request (SCR-34): changeAsJob changes an organisation with no role check and no credential, so only the alert check and the media pipeline may import it (JOB_CHANGE_FILES in eslint.config.js). An operator route calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts, which checks the role again first; a player route calls changeAsDevice(ctx, request, device, fn) from apps/api/src/auth/device.ts; a read calls readOrg(ctx.db, orgId, fn) from @tinnox/db. A new job gets its row in JOB_AUDIT (apps/api/src/route-audit.ts) and its file in JOB_CHANGE_FILES with its reason, in its pull request.',
       },
     ],
   },
@@ -1243,7 +1410,7 @@ const IMPORT_FACETS = [
         regex: '^@tinnox/db$',
         importNames: PRE_ORG_OPENERS,
         message:
-          'changePreOrg is for a transaction that starts before the organisation is known (SCR-34): its enterOrg gives a handle that writes for any OrgId, with no permit and no role check. An operator change calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts, which checks the role again first, and returns { value, audit }; a read calls readOrg(pool, orgId, fn) from @tinnox/db. If this file really resolves a credential to its organisation inside the transaction, add it to PRE_ORG_CHANGE_FILES in eslint.config.js with its reason, and say why in the pull request.',
+          'changePreOrg is for a transaction that starts before the organisation is known (SCR-34): its enterOrg gives a handle that writes for any OrgId, with no permit and no role check. An operator change calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts, which checks the role again first, and returns { value, audit }; a read calls readOrg(ctx.db, orgId, fn) from @tinnox/db. If this file really resolves a credential to its organisation inside the transaction, add it to PRE_ORG_CHANGE_FILES in eslint.config.js with its reason, and say why in the pull request.',
       },
     ],
   },
@@ -1396,6 +1563,45 @@ function importBoundaryBlocks() {
   });
 }
 
+// CHK-6 (group B review): the import rules above hold each gated name to the files of its list,
+// and ignore those files. A listed file that re-exported the name would pass it to a file on no
+// list, so no file of the API or the offline tools re-exports one, nor everything of @tinnox/db,
+// @tinnox/db/migrate or the entry of the jobs. A selector cannot follow an export back to its
+// import, so the name is imported under its own name, and those modules by name, not as a
+// namespace: an alias (`import { poolAsTx as open }`, then `export { open }`) or a namespace
+// (`import * as db`, then `export { db }`) would carry it past the re-export check. Nothing in the
+// tree needs either. Not seen: a name passed on as a value (`export const open = poolAsTx`).
+const GATED_NAMES = [
+  ...UNSCOPED_HELPERS,
+  ...CROSS_ORG_WRAPPERS,
+  ...PERMIT_MAKERS,
+  ...STATEMENT_MAKERS,
+  ...PRE_ORG_OPENERS,
+  'newOrgId',
+  'changeAsJob',
+];
+const GATED_NAME = `/^(${GATED_NAMES.join('|')})$/`;
+// esquery reads a selector regex up to the first slash, so a slash is written \x2f.
+const GATED_MODULE = '/^@tinnox\\x2fdb(\\x2fmigrate)?$|(^|\\x2f)jobs(\\.[cm]?[jt]s)?$/';
+const NO_GATED_REEXPORT = [
+  {
+    selector: [
+      `ExportSpecifier[local.name=${GATED_NAME}]`,
+      `ExportAllDeclaration[source.value=${GATED_MODULE}]`,
+    ].join(', '),
+    message:
+      'Do not re-export a name the import rules hold to a list (CHK-6): poolAsTx and the cross-organisation sec.* wrappers (UNSCOPED_HELPER_FILES), issueWritePermit (WRITE_PERMIT_ISSUERS), issueAuditStatement (STATEMENT_ISSUERS), changePreOrg (PRE_ORG_CHANGE_FILES), newOrgId (NEW_ORG_ID_FILES) and changeAsJob (JOB_CHANGE_FILES), all in eslint.config.js. A re-export hands the name to files on no list. Import it in the file that calls it, and add that file to the list with its reason in its pull request; import the other names of @tinnox/db by name, not with export *.',
+  },
+  {
+    selector: [
+      `ImportSpecifier[imported.name=${GATED_NAME}]:not([local.name=${GATED_NAME}])`,
+      `ImportDeclaration[source.value=${GATED_MODULE}] > ImportNamespaceSpecifier`,
+    ].join(', '),
+    message:
+      "Import a name the import rules hold to a list under its own name, and @tinnox/db, @tinnox/db/migrate and the entry of the jobs (apps/api/src/jobs.ts) by name, not as a namespace (CHK-6): the re-export check reads the name of what a file exports, so an alias or a namespace would carry poolAsTx, a cross-organisation sec.* wrapper, issueWritePermit, issueAuditStatement, changePreOrg, newOrgId or changeAsJob past it. Write `import { poolAsTx } from '@tinnox/db'` and call poolAsTx(...).",
+  },
+];
+
 // The no-restricted-syntax lists of product code (apps/*/src, packages/*/src and the player's
 // service worker, without tests) and of API source, which also reads no clock and no organisation
 // id from the request.
@@ -1409,6 +1615,7 @@ const PRODUCT_SYNTAX = [
   ...NO_LOADCONFIG_OPTIONS,
   ...NO_RAW_SEC,
   ...NO_ROLE_SWITCH,
+  ...NO_SESSION_LOCK,
 ];
 const API_SYNTAX = [
   ...NO_NON_NULL,
@@ -1421,6 +1628,10 @@ const API_SYNTAX = [
   ...NO_LOADCONFIG_OPTIONS,
   ...NO_RAW_SEC,
   ...NO_ROLE_SWITCH,
+  ...NO_TRANSACTION_TEXT,
+  ...NO_GATED_REEXPORT,
+  ...NO_SESSION_LOCK,
+  ...NO_LOOPBACK_NAME,
 ];
 // The list of the offline tools (D25: scripts get the database rules too). The tools that read
 // the migrator URL get it as it is; every other script also gets NO_MIGRATOR_URL.
@@ -1431,7 +1642,13 @@ const SCRIPTS_SYNTAX = [
   ...NO_GLOBAL_PROCESS_ENV,
   ...NO_RAW_SEC,
   ...NO_ROLE_SWITCH,
+  ...NO_TRANSACTION_TEXT,
+  ...NO_GATED_REEXPORT,
+  ...NO_SESSION_LOCK,
 ];
+// EAX-06: packages/db holds withSessionLock and the migration runner's lock, so the product list
+// of its source leaves out NO_SESSION_LOCK.
+const DB_SYNTAX = PRODUCT_SYNTAX.filter((entry) => !NO_SESSION_LOCK.includes(entry));
 
 // The files of packages/db that are the one place for something the rest may not write, with the
 // list each is excused from. The rest of the package's list is unchanged for them.
@@ -1446,6 +1663,23 @@ const DB_ONE_PLACES = {
   'packages/db/src/sql.ts': NO_SQL_FRAGMENT_CAST,
   // AG-2.3: mintOrgId and the rows asDefiner reads make the OrgId.
   'packages/db/src/org-id.ts': NO_ORG_ID_FORGERY,
+};
+
+// CHK-12: the one-place excusals of the no-restricted-syntax lists above, by file, so that
+// scripts/lib/db-access-lint.test.ts can show each is still needed: it lints the file's text with
+// every excused entry switched back on and expects each to fire there.
+export const ONE_PLACE_EXCUSALS = {
+  ...DB_ONE_PLACES,
+  'packages/domain/src/planned.ts': NO_PLANNED_PUBLICATION_CAST,
+  ...Object.fromEntries(
+    [...new Set([...CREDENTIAL_NAME_REFUSERS, ...LOOPBACK_NAME_ALLOWED])].map((file) => [
+      file,
+      [
+        ...(CREDENTIAL_NAME_REFUSERS.includes(file) ? NO_CREDENTIAL_NAMES : []),
+        ...(LOOPBACK_NAME_ALLOWED.includes(file) ? NO_LOOPBACK_NAME : []),
+      ],
+    ]),
+  ),
 };
 
 export default tseslint.config(
@@ -1617,14 +1851,17 @@ export default tseslint.config(
     },
   },
   // DEC-13, DEC-15: the import() and require() half of the outbound rule, and the destructured
-  // globals, one block per workspace as the patterns differ. In apps/api this block is the last
-  // for the two entry points only; the API source blocks below carry the same selectors for the
-  // rest.
+  // globals, one block per workspace as the patterns differ. In apps/api the API source blocks
+  // below, the one of the two entry points included, carry the same selectors.
   ...OUTBOUND_SOURCES.map((dir) => ({
     files: [`${dir}/src/**/*.ts`],
     ignores: TEST_FILES,
     rules: {
-      'no-restricted-syntax': ['error', ...PRODUCT_SYNTAX, ...outboundSyntax(dir, null)],
+      'no-restricted-syntax': [
+        'error',
+        ...(dir === 'packages/db' ? DB_SYNTAX : PRODUCT_SYNTAX),
+        ...outboundSyntax(dir, null),
+      ],
     },
   })),
   ...Object.entries(DB_ONE_PLACES).map(([file, excused]) => ({
@@ -1632,11 +1869,22 @@ export default tseslint.config(
     rules: {
       'no-restricted-syntax': [
         'error',
-        ...PRODUCT_SYNTAX.filter((entry) => !excused.includes(entry)),
+        ...DB_SYNTAX.filter((entry) => !excused.includes(entry)),
         ...outboundSyntax('packages/db', null),
       ],
     },
   })),
+  {
+    // DEC-23: markPlanned makes the PlannedPublication here. The rest of the product list is
+    // unchanged for it.
+    files: ['packages/domain/src/planned.ts'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...PRODUCT_SYNTAX.filter((entry) => !NO_PLANNED_PUBLICATION_CAST.includes(entry)),
+      ],
+    },
+  },
   {
     // API source but its two entry points, which create the clock, and the two reviewed clients.
     files: ['apps/api/src/**/*.ts'],
@@ -1650,6 +1898,18 @@ export default tseslint.config(
       'no-restricted-syntax': ['error', ...API_SYNTAX, ...outboundSyntax('apps/api', null)],
     },
   },
+  {
+    // CHK-4: the two entry points keep the rest of the API's list (the loopback-name and
+    // organisation-from-request rules included); only the clock rule is off, since they make it.
+    files: ['apps/api/src/main.ts', 'apps/api/src/alerts-once.ts'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...API_SYNTAX.filter((entry) => !NO_CLOCK.includes(entry)),
+        ...outboundSyntax('apps/api', null),
+      ],
+    },
+  },
   ...Object.entries(OUTBOUND_CLIENTS).map(([name, file]) => ({
     // Each reviewed client may load its own package.
     files: [file],
@@ -1657,17 +1917,26 @@ export default tseslint.config(
       'no-restricted-syntax': ['error', ...API_SYNTAX, ...outboundSyntax('apps/api', name)],
     },
   })),
-  {
-    // D5: the rest of the API's list is unchanged for the files that refuse the credential names.
-    files: CREDENTIAL_NAME_REFUSERS,
-    rules: {
-      'no-restricted-syntax': [
-        'error',
-        ...API_SYNTAX.filter((entry) => !NO_CREDENTIAL_NAMES.includes(entry)),
-        ...outboundSyntax('apps/api', null),
-      ],
-    },
-  },
+  // D5 and EAX-08: a file that refuses the credential names, or may name a loopback host, keeps the
+  // rest of the API's list. One block per file, because flat config replaces the option list and
+  // a file may be in either list or both.
+  ...[...new Set([...CREDENTIAL_NAME_REFUSERS, ...LOOPBACK_NAME_ALLOWED])].map((file) => {
+    const excused = [
+      ...(CREDENTIAL_NAME_REFUSERS.includes(file) ? NO_CREDENTIAL_NAMES : []),
+      ...(LOOPBACK_NAME_ALLOWED.includes(file) ? NO_LOOPBACK_NAME : []),
+    ];
+    const client = Object.entries(OUTBOUND_CLIENTS).find(([, path]) => path === file)?.[0] ?? null;
+    return {
+      files: [file],
+      rules: {
+        'no-restricted-syntax': [
+          'error',
+          ...API_SYNTAX.filter((entry) => !excused.includes(entry)),
+          ...outboundSyntax('apps/api', client),
+        ],
+      },
+    };
+  }),
   {
     // Scripts, the untyped .mjs ones included (this rule reads syntax only), but the offline tools
     // that connect as the migrator. Test files are outside, as everywhere (D4).
@@ -1797,6 +2066,23 @@ export default tseslint.config(
       'tinnox/no-query-off-transaction': ['error', { allowed }],
     },
   })),
+  {
+    // CU-02: the job directory is a contract between two uids, so what is written there gets its
+    // mode from the exchange-file helpers, not from a `mode` option the umask reduces
+    // (scripts/eslint-rules/exchange-files.ts). The API's media folder and the media worker; the
+    // two helpers are the one place that writes. A rule of its own, so no other block replaces
+    // its options.
+    files: ['apps/api/src/media/**/*.ts', 'apps/media-worker/src/**/*.ts'],
+    ignores: [
+      ...TEST_FILES,
+      'apps/api/src/media/exchange-file.ts',
+      'apps/media-worker/src/exchange-file.ts',
+    ],
+    plugins: { tinnox },
+    rules: {
+      'tinnox/exchange-files': 'error',
+    },
+  },
   {
     // AG-3.1, SCR-34 (adoption plan steps 19 and 20): no legacy transaction API in the API's
     // source and the offline tools, with no file excepted

@@ -24,18 +24,8 @@
  *     with it only leaves the media without a thumbnail.
  */
 import { createHash, randomUUID } from 'node:crypto';
-import { constants as fsConstants, createWriteStream } from 'node:fs';
-import {
-  chmod,
-  lstat,
-  mkdir,
-  open,
-  readdir,
-  rename,
-  rm,
-  unlink,
-  writeFile,
-} from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { lstat, open, readdir, rename, rm, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Transform, type Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -50,15 +40,25 @@ import {
 } from '@tinnox/contracts';
 import {
   CommitOutcomeUnknownError,
+  anyOf,
+  MEDIA_PROCESSING_JOBS_CAP,
   mediaProcessingJobs,
+  type Listing,
   poolAsTx,
   readOrg,
   unaudited,
+  type Database,
   type MediaProcessingJob,
-  type Pool,
 } from '@tinnox/db';
 import { newObjectKey, type ObjectStorage } from '@tinnox/storage';
 import { changeAsJob } from '../jobs.ts';
+import {
+  createExchangeWriteStream,
+  makeExchangeDir,
+  publishExchangeFile,
+  shareExchangeFile,
+  writeExchangeFile,
+} from './exchange-file.ts';
 import { SNIFF_BYTES, sniffMediaType } from './sniff.ts';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -77,8 +77,6 @@ const ORPHAN_GRACE_MS = 2 * 60 * 1000;
 const IN_FLIGHT_MAX_MS = 60 * 60 * 1000;
 /** Pending jobs looked at by one scan, oldest first. */
 const SCAN_BATCH = 500;
-/** sec.media_processing_jobs never returns more rows than this (migration 0003). */
-const PENDING_LIST_CAP = 5000;
 /** Name of the file the worker touches to show it is running (informational only). */
 export const WORKER_ALIVE_FILE = '.worker-alive';
 
@@ -100,7 +98,7 @@ export interface ReceivedUpload {
 
 export interface MediaPipelineOptions {
   readonly jobsDir: string;
-  readonly pool: Pool;
+  readonly db: Database;
   readonly storage: ObjectStorage;
   readonly limits: Limits;
   readonly logger: PipelineLogger;
@@ -151,7 +149,7 @@ function cleanDetail(text: string | null): string | null {
 export class MediaPipeline {
   readonly #inbox: string;
   readonly #outbox: string;
-  readonly #pool: Pool;
+  readonly #db: Database;
   readonly #storage: ObjectStorage;
   readonly #limits: Limits;
   readonly #log: PipelineLogger;
@@ -169,7 +167,7 @@ export class MediaPipeline {
   constructor(options: MediaPipelineOptions) {
     this.#inbox = join(options.jobsDir, 'inbox');
     this.#outbox = join(options.jobsDir, 'outbox');
-    this.#pool = options.pool;
+    this.#db = options.db;
     this.#storage = options.storage;
     this.#limits = options.limits;
     this.#log = options.logger;
@@ -185,11 +183,8 @@ export class MediaPipeline {
 
   /** Creates the exchange directories. The worker (another uid) reads inbox and writes outbox. */
   async prepare(): Promise<void> {
-    await mkdir(this.#inbox, { recursive: true, mode: 0o755 });
-    await mkdir(this.#outbox, { recursive: true, mode: 0o1777 });
-    // mkdir's mode is reduced by the umask; set the intended modes explicitly.
-    await chmod(this.#inbox, 0o755);
-    await chmod(this.#outbox, 0o1777);
+    await makeExchangeDir(this.#inbox, 0o755);
+    await makeExchangeDir(this.#outbox, 0o1777);
     this.#startedAt = this.#now();
   }
 
@@ -262,7 +257,7 @@ export class MediaPipeline {
       meter.destroy(new Error('upload exceeds the byte limit'));
     });
     try {
-      await pipeline(source, meter, createWriteStream(partPath, { flags: 'wx', mode: 0o644 }));
+      await pipeline(source, meter, createExchangeWriteStream(partPath));
     } catch (error) {
       await removeIfPresent(partPath).catch(() => undefined);
       this.#inFlight.delete(jobId);
@@ -300,7 +295,7 @@ export class MediaPipeline {
     const bytesPath = this.#path(this.#inbox, jobId);
     const partPath = this.#path(this.#inbox, jobId, '.part');
     if (await exists(partPath)) await rename(partPath, bytesPath);
-    await chmod(bytesPath, 0o644);
+    await shareExchangeFile(bytesPath);
     const spec: MediaJobSpec = {
       schemaVersion: 1,
       jobId,
@@ -316,10 +311,7 @@ export class MediaPipeline {
     };
     const specPath = this.#path(this.#inbox, jobId, '.json');
     const tempPath = `${specPath}.tmp`;
-    await writeFile(tempPath, JSON.stringify(spec), { mode: 0o644, flag: 'w' });
-    // writeFile's mode is reduced by the umask; the worker (another uid) must be able to read it.
-    await chmod(tempPath, 0o644);
-    await rename(tempPath, specPath);
+    await publishExchangeFile(tempPath, specPath, JSON.stringify(spec));
     this.#inFlight.delete(jobId);
   }
 
@@ -336,7 +328,7 @@ export class MediaPipeline {
   /** Verifies the exchange directories are usable (for /readyz). */
   async check(): Promise<void> {
     const probe = join(this.#inbox, `.probe-${randomUUID()}`);
-    await writeFile(probe, '', { flag: 'wx', mode: 0o600 });
+    await writeExchangeFile(probe, '', { exclusive: true, private: true });
     await unlink(probe);
     const info = await lstat(this.#outbox);
     if (!info.isDirectory()) throw new Error('outbox is not a directory');
@@ -355,12 +347,12 @@ export class MediaPipeline {
   }
 
   /** The oldest `limit` jobs still waiting for validation, in every organisation. */
-  async #pending(limit: number): Promise<MediaProcessingJob[]> {
-    return mediaProcessingJobs(poolAsTx(this.#pool), limit);
+  async #pending(limit: number): Promise<Listing<MediaProcessingJob>> {
+    return mediaProcessingJobs(poolAsTx(this.#db), limit);
   }
 
   async #scan(): Promise<void> {
-    const jobs = await this.#pending(SCAN_BATCH);
+    const jobs = anyOf(await this.#pending(SCAN_BATCH));
     const now = this.#now().getTime();
     const perJob = this.#limits.mediaInspectionTimeoutMs + this.#perJobGraceMs;
     for (const [index, job] of jobs.entries()) {
@@ -558,7 +550,7 @@ export class MediaPipeline {
       await this.#fail(job, result.errorCode, cleanDetail(result.errorDetail));
       return;
     }
-    const row = await readOrg(this.#pool, job.orgId, async (tx) => {
+    const row = await readOrg(this.#db, job.orgId, async (tx) => {
       const { rows } = await tx.query<{
         status: string;
         bytes: string | null;
@@ -633,7 +625,7 @@ export class MediaPipeline {
     // its bytes. At worst an unreferenced object stays (review round 3, SCX-03).
     let keep = false;
     try {
-      keep = await changeAsJob(this.#pool, 'media_pipeline', job.orgId, async (tx) => {
+      keep = await changeAsJob(this.#db, 'media_pipeline', job.orgId, async (tx) => {
         const done = await tx.query(
           `UPDATE media
            SET status = 'ready', kind = $2, mime_type = $3, bytes = $4, sha256 = $5,
@@ -689,7 +681,7 @@ export class MediaPipeline {
   }
 
   async #fail(job: MediaProcessingJob, code: MediaErrorCode, detail: string | null): Promise<void> {
-    await changeAsJob(this.#pool, 'media_pipeline', job.orgId, async (tx) => {
+    await changeAsJob(this.#db, 'media_pipeline', job.orgId, async (tx) => {
       const done = await tx.query(
         `UPDATE media SET status = 'failed', error_code = $2, error_detail = $3
          WHERE id = $1 AND org_id = app_org_id() AND status = 'processing'`,
@@ -751,15 +743,15 @@ export class MediaPipeline {
     // by then), and its bytes may be older than the grace period: without this note the
     // sweep would remove them. An upload that starts later has files newer than the cutoff.
     const inFlightAtStart = new Set(this.#inFlight.keys());
-    const jobs = await this.#pending(PENDING_LIST_CAP);
-    if (jobs.length >= PENDING_LIST_CAP) {
+    const listing = await this.#pending(MEDIA_PROCESSING_JOBS_CAP);
+    if (!listing.complete) {
       this.#log.warn(
-        { pending: jobs.length },
+        { pending: listing.sample.length },
         'media job sweep skipped: too many pending jobs to tell which files are orphaned',
       );
       return 0;
     }
-    const pending = new Set(jobs.map((job) => job.mediaId));
+    const pending = new Set(listing.items.map((job) => job.mediaId));
     const cutoff = now - ORPHAN_GRACE_MS;
     let removed = 0;
     for (const dir of [this.#inbox, this.#outbox]) {

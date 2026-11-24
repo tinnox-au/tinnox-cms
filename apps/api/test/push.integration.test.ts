@@ -19,7 +19,7 @@ import {
   type PushPlanRow,
   type PushResult,
 } from '@tinnox/contracts';
-import { withOrg } from '@tinnox/db/testing';
+import { waitForLockWaiters, withOrg } from '@tinnox/db/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { MANIFEST_BATCH_SIZE } from '../src/publishing.ts';
 import {
@@ -1353,28 +1353,16 @@ describe('assign, then push', () => {
         orgA.orgId,
         async (tx) => {
           await edit(tx);
+          const { rows } = await tx.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+          const holder = rows[0]?.pid;
+          if (holder === undefined) throw new Error('no backend pid');
           const pushing = push(alice, [displayId]);
           started.push = pushing;
-          let settled = false;
-          void pushing.then(
-            () => {
-              settled = true;
-            },
-            () => {
-              settled = true;
-            },
-          );
-          const deadline = Date.now() + 5000;
-          while (!settled && Date.now() < deadline) {
-            const { rows } = await t.pool.query<{ n: number }>(
-              'SELECT count(*)::int AS n FROM pg_locks WHERE NOT granted',
-            );
-            if ((rows[0]?.n ?? 0) > 0) {
-              waited = true;
-              break;
-            }
-            await new Promise((resolve) => setTimeout(resolve, 20));
-          }
+          // Answered below; a failure here must not leave it unhandled meanwhile.
+          void pushing.catch(() => undefined);
+          // Only a wait for this edit's locks counts, not one elsewhere on the server (TST-3).
+          await waitForLockWaiters(t.pool, holder, 1, 'the push never waited for the held edit');
+          waited = true;
           // Returning commits the edit and lets the push go on.
         },
       );
