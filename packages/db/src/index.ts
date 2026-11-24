@@ -91,4 +91,5 @@ export * from './members.ts';
 export * from './counted-limit.ts';
 export * from './session-lock.ts';
 export * from './constraints.ts';
+export * from './outcome.ts';
 export * from './error-field.ts';
