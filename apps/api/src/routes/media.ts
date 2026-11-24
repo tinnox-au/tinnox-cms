@@ -26,6 +26,8 @@ import {
   readOrg,
   STAGE_A_CONSTRAINTS,
   violatedConstraint,
+  withCountedLimit,
+  type Change,
   type OrgReadTx,
 } from '@tinnox/db';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -194,59 +196,64 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
         // is thrown once the transaction has committed, and the stored file is discarded below.
         const decision = await changeAsOperator<Decision<MediaDto>>(ctx, request, async (tx) => {
           // Serialise uploads per organisation so concurrent requests cannot pass the quota together.
-          await tx.query(
-            "SELECT pg_advisory_xact_lock(hashtextextended('tinnox.media_quota:' || app_org_id()::text, 0))",
-          );
-          const usedNow = await usedBytes(tx);
-          if (usedNow + received.bytes > limits.maxOrgStorageBytes) {
-            return {
-              value: refuse(
-                new HttpError(
-                  413,
-                  'storage_quota_exceeded',
-                  `The file does not fit in the remaining storage (${megabytes(Math.max(0, limits.maxOrgStorageBytes - usedNow))} free).`,
+          return withCountedLimit<Change<Decision<MediaDto>>>(
+            tx,
+            {
+              lock: 'media_quota',
+              count: usedBytes,
+              adding: received.bytes,
+              max: limits.maxOrgStorageBytes,
+              whenFull: (usedNow) => ({
+                value: refuse(
+                  new HttpError(
+                    413,
+                    'storage_quota_exceeded',
+                    `The file does not fit in the remaining storage (${megabytes(Math.max(0, limits.maxOrgStorageBytes - usedNow))} free).`,
+                  ),
                 ),
-              ),
-              audit: {
-                actorType: 'operator',
-                actorId: session.membershipId,
-                action: 'media.upload',
-                objectType: 'media',
-                objectId: null,
-                result: 'denied',
-                detail: { reason: 'storage_quota_exceeded', bytes: received.bytes },
-              },
-            };
-          }
-          const inserted = await tx.query<MediaRow>(
-            `INSERT INTO media AS m
-               (id, org_id, kind, status, mime_type, bytes, sha256, original_name, created_by)
-             VALUES ($1, app_org_id(), $2, 'processing', $3, $4, $5, $6, $7)
-             RETURNING ${MEDIA_COLUMNS}`,
-            [
-              received.jobId,
-              MEDIA_KIND_BY_MIME[mimeType],
-              mimeType,
-              received.bytes,
-              received.sha256,
-              originalName,
-              session.membershipId,
-            ],
-          );
-          const row = inserted.rows[0];
-          if (row === undefined) throw new Error('media insert returned no row');
-          return {
-            value: accept(toMediaDto(row)),
-            audit: {
-              actorType: 'operator',
-              actorId: session.membershipId,
-              action: 'media.upload',
-              objectType: 'media',
-              objectId: row.id,
-              result: 'success',
-              detail: { bytes: received.bytes, sniffedType: mimeType },
+                audit: {
+                  actorType: 'operator',
+                  actorId: session.membershipId,
+                  action: 'media.upload',
+                  objectType: 'media',
+                  objectId: null,
+                  result: 'denied',
+                  detail: { reason: 'storage_quota_exceeded', bytes: received.bytes },
+                },
+              }),
             },
-          };
+            async () => {
+              const inserted = await tx.query<MediaRow>(
+                `INSERT INTO media AS m
+                   (id, org_id, kind, status, mime_type, bytes, sha256, original_name, created_by)
+                 VALUES ($1, app_org_id(), $2, 'processing', $3, $4, $5, $6, $7)
+                 RETURNING ${MEDIA_COLUMNS}`,
+                [
+                  received.jobId,
+                  MEDIA_KIND_BY_MIME[mimeType],
+                  mimeType,
+                  received.bytes,
+                  received.sha256,
+                  originalName,
+                  session.membershipId,
+                ],
+              );
+              const row = inserted.rows[0];
+              if (row === undefined) throw new Error('media insert returned no row');
+              return {
+                value: accept(toMediaDto(row)),
+                audit: {
+                  actorType: 'operator',
+                  actorId: session.membershipId,
+                  action: 'media.upload',
+                  objectType: 'media',
+                  objectId: row.id,
+                  result: 'success',
+                  detail: { bytes: received.bytes, sniffedType: mimeType },
+                },
+              };
+            },
+          );
         });
         if (!decision.ok) throw decision.error;
         media = decision.value;

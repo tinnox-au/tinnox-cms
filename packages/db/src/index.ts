@@ -94,5 +94,6 @@ export * from './change.ts';
 export * from './listing.ts';
 export * from './sql.ts';
 export * from './members.ts';
+export * from './counted-limit.ts';
 export * from './constraints.ts';
 export * from './error-field.ts';

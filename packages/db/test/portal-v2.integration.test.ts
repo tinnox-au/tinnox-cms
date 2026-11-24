@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { STAGE_A_CONSTRAINTS, violatedConstraint, type OrgTx } from '../src/index.ts';
-import { withOrg, type Pool, type PoolClient } from '../src/testing.ts';
+import { stillWaiting, withOrg, type Pool, type PoolClient } from '../src/testing.ts';
 import {
   appPool,
   createOrg,
@@ -462,17 +462,6 @@ describe('deleted playlists', () => {
         client.release();
       }
     }
-  }
-
-  /** Resolves to true when the promise is still pending after a short wait. */
-  async function stillWaiting(promise: Promise<unknown>): Promise<boolean> {
-    let settled = false;
-    const mark = () => {
-      settled = true;
-    };
-    promise.then(mark, mark);
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    return !settled;
   }
 
   it('lets a concurrent deletion wait for an assignment, then refuses it', async () => {

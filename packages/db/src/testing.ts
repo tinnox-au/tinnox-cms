@@ -4,7 +4,7 @@
 import { registerOwnHandle } from './database.ts';
 import type { MigratorPool } from './migrate.ts';
 import { mintOrgId } from './org-id.ts';
-import type { Pool } from './pool.ts';
+import type { Pool, PoolClient } from './pool.ts';
 import { statementsOf } from './pre-org.ts';
 import { withoutOrg, type Autocommit, type OrgId, type PreOrgTx } from './tx.ts';
 
@@ -76,4 +76,46 @@ export function testOrgId(id: string): OrgId {
  */
 export function withNoOrgSet(tx: PreOrgTx): Autocommit {
   return statementsOf(tx);
+}
+
+/**
+ * Resolves to true when `promise` is still pending after `ms`: for a two-connection test, that
+ * one side waits on a lock the other holds. A side that is not blocked has settled long before.
+ * Shared so the race tests of packages/db, apps/api and tests/integration wait the same way
+ * (SCX-05).
+ */
+export async function stillWaiting(promise: Promise<unknown>, ms = 300): Promise<boolean> {
+  let settled = false;
+  const mark = (): void => {
+    settled = true;
+  };
+  promise.then(mark, mark);
+  await new Promise((resolve) => setTimeout(resolve, ms));
+  return !settled;
+}
+
+/**
+ * Two tinnox_app connections of `pool`, each in an open transaction for `orgId`, rolled back
+ * when `work` ends: the two sides of a race test, which send their own statements so the test
+ * can stop one between them. Shared with stillWaiting for the same reason (SCX-05).
+ */
+export async function twoTransactions(
+  pool: Pool,
+  orgId: OrgId,
+  work: (first: PoolClient, second: PoolClient) => Promise<void>,
+): Promise<void> {
+  const first = await pool.connect();
+  const second = await pool.connect();
+  try {
+    for (const client of [first, second]) {
+      await client.query('BEGIN');
+      await client.query("SELECT set_config('app.org_id', $1, true)", [orgId]);
+    }
+    await work(first, second);
+  } finally {
+    for (const client of [first, second]) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      client.release();
+    }
+  }
 }

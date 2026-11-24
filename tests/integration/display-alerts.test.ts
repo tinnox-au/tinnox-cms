@@ -9,6 +9,7 @@
 import { randomBytes } from 'node:crypto';
 import { localWallClock, type AlertRecipientDto } from '@tinnox/contracts';
 import { alertRecipientByTokenHash, poolAsTx, sha256 } from '@tinnox/db';
+import { stillWaiting } from '@tinnox/db/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   addAlertAddress,
@@ -678,17 +679,6 @@ describe('alert addresses and the member who added them (D22)', () => {
   const signOutEverywhere = (member: TestOrg) =>
     post(`/api/members/${member.membershipId}/sign-out`);
 
-  /** True when the promise is still pending after a short wait. */
-  async function stillWaiting(promise: Promise<unknown>): Promise<boolean> {
-    let settled = false;
-    const mark = (): void => {
-      settled = true;
-    };
-    promise.then(mark, mark);
-    await new Promise((resolve) => setTimeout(resolve, 400));
-    return !settled;
-  }
-
   it('D22: after the adder is removed, the link answers 404 like an unknown one and the list shows Expired', async () => {
     const pending = await pendingFrom('adder-removed@example.com');
     expect(await statusOf(pending.id)).toBe('waiting');
@@ -827,7 +817,7 @@ describe('alert addresses and the member who added them (D22)', () => {
       await ending.query('SELECT sec.session_revoke_membership($1)', [pending.member.membershipId]);
       const confirming = answerTo(pending.token);
       // Without the lock the UPDATE would read the member row as it was and confirm at once.
-      const waited = await stillWaiting(confirming);
+      const waited = await stillWaiting(confirming, 400);
       await ending.query('COMMIT');
       const answer = await confirming;
       expect(waited).toBe(true);
@@ -885,7 +875,7 @@ describe('alert addresses and the member who added them (D22)', () => {
     const confirming = confirmAlertAddress(t, pending.token);
     await reached(held, confirming, 'its conditional UPDATE');
     const signingOut = signOutEverywhere(pending.member);
-    const waited = await stillWaiting(signingOut).finally(held.release);
+    const waited = await stillWaiting(signingOut, 400).finally(held.release);
     const [confirmed, signedOut] = await Promise.all([confirming, signingOut]);
     expect(waited).toBe(true);
     expect(confirmed.status).toBe(204);

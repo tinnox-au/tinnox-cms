@@ -38,6 +38,7 @@ import {
   STAGE_C_CONSTRAINTS,
   unaudited,
   violatedConstraint,
+  withCountedLimit,
   type AuditInput,
   type SqlFragment,
   type OrgTx,
@@ -510,44 +511,59 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): voi
         request,
         async (tx, role) => {
           if (!grantableRoles(role, 'invite').includes(input.role)) throw refused('grant', null);
-          // shortcut: 100 pending invites per organisation, counted under the membership lock;
-          // raise ABSOLUTE.maxPendingInvites (and page the list) when self-service sign-up (CMS-20) lands.
-          const pending = await tx.query<{ n: string }>(
-            "SELECT count(*) AS n FROM member_invite WHERE org_id = app_org_id() AND status = 'pending'",
+          // shortcut: 100 pending invites per organisation, counted under the membership lock,
+          // which { lockMembership: true } already took before the role check (taking it again is
+          // free); raise ABSOLUTE.maxPendingInvites (and page the list) when self-service sign-up
+          // (CMS-20) lands.
+          const row = await withCountedLimit(
+            tx,
+            {
+              lock: 'membership',
+              count: async (counting) => {
+                const pending = await counting.query<{ n: string }>(
+                  "SELECT count(*) AS n FROM member_invite WHERE org_id = app_org_id() AND status = 'pending'",
+                );
+                return bigintToNumber(pending.rows[0]?.n ?? 0);
+              },
+              max: ABSOLUTE.maxPendingInvites,
+              whenFull: () => {
+                throw new HttpError(
+                  409,
+                  'conflict',
+                  `The organisation already has ${ABSOLUTE.maxPendingInvites} invites waiting for TINNOX. Cancel ones that are no longer needed.`,
+                );
+              },
+            },
+            async () => {
+              // A removed member's name is allowed: a person who comes back keeps their row and name.
+              const nameUsed = await tx.query(
+                `SELECT 1 FROM membership
+                 WHERE org_id = app_org_id() AND lower(display_name) = lower($1) AND removed_at IS NULL
+                 UNION ALL
+                 SELECT 1 FROM member_invite
+                 WHERE org_id = app_org_id() AND status = 'pending' AND lower(name) = lower($1)
+                 LIMIT 1`,
+                [input.name],
+              );
+              if (nameUsed.rows.length > 0) throw inviteNameTaken();
+              const emailUsed = await tx.query(
+                `SELECT 1 FROM member_invite
+                 WHERE org_id = app_org_id() AND status = 'pending' AND lower(email) = lower($1)
+                 LIMIT 1`,
+                [input.email],
+              );
+              if (emailUsed.rows.length > 0) throw inviteEmailTaken();
+              const inserted = await tx.query<InviteRow>(
+                `INSERT INTO member_invite (org_id, role, name, email, invited_by, expires_at)
+                 VALUES (app_org_id(), $1, $2, $3, $4, now() + interval '14 days')
+                 RETURNING ${INVITE_COLUMNS}`,
+                [input.role, input.name, input.email, session.membershipId],
+              );
+              const invite = inserted.rows[0];
+              if (invite === undefined) throw new Error('invite insert returned no row');
+              return invite;
+            },
           );
-          if (bigintToNumber(pending.rows[0]?.n ?? 0) >= ABSOLUTE.maxPendingInvites) {
-            throw new HttpError(
-              409,
-              'conflict',
-              `The organisation already has ${ABSOLUTE.maxPendingInvites} invites waiting for TINNOX. Cancel ones that are no longer needed.`,
-            );
-          }
-          // A removed member's name is allowed: a person who comes back keeps their row and name.
-          const nameUsed = await tx.query(
-            `SELECT 1 FROM membership
-             WHERE org_id = app_org_id() AND lower(display_name) = lower($1) AND removed_at IS NULL
-             UNION ALL
-             SELECT 1 FROM member_invite
-             WHERE org_id = app_org_id() AND status = 'pending' AND lower(name) = lower($1)
-             LIMIT 1`,
-            [input.name],
-          );
-          if (nameUsed.rows.length > 0) throw inviteNameTaken();
-          const emailUsed = await tx.query(
-            `SELECT 1 FROM member_invite
-             WHERE org_id = app_org_id() AND status = 'pending' AND lower(email) = lower($1)
-             LIMIT 1`,
-            [input.email],
-          );
-          if (emailUsed.rows.length > 0) throw inviteEmailTaken();
-          const inserted = await tx.query<InviteRow>(
-            `INSERT INTO member_invite (org_id, role, name, email, invited_by, expires_at)
-             VALUES (app_org_id(), $1, $2, $3, $4, now() + interval '14 days')
-             RETURNING ${INVITE_COLUMNS}`,
-            [input.role, input.name, input.email, session.membershipId],
-          );
-          const row = inserted.rows[0];
-          if (row === undefined) throw new Error('invite insert returned no row');
           return {
             value: toInviteDto(row),
             audit: {

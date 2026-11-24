@@ -18,7 +18,14 @@ import {
   type AlertRecipientDto,
   type AlertRecipientListResponse,
 } from '@tinnox/contracts';
-import { alertRecipientByTokenHash, changePreOrg, readOrg, sha256, unaudited } from '@tinnox/db';
+import {
+  alertRecipientByTokenHash,
+  changePreOrg,
+  readOrg,
+  sha256,
+  unaudited,
+  withCountedLimit,
+} from '@tinnox/db';
 import type { FastifyInstance } from 'fastify';
 import { confirmationEmail, mailErrorCode } from '../alerts.ts';
 import { changeAsOperator, lockTimeoutAsUnavailable } from '../auth/permissions.ts';
@@ -101,34 +108,47 @@ export function registerAlertRecipientRoutes(app: FastifyInstance, ctx: AppConte
       const token = randomToken();
       const { recipient, orgName } = await changeAsOperator(ctx, request, async (tx) => {
         // Serialises additions per organisation, so the count and the duplicate check hold.
-        await tx.query(
-          "SELECT pg_advisory_xact_lock(hashtextextended('tinnox.alert_recipient_count:' || app_org_id()::text, 0))",
+        const row = await withCountedLimit(
+          tx,
+          {
+            lock: 'alert_recipient_count',
+            count: async (counting) => {
+              const listed = await counting.query<{ n: number; taken: boolean }>(
+                `SELECT count(*)::int AS n, coalesce(bool_or(email = $1), false) AS taken
+                 FROM alert_recipient WHERE org_id = app_org_id()`,
+                [address],
+              );
+              // The address already listed is answered before the ceiling, as it always was.
+              if (listed.rows[0]?.taken === true) {
+                throw new HttpError(409, 'conflict', 'This address is already on the alert list.', {
+                  details: [
+                    { path: 'email', message: 'This address is already on the alert list.' },
+                  ],
+                });
+              }
+              return listed.rows[0]?.n ?? 0;
+            },
+            max: MAX_ALERT_RECIPIENTS,
+            whenFull: () => {
+              throw new HttpError(
+                409,
+                'conflict',
+                `The alert list already has ${MAX_ALERT_RECIPIENTS} addresses. Remove one first.`,
+              );
+            },
+          },
+          async () => {
+            const inserted = await tx.query<RecipientRow>(
+              `INSERT INTO alert_recipient (org_id, email, created_by, confirm_token_hash, confirm_expires_at)
+               VALUES (app_org_id(), $1, $2, $3, now() + make_interval(days => $4))
+               RETURNING ${RECIPIENT_COLUMNS}`,
+              [address, session.membershipId, sha256(token), ALERT_CONFIRM_TTL_DAYS],
+            );
+            const created = inserted.rows[0];
+            if (created === undefined) throw new Error('alert recipient insert returned no row');
+            return created;
+          },
         );
-        const listed = await tx.query<{ n: number; taken: boolean }>(
-          `SELECT count(*)::int AS n, coalesce(bool_or(email = $1), false) AS taken
-         FROM alert_recipient WHERE org_id = app_org_id()`,
-          [address],
-        );
-        if (listed.rows[0]?.taken === true) {
-          throw new HttpError(409, 'conflict', 'This address is already on the alert list.', {
-            details: [{ path: 'email', message: 'This address is already on the alert list.' }],
-          });
-        }
-        if ((listed.rows[0]?.n ?? 0) >= MAX_ALERT_RECIPIENTS) {
-          throw new HttpError(
-            409,
-            'conflict',
-            `The alert list already has ${MAX_ALERT_RECIPIENTS} addresses. Remove one first.`,
-          );
-        }
-        const inserted = await tx.query<RecipientRow>(
-          `INSERT INTO alert_recipient (org_id, email, created_by, confirm_token_hash, confirm_expires_at)
-         VALUES (app_org_id(), $1, $2, $3, now() + make_interval(days => $4))
-         RETURNING ${RECIPIENT_COLUMNS}`,
-          [address, session.membershipId, sha256(token), ALERT_CONFIRM_TTL_DAYS],
-        );
-        const row = inserted.rows[0];
-        if (row === undefined) throw new Error('alert recipient insert returned no row');
         const org = await tx.query<{ name: string }>(
           'SELECT name FROM organization WHERE id = app_org_id()',
         );

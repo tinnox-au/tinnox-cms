@@ -11,7 +11,13 @@ import {
   type FolderDto,
   type FolderListResponse,
 } from '@tinnox/contracts';
-import { readOrg, STAGE_A_CONSTRAINTS, violatedConstraint, type OrgReadTx } from '@tinnox/db';
+import {
+  readOrg,
+  STAGE_A_CONSTRAINTS,
+  violatedConstraint,
+  withCountedLimit,
+  type OrgReadTx,
+} from '@tinnox/db';
 import type { FastifyInstance } from 'fastify';
 import { changeAsOperator } from '../auth/permissions.ts';
 import { operatorOf } from '../auth/session.ts';
@@ -76,26 +82,36 @@ export function registerFolderRoutes(app: FastifyInstance, ctx: AppContext): voi
     let created: FolderDto;
     try {
       created = await changeAsOperator(ctx, request, async (tx) => {
-        // One at a time per organisation, so the ceiling below cannot be passed by a burst.
-        await tx.query(
-          "SELECT pg_advisory_xact_lock(hashtextextended('tinnox.folder_count:' || app_org_id()::text, 0))",
+        // One at a time per organisation, so the ceiling cannot be passed by a burst.
+        const id = await withCountedLimit(
+          tx,
+          {
+            lock: 'folder_count',
+            count: async (counting) => {
+              const existing = await counting.query<{ n: string }>(
+                'SELECT count(*) AS n FROM folder WHERE org_id = app_org_id()',
+              );
+              return bigintToNumber(existing.rows[0]?.n ?? 0);
+            },
+            max: ABSOLUTE.maxListItems,
+            whenFull: () => {
+              throw new HttpError(
+                409,
+                'conflict',
+                `The organisation already has ${ABSOLUTE.maxListItems} folders, which is the most it can have. Delete folders that are no longer used.`,
+              );
+            },
+          },
+          async () => {
+            const inserted = await tx.query<{ id: string }>(
+              'INSERT INTO folder (org_id, name) VALUES (app_org_id(), $1) RETURNING id',
+              [input.name],
+            );
+            const row = inserted.rows[0];
+            if (row === undefined) throw new Error('folder insert returned no row');
+            return row.id;
+          },
         );
-        const existing = await tx.query<{ n: string }>(
-          'SELECT count(*) AS n FROM folder WHERE org_id = app_org_id()',
-        );
-        if (bigintToNumber(existing.rows[0]?.n ?? 0) >= ABSOLUTE.maxListItems) {
-          throw new HttpError(
-            409,
-            'conflict',
-            `The organisation already has ${ABSOLUTE.maxListItems} folders, which is the most it can have. Delete folders that are no longer used.`,
-          );
-        }
-        const inserted = await tx.query<{ id: string }>(
-          'INSERT INTO folder (org_id, name) VALUES (app_org_id(), $1) RETURNING id',
-          [input.name],
-        );
-        const id = inserted.rows[0]?.id;
-        if (id === undefined) throw new Error('folder insert returned no row');
         const dto = await loadFolder(tx, id);
         if (dto === null) throw new Error('created folder is not visible');
         return {
