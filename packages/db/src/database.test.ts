@@ -12,7 +12,7 @@ import {
   ping,
   poolAsTx,
   readOrg,
-  sessionLockConnection,
+  withSessionLock,
   type Database,
 } from './index.ts';
 import type { MigratorPool } from './migrate.ts';
@@ -44,8 +44,8 @@ describe('the database handle (step 21)', () => {
       poolAsTx(pool);
       // @ts-expect-error nor for the start-up role check
       await assertRuntimeRole(pool);
-      // @ts-expect-error nor for the alert check's lock connection
-      await sessionLockConnection(pool);
+      // @ts-expect-error nor for the alert check's session lock
+      await withSessionLock(pool, 'display_alerts', () => Promise.resolve());
       // The migrator's checked pool is its own handle, for an offline tool's changePreOrg.
       await ping(migrator);
     };
@@ -58,6 +58,7 @@ describe('the database handle (step 21)', () => {
     expectTypeOf(changeOrg).parameter(0).toEqualTypeOf<Database>();
     expectTypeOf(changePreOrg).parameter(0).toEqualTypeOf<Database>();
     expectTypeOf(poolAsTx).parameter(0).toEqualTypeOf<Database>();
+    expectTypeOf(withSessionLock).parameter(0).toEqualTypeOf<Database>();
   });
 
   it('createDatabase refuses a connection string createPool refuses, before any connection', () => {

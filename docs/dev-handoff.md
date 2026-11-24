@@ -93,7 +93,7 @@ type Tx = OrgTx | PreOrgTx
 assertConnectionRole(connectionString: string, expectedRole: string): void
 assertRuntimeRole(db: Database): Promise<void>   // rejects with RuntimeRoleError, problems listed
 ping(db: Database): Promise<void>                // the liveness probe of /readyz
-sessionLockConnection(db: Database): Promise<PoolClient>   // the alert check's session lock only, until step 22
+withSessionLock(db: Database, lock: SessionLock, work: (signal: AbortSignal) => Promise<T>): Promise<{ held: false } | { held: true; value: T }>   // try-lock; the signal aborts when the lock's connection is lost
 sql`...`, sqlParameter(position), joinSql(parts, separator): SqlFragment   // fixed SQL text put together at run time
 sha256(value: string | Uint8Array): Buffer
 ```
@@ -102,7 +102,7 @@ The package has three entries. `@tinnox/db` is the runtime API above. `@tinnox/d
 
 Lint also holds how the API and the scripts reach the database (`eslint.config.js`; `scripts/lib/db-access-lint.test.ts` runs each rule against fixture text):
 
-- `tinnox/no-query-off-transaction`: `query()` is called only on an `OrgTx` (or, in an offline tool, on the handle `asDefiner` gives its work). A statement on the pool, a pooled client or a `poolAsTx` handle is an error; use `readOrg` for a read, `changeAsOperator` (`apps/api/src/auth/permissions.ts`) for an operator change, a typed `sec.*` wrapper, or `ping(ctx.db)`. The alert check's session lock is the one listed exception (`QUERY_OFF_TRANSACTION`).
+- `tinnox/no-query-off-transaction`: `query()` is called only on an `OrgTx` (or, in an offline tool, on the handle `asDefiner` gives its work). A statement on the pool, a pooled client or a `poolAsTx` handle is an error; use `readOrg` for a read, `changeAsOperator` (`apps/api/src/auth/permissions.ts`) for an operator change, a typed `sec.*` wrapper, or `ping(ctx.db)`. No statement is excepted (`QUERY_OFF_TRANSACTION` is empty since step 22): the alert check takes its session lock through `withSessionLock`, and lint refuses session advisory-lock SQL outside `packages/db/src`.
 - `sec.*` SQL is written only in `packages/db/src/sec.ts`; add a wrapper there.
 - `poolAsTx` may be imported only by the files of `UNSCOPED_HELPER_FILES`, each with its reason.
 - Nothing makes an `OrgId` or a transaction handle by a cast, a type predicate or a type argument of a call such as the row type of `query()` (`NO_ORG_ID_FORGERY`, `NO_TX_CAST`); `packages/db/src/org-id.ts` is the one file that makes an `OrgId`.

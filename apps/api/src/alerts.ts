@@ -14,8 +14,8 @@ import {
   errorField,
   poolAsTx,
   readOrg,
-  sessionLockConnection,
   unaudited,
+  withSessionLock,
   type AuditInput,
   type Change,
   type Database,
@@ -24,8 +24,6 @@ import {
 import { offlineDue } from '@tinnox/domain';
 import { changeAsJob } from './jobs.ts';
 import type { MailMessage, Mailer } from './mail.ts';
-
-const LOCK_KEY = 'tinnox.display_alerts';
 
 export interface DisplayAlertDeps {
   readonly db: Database;
@@ -79,91 +77,58 @@ interface OrgOutcome {
 /** Runs the check once over every organisation. */
 export async function runDisplayAlerts(deps: DisplayAlertDeps): Promise<DisplayAlertResult> {
   const counts = { offline: 0, online: 0, closed: 0, failed: 0 };
-  // A dedicated connection with no transaction open: the pool's transaction timeouts do not
-  // apply while the run holds the lock, and a dropped connection releases it.
-  const client = await sessionLockConnection(deps.db);
-  let broken: Error | undefined;
-  const onLost = (error: Error): void => {
-    broken = error;
-  };
-  client.on('error', onLost);
-  try {
-    const locked = await client.query<{ ok: boolean }>(
-      'SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS ok',
-      [LOCK_KEY],
-    );
-    if (locked.rows[0]?.ok !== true) return { skipped: true, ...counts };
-    try {
-      for (const orgId of await displayAlertOrgs(poolAsTx(deps.db))) {
-        // The lock went with its connection, so another runner may already be running: claim
-        // nothing more, but still send what this run claimed (delivery is at most once).
-        if (broken !== undefined) {
-          counts.failed += 1;
-          deps.logger.error({ err: broken }, 'display alert check stopped: lock connection lost');
-          break;
-        }
-        if (deps.shouldStop?.() === true) break;
-        let outcome: OrgOutcome;
+  // Another runner holding the lock means this run does nothing. The lock is on a connection of
+  // its own (withSessionLock), so the pool's transaction timeouts do not apply while it is held.
+  const run = await withSessionLock(deps.db, 'display_alerts', async (lockLost) => {
+    for (const orgId of await displayAlertOrgs(poolAsTx(deps.db))) {
+      // The lock went with its connection, so another runner may already be running: claim
+      // nothing more, but still send what this run claimed (delivery is at most once).
+      if (lockLost.aborted) {
+        counts.failed += 1;
+        const reason: unknown = lockLost.reason;
+        deps.logger.error({ err: reason }, 'display alert check stopped: lock connection lost');
+        break;
+      }
+      if (deps.shouldStop?.() === true) break;
+      let outcome: OrgOutcome;
+      try {
+        outcome = await changeAsJob(deps.db, 'display_alerts', orgId, (tx) =>
+          claimTransitions(tx, deps),
+        );
+      } catch (error) {
+        counts.failed += 1;
+        deps.logger.error({ err: error, orgId }, 'display alert check failed for an organisation');
+        continue;
+      }
+      counts.offline += outcome.offline;
+      counts.online += outcome.online;
+      counts.closed += outcome.closed;
+      // shortcut: one e-mail at a time and no retry; queue and retry when a provider's limits or outages bite.
+      for (const { displayId, message } of outcome.outbox) {
         try {
-          outcome = await changeAsJob(deps.db, 'display_alerts', orgId, (tx) =>
-            claimTransitions(tx, deps),
+          // An address removed since the claim gets nothing; one already handed to the
+          // server cannot be recalled.
+          const live = await readOrg(deps.db, orgId, (tx) =>
+            tx.query(
+              `SELECT 1 FROM alert_recipient
+               WHERE org_id = app_org_id() AND email = $1 AND confirmed_at IS NOT NULL`,
+              [message.to],
+            ),
           );
+          if (live.rowCount !== 1) continue;
+          await deps.mail.send(message);
         } catch (error) {
           counts.failed += 1;
+          // Never the address or the server's reply, which may quote it.
           deps.logger.error(
-            { err: error, orgId },
-            'display alert check failed for an organisation',
+            { orgId, displayId, ...mailErrorCode(error) },
+            'display alert e-mail was not sent',
           );
-          continue;
-        }
-        counts.offline += outcome.offline;
-        counts.online += outcome.online;
-        counts.closed += outcome.closed;
-        // shortcut: one e-mail at a time and no retry; queue and retry when a provider's limits or outages bite.
-        for (const { displayId, message } of outcome.outbox) {
-          try {
-            // An address removed since the claim gets nothing; one already handed to the
-            // server cannot be recalled.
-            const live = await readOrg(deps.db, orgId, (tx) =>
-              tx.query(
-                `SELECT 1 FROM alert_recipient
-                 WHERE org_id = app_org_id() AND email = $1 AND confirmed_at IS NOT NULL`,
-                [message.to],
-              ),
-            );
-            if (live.rowCount !== 1) continue;
-            await deps.mail.send(message);
-          } catch (error) {
-            counts.failed += 1;
-            // Never the address or the server's reply, which may quote it.
-            deps.logger.error(
-              { orgId, displayId, ...mailErrorCode(error) },
-              'display alert e-mail was not sent',
-            );
-          }
         }
       }
-    } finally {
-      // Destroying the connection releases the lock. An unlock that answers false (the lock was
-      // taken on another backend, as behind a transaction-mode pooler) is treated the same way.
-      await client
-        .query<{ ok: boolean }>('SELECT pg_advisory_unlock(hashtextextended($1, 0)) AS ok', [
-          LOCK_KEY,
-        ])
-        .then(
-          (unlocked) => {
-            if (unlocked.rows[0]?.ok !== true) broken = new Error('advisory lock was not held');
-          },
-          (error: unknown) => {
-            broken = error instanceof Error ? error : new Error('advisory unlock failed');
-          },
-        );
     }
-    return { skipped: false, ...counts };
-  } finally {
-    client.removeListener('error', onLost);
-    client.release(broken);
-  }
+  });
+  return { skipped: !run.held, ...counts };
 }
 
 /**

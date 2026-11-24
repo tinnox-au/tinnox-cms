@@ -521,6 +521,24 @@ const NO_ROLE_SWITCH = [
   },
 ];
 
+// EAX-06 (adoption plan step 22): a session-level advisory lock outlives the transactions that
+// work under it, so losing its connection loses the lock while that work goes on. It is taken by
+// withSessionLock in packages/db/src/session-lock.ts, which hands the work a signal that aborts
+// when the connection is lost and never returns the connection to the pool still holding the
+// lock. Matched in string and template text of product code and scripts, but packages/db/src,
+// where the helper and the migration runner's own lock (on the connection that does the work)
+// live: pg_advisory_lock, pg_try_advisory_lock, pg_advisory_unlock and their _shared forms, and
+// pg_advisory_unlock_all. The transaction locks (pg_advisory_xact_lock) do not match: they end
+// with their transaction. Tests are outside: they hold the lock as a second runner would. Not
+// seen: a name put together at run time.
+const NO_SESSION_LOCK = [
+  {
+    selector: stringMatching('/\\bpg_(try_)?advisory_(lock|unlock)(_shared|_all)?\\s*\\(/i'),
+    message:
+      'Take a session lock through withSessionLock, so work on other connections stops when the lock is lost (EAX-06): withSessionLock(ctx.db, name, (signal) => work) from @tinnox/db (packages/db/src/session-lock.ts) holds the lock on a connection of its own, aborts the signal when that connection is lost, and gives the lock back; add the name to its SessionLock type. A lock that only guards the statements of one transaction is pg_advisory_xact_lock in that transaction (withCountedLimit for a counted ceiling).',
+  },
+];
+
 // EAX-08: a security exemption is decided on an address, never on a name. A loopback name or
 // literal, in any case, is refused where API code compares a host with it: an equality test, a
 // switch case, a list or Set to look it up in, and the argument of endsWith, startsWith or
@@ -903,19 +921,9 @@ const DB_CALLER_FILES = DB_CALLERS.map((dir) =>
 
 // AG-2.1: the statements tinnox/no-query-off-transaction lets a file send off a transaction,
 // each with its reason. The rule takes a statement only when it is a string literal the pattern
-// matches, so an entry opens nothing else in its file.
-export const QUERY_OFF_TRANSACTION = {
-  'apps/api/src/alerts.ts': [
-    {
-      sql: '^SELECT pg_try_advisory_lock\\(hashtextextended\\(\\$1, 0\\)\\) AS ok$',
-      reason: 'session lock; removed by `withSessionLock` in step 22',
-    },
-    {
-      sql: '^SELECT pg_advisory_unlock\\(hashtextextended\\(\\$1, 0\\)\\) AS ok$',
-      reason: 'session lock; removed by `withSessionLock` in step 22',
-    },
-  ],
-};
+// matches, so an entry opens nothing else in its file. Empty since adoption plan step 22: the
+// alert check's session lock, the last entry, is taken by withSessionLock of @tinnox/db.
+export const QUERY_OFF_TRANSACTION = {};
 
 // AG-3.1, D25: the statements tinnox/no-raw-audit-insert lets a file write for itself, each with
 // its reason. Everything else returns its audit rows from its change, and changeOrg or
@@ -1459,6 +1467,7 @@ const PRODUCT_SYNTAX = [
   ...NO_LOADCONFIG_OPTIONS,
   ...NO_RAW_SEC,
   ...NO_ROLE_SWITCH,
+  ...NO_SESSION_LOCK,
 ];
 const API_SYNTAX = [
   ...NO_NON_NULL,
@@ -1471,6 +1480,7 @@ const API_SYNTAX = [
   ...NO_LOADCONFIG_OPTIONS,
   ...NO_RAW_SEC,
   ...NO_ROLE_SWITCH,
+  ...NO_SESSION_LOCK,
   ...NO_LOOPBACK_NAME,
 ];
 // The list of the offline tools (D25: scripts get the database rules too). The tools that read
@@ -1482,7 +1492,11 @@ const SCRIPTS_SYNTAX = [
   ...NO_GLOBAL_PROCESS_ENV,
   ...NO_RAW_SEC,
   ...NO_ROLE_SWITCH,
+  ...NO_SESSION_LOCK,
 ];
+// EAX-06: packages/db holds withSessionLock and the migration runner's lock, so the product list
+// of its source leaves out NO_SESSION_LOCK.
+const DB_SYNTAX = PRODUCT_SYNTAX.filter((entry) => !NO_SESSION_LOCK.includes(entry));
 
 // The files of packages/db that are the one place for something the rest may not write, with the
 // list each is excused from. The rest of the package's list is unchanged for them.
@@ -1675,7 +1689,11 @@ export default tseslint.config(
     files: [`${dir}/src/**/*.ts`],
     ignores: TEST_FILES,
     rules: {
-      'no-restricted-syntax': ['error', ...PRODUCT_SYNTAX, ...outboundSyntax(dir, null)],
+      'no-restricted-syntax': [
+        'error',
+        ...(dir === 'packages/db' ? DB_SYNTAX : PRODUCT_SYNTAX),
+        ...outboundSyntax(dir, null),
+      ],
     },
   })),
   ...Object.entries(DB_ONE_PLACES).map(([file, excused]) => ({
@@ -1683,7 +1701,7 @@ export default tseslint.config(
     rules: {
       'no-restricted-syntax': [
         'error',
-        ...PRODUCT_SYNTAX.filter((entry) => !excused.includes(entry)),
+        ...DB_SYNTAX.filter((entry) => !excused.includes(entry)),
         ...outboundSyntax('packages/db', null),
       ],
     },

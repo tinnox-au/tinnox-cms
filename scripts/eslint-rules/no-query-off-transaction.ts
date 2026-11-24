@@ -7,8 +7,9 @@
 //
 // Since adoption plan step 21 the API holds no pool: AppContext.db, the Database of
 // createDatabase, has no query, so the type checker refuses that call before this rule sees it.
-// What is left for the rule in the API is the handle of poolAsTx and the alert check's own
-// connection (sessionLockConnection); in the offline tools, the MigratorPool and its clients.
+// What is left for the rule in the API is the handle of poolAsTx (the alert check's lock
+// connection went behind withSessionLock in step 22); in the offline tools, the MigratorPool and
+// its clients.
 //
 // With type information the receiver is judged by its type: it must carry the mark of a
 // transaction handle (packages/db/src/tx.ts, which only run() makes), or the mark of the handle

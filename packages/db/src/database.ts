@@ -3,8 +3,9 @@
  * opaque handle that createDatabase makes, reached as `AppContext.db`. It has no `query` and no
  * `connect`, and nothing outside this package can get the pool behind it, so product code sends
  * a statement only inside a transaction the package opened (readOrg, changeOrg, changePreOrg),
- * through a typed sec.* wrapper, or through one of the named functions here. Those functions,
- * and the openers, take a `Database`; a `pg` Pool is not one, so it does not type-check where a
+ * through a typed sec.* wrapper, or through one of the named functions here and withSessionLock
+ * (./session-lock.ts), which sends only its own lock and unlock. Those functions, and the
+ * openers, take a `Database`; a `pg` Pool is not one, so it does not type-check where a
  * `Database` is wanted (./database.test.ts).
  *
  * The pool is kept here, keyed by the handle, where only this package finds it
@@ -13,14 +14,14 @@
  * `MigratorPool` connectMigrator returned, which is a `Database` too (./migrate.ts).
  */
 import { createPool, readRuntimeRole, runtimeRoleProblems, RuntimeRoleError } from './pool.ts';
-import type { CreatePoolOptions, Pool, PoolClient, RuntimeRoleFacts } from './pool.ts';
+import type { CreatePoolOptions, Pool, RuntimeRoleFacts } from './pool.ts';
 
 declare const database: unique symbol;
 
 /**
  * The database of a process: what createDatabase returns, and what readOrg, changeOrg,
- * changePreOrg, auditStandalone, sessionRevokeUnaudited, poolAsTx, ping and assertRuntimeRole
- * take. It carries no way to send a statement of its own.
+ * changePreOrg, auditStandalone, sessionRevokeUnaudited, poolAsTx, ping, assertRuntimeRole and
+ * withSessionLock take. It carries no way to send a statement of its own.
  */
 export interface Database {
   readonly [database]: true;
@@ -76,17 +77,6 @@ export function createDatabase(options: CreatePoolOptions): Database {
  */
 export async function ping(db: Database): Promise<void> {
   await poolOfDatabase(db).query('SELECT 1');
-}
-
-/**
- * A connection of its own, with no transaction open, for the alert check's session advisory
- * lock (apps/api/src/alerts.ts): the lock must outlive the transactions the run opens, and a
- * lost connection must release it. tinnox/no-query-off-transaction refuses every statement on
- * it except the lock and the unlock that QUERY_OFF_TRANSACTION (eslint.config.js) lists for that
- * file. Replaced by withSessionLock in adoption plan step 22 (EAX-06). The caller releases it.
- */
-export function sessionLockConnection(db: Database): Promise<PoolClient> {
-  return poolOfDatabase(db).connect();
 }
 
 /**

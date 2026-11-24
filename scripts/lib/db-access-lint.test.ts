@@ -134,21 +134,8 @@ describe('query() off a transaction (AG-2.1)', { timeout: 30_000 }, () => {
     expect(isOff(await entryFor(path, QUERY))).toBe(true);
   });
 
-  const SESSION_LOCK = 'session lock; removed by `withSessionLock` in step 22';
-
-  it('lists the two session-lock statements of the alert check, with the reason, and nothing else', async () => {
-    expect(await exported('QUERY_OFF_TRANSACTION')).toEqual({
-      'apps/api/src/alerts.ts': [
-        {
-          sql: '^SELECT pg_try_advisory_lock\\(hashtextextended\\(\\$1, 0\\)\\) AS ok$',
-          reason: SESSION_LOCK,
-        },
-        {
-          sql: '^SELECT pg_advisory_unlock\\(hashtextextended\\(\\$1, 0\\)\\) AS ok$',
-          reason: SESSION_LOCK,
-        },
-      ],
-    });
+  it('lists no statement: the alert check takes its session lock through withSessionLock (EAX-06)', async () => {
+    expect(await exported('QUERY_OFF_TRANSACTION')).toEqual({});
   });
 
   it('keeps no entry whose statement its file no longer sends', async () => {
@@ -164,26 +151,16 @@ describe('query() off a transaction (AG-2.1)', { timeout: 30_000 }, () => {
     }
   });
 
-  it('lets the alert check send those two statements on its lock connection, and nothing else', async () => {
+  it('refuses the old session-lock statements on a connection in the alert check (EAX-06)', async () => {
     const path = 'apps/api/src/alerts.ts';
-    const allowed = `
+    const old = `
       await client.query('SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS ok', [KEY]);
       await client.query('SELECT pg_advisory_unlock(hashtextextended($1, 0)) AS ok', [KEY]);
     `;
-    expect(await flagged(path, allowed, QUERY)).toEqual([]);
-    const other = `
-      await client.query('SELECT id FROM display');
-      await deps.pool.query('SELECT 1');
-      await client.query('SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS ok; DELETE FROM display');
-    `;
-    expect(await flagged(path, other, QUERY)).toEqual([
-      expect.stringMatching(OFF_TRANSACTION),
+    expect(await flagged(path, old, QUERY)).toEqual([
       expect.stringMatching(OFF_TRANSACTION),
       expect.stringMatching(OFF_TRANSACTION),
     ]);
-    // The entries belong to that file only.
-    expect(await flagged('apps/api/src/housekeeping.ts', allowed, QUERY)).toHaveLength(2);
-    expect(await flagged('scripts/lib/provision.ts', allowed, QUERY)).toHaveLength(2);
   });
 });
 
@@ -414,6 +391,61 @@ describe('the role switch (D25)', { timeout: 30_000 }, () => {
       expect.stringMatching(/^Do not cast to MigratorPool/),
     ]);
   });
+});
+
+describe('session advisory locks (EAX-06)', { timeout: 30_000 }, () => {
+  const SESSION_LOCK =
+    /^Take a session lock through withSessionLock, so work on other connections stops when the lock is lost \(EAX-06\): withSessionLock\(ctx\.db, name, \(signal\) => work\) from @tinnox\/db \(packages\/db\/src\/session-lock\.ts\)/;
+  // packages/db/src holds the helper and the migration runner's lock.
+  const OUTSIDE_DB = PRODUCT_AND_SCRIPTS.filter((path) => !path.startsWith('packages/db/'));
+
+  it.each([
+    "'SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS ok'",
+    "'SELECT pg_advisory_unlock(hashtextextended($1, 0)) AS ok'",
+    "'SELECT pg_advisory_lock($1)'",
+    "'select PG_ADVISORY_LOCK (1)'",
+    "'SELECT pg_try_advisory_lock_shared(1)'",
+    "'SELECT pg_advisory_unlock_shared(1)'",
+    "'SELECT pg_advisory_unlock_all()'",
+    '`SELECT pg_try_advisory_lock(hashtextextended(${KEY}, 0))`',
+    '`SELECT ${COLUMNS}, pg_advisory_lock(1)`',
+  ])('flags %s', async (text) => {
+    const code = `export const q = ${text};`;
+    expect(await flagged('apps/api/src/routes/fixture.ts', code, SYNTAX)).toEqual([
+      expect.stringMatching(SESSION_LOCK),
+    ]);
+  });
+
+  it('leaves alone a transaction lock and a sentence that names the lock', async () => {
+    const code = [
+      "export const a = 'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))';",
+      "export const b = 'SELECT pg_try_advisory_xact_lock(1) AS got';",
+      "export const c = 'another runner holds the advisory lock; pg_advisory_lock is not taken';",
+      '// SELECT pg_advisory_lock(1)',
+    ].join('\n');
+    expect(await flagged('apps/api/src/routes/fixture.ts', code, SYNTAX)).toEqual([]);
+  });
+
+  it.each(OUTSIDE_DB)('flags it in %s', async (path) => {
+    const code = "export const q = 'SELECT pg_try_advisory_lock(1) AS ok';";
+    expect(await flagged(path, code, SYNTAX)).toEqual([expect.stringMatching(SESSION_LOCK)]);
+  });
+
+  it.each(TESTS)('leaves the test file %s alone', async (path) => {
+    const code = "await holder.query('SELECT pg_advisory_lock(1)');";
+    expect(await flagged(path, code, SYNTAX)).toEqual([]);
+  });
+
+  it.each(['packages/db/src/session-lock.ts', 'packages/db/src/pool.ts', ...ONE_PLACES])(
+    'lets %s take one, and keeps that file the rest of its list',
+    async (path) => {
+      const code = "export const q = 'SELECT pg_try_advisory_lock(1) AS ok';";
+      expect(await flagged(path, code, SYNTAX)).toEqual([]);
+      expect(await flagged(path, 'export const v = a!;', SYNTAX)).toEqual([
+        expect.stringMatching(/^Do not assert a value is not null/),
+      ]);
+    },
+  );
 });
 
 describe('raw audit inserts (AG-3.1, D25)', { timeout: 30_000 }, () => {

@@ -29,13 +29,7 @@ export {
   type QueryResultRow,
   type RuntimeRoleFacts,
 } from './pool.ts';
-export {
-  assertRuntimeRole,
-  createDatabase,
-  ping,
-  sessionLockConnection,
-  type Database,
-} from './database.ts';
+export { assertRuntimeRole, createDatabase, ping, type Database } from './database.ts';
 export {
   CommitOutcomeUnknownError,
   poolAsTx,
@@ -95,5 +89,6 @@ export * from './listing.ts';
 export * from './sql.ts';
 export * from './members.ts';
 export * from './counted-limit.ts';
+export * from './session-lock.ts';
 export * from './constraints.ts';
 export * from './error-field.ts';
