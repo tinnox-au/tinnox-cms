@@ -56,14 +56,13 @@ None.
 
 ## In review
 
-| Id | Card | Agreed | PR | Since |
-|---|---|---|---|---|
-| CMS-31 | Poteto pyramid refactor, group C: errors and outcomes (steps 23 to 28 of the adoption plan); Michael starts it | Michael 24 Nov | #40 | 25 Nov |
+None.
 
 ## Done, last 14 days
 
 | Id | Date | Outcome | PR |
 |---|---|---|---|
+| CMS-31 | 25 Nov | Poteto pyramid refactor, group C: errors and outcomes (steps 23 to 28 of the adoption plan); Michael starts it | #40 |
 | CMS-30 | 24 Nov | Poteto pyramid refactor, group B: the database API (steps 13 to 22 of the adoption plan), built locally first | #39 |
 | CMS-28 | 23 Nov | Poteto pyramid refactor, rest of group A: steps 3, 4, 6, 6a, 11, 12 and 12a to 12c of the adoption plan | #37 |
 | CMS-24 | 22 Nov | Poteto pyramid refactor, group A: guardrails that land with their fixes (document, test, migration, import and lint checks) | #36 |
@@ -270,6 +269,9 @@ from: CMS-30
 **Notes**
 - 24 Nov: Steps: 23 cross-organisation conformance test and the reworded 403 rule; 23a response contracts; 24 unknown commit outcome; 25 classifyDbError and the constraint registry; 26 SQLSTATE lint; 27 settle and a retry helper; 28 403 constructors.
 - 24 Nov: Builds on group B (CMS-30). Review findings left for these steps are in sections 6.1 and 6.2 of docs/coding_guide/poteto_pyramid/adoption-plan.md.
+
+**Evidence**
+Steps 23 to 28 with the whole-group review fixes merged in pull request 40, CI green on first run; plan section 6.4 records what was built and the behaviour that changed
 
 ### CMS-32
 from: CMS-30
