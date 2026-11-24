@@ -11,7 +11,7 @@ import {
   type PlaylistDto,
   type PlaylistSummaryDto,
 } from '@tinnox/contracts';
-import { withOrg } from '@tinnox/db';
+import { withOrg } from '@tinnox/db/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   appItem,

@@ -8,7 +8,8 @@
  * The provider is a fake with a settable `auth_time`, as in credential-audit.test.ts.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
-import { sessionRevokeMembership, withOrg } from '@tinnox/db';
+import { sessionRevokeMembership } from '@tinnox/db';
+import { withOrg } from '@tinnox/db/testing';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { IdentityProvider } from '@tinnox/api/test-support';

@@ -1,6 +1,6 @@
 // Which pool each transaction handle was opened on. run() in ./tx.ts records it; asDefiner in
-// ./definer.ts reads it. In a file of its own because everything ./tx.ts exports is part of the
-// runtime entry (./index.ts), and this is not: no entry of the package exports this module.
+// ./definer.ts reads it. In a file of its own because the runtime entry (./index.ts) exports
+// most of ./tx.ts, and no entry of the package may export this module.
 import type { Pool } from './pool.ts';
 
 const pools = new WeakMap<object, Pool>();

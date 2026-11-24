@@ -12,8 +12,10 @@ import * as root from './index.ts';
 import * as migrate from './migrate.ts';
 import * as orgId from './org-id.ts';
 import * as preOrg from './pre-org.ts';
+import * as sec from './sec.ts';
 import * as sqlAudit from './sql-audit.ts';
 import * as testing from './testing.ts';
+import * as tx from './tx.ts';
 
 const SRC = dirname(fileURLToPath(import.meta.url));
 
@@ -96,6 +98,8 @@ describe('the entries of @tinnox/db (AG-1.10)', () => {
       'AUDIT_DEBT_SQLSTATE',
       'auditRowsSince',
       'auditScanMark',
+      'auditScoped',
+      'auditUnscoped',
       'ensureAuditDebtGuard',
       'inTx',
       'installAuditDebtGuard',
@@ -107,10 +111,46 @@ describe('the entries of @tinnox/db (AG-1.10)', () => {
       'whileAuditFails',
       'whileUnauditedAllowed',
       'withNoOrgSet',
+      'withOrg',
+      'withResolvedOrg',
+      'withoutOrg',
     ]);
     expect(Object.keys(root)).toEqual(
-      expect.arrayContaining(['createPool', 'ping', 'withOrg', 'sql', 'deviceByRegistrationId']),
+      expect.arrayContaining(['createPool', 'ping', 'readOrg', 'sql', 'deviceByRegistrationId']),
     );
+  });
+
+  // AG-3.1, SCR-34 (adoption plan step 20): the change API of ./change.ts is built on the openers
+  // of ./tx.ts and the audit writers of ./sec.ts, and the runtime entry hands out the change API
+  // alone. So application code cannot open a transaction with no permit and no audit row, nor
+  // write an audit row on a transaction of its choosing; tests reach the five through the
+  // testing entry. index.ts lists the two modules name by name, so a new export is checked here.
+  const BUILT_ON = ['auditScoped', 'auditUnscoped', 'withOrg', 'withResolvedOrg', 'withoutOrg'];
+
+  it('the runtime entry does not export what the change API is built on', () => {
+    const fromRoot = Object.keys(root);
+    const valuesFromRoot = Object.values(root);
+    const builtOn = { ...tx, ...sec } as Record<string, unknown>;
+    for (const name of BUILT_ON) {
+      const message = `${name} must not be exported by the runtime entry: a change runs on changeOrg or changePreOrg and returns its audit rows as { value, audit }, and a read runs on readOrg`;
+      expect(fromRoot, message).not.toContain(name);
+      // The function itself too, so that `export { withOrg as openOrg }` is caught as well.
+      expect(builtOn[name]).toBeTypeOf('function');
+      expect(valuesFromRoot, message).not.toContain(builtOn[name]);
+    }
+    expect([...Object.keys(tx), ...Object.keys(sec)]).toEqual(expect.arrayContaining(BUILT_ON));
+    // auditStandalone stays: D2 names it, for a refusal no transaction carries.
+    expect(fromRoot).toContain('auditStandalone');
+  });
+
+  it('the runtime entry exports everything else of ./tx.ts and ./sec.ts', () => {
+    const fromRoot = new Set(Object.keys(root));
+    expect(
+      [...Object.keys(tx), ...Object.keys(sec)].filter(
+        (name) => !BUILT_ON.includes(name) && !fromRoot.has(name),
+      ),
+      'src/index.ts lists the exports of src/tx.ts and src/sec.ts name by name: add the new one there',
+    ).toEqual([]);
   });
 
   // AG-2.3, AG-2.2 (adoption plan step 18): two modules no entry exports. ./org-id.ts makes the
@@ -128,7 +168,7 @@ describe('the entries of @tinnox/db (AG-1.10)', () => {
     ).toEqual(['definer.ts', 'migrate.ts', 'sec.ts', 'testing.ts']);
     expect(
       importersOf('pre-org.ts'),
-      'src/pre-org.ts sends a statement on a transaction with no organisation. Only the sec.* wrappers (src/sec.ts), asDefiner and the testing entry do that; a tenant statement goes on the OrgTx of withOrg or enterOrg',
+      'src/pre-org.ts sends a statement on a transaction with no organisation. Only the sec.* wrappers (src/sec.ts), asDefiner and the testing entry do that; a tenant statement goes on the OrgTx of changeOrg or enterOrg',
     ).toEqual(['definer.ts', 'sec.ts', 'testing.ts', 'tx.ts']);
 
     const fromRoot = Object.keys(root);

@@ -16,13 +16,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import {
-  alertRecipientByTokenHash,
-  displayAlertOrgs,
-  poolAsTx,
-  withOrg,
-  type Pool,
-} from '../src/index.ts';
+import { alertRecipientByTokenHash, displayAlertOrgs, poolAsTx, type Pool } from '../src/index.ts';
+import { withOrg } from '../src/testing.ts';
 import { resetTestDatabase, runMigrations, type MigrationResult } from '../src/migrate.ts';
 import { appPool, createOrg, migratorClient, migratorUrl, type TestOrg } from './support.ts';
 

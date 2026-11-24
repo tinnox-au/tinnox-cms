@@ -22,7 +22,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { withOrg, type Pool } from '../src/index.ts';
+import type { Pool } from '../src/index.ts';
 // Not part of the package's interface: only the runner and this file read them.
 import {
   ownershipProblems as runnerOwnershipProblems,
@@ -36,7 +36,7 @@ import {
   triggerProblems,
   type TableFacts,
 } from '../src/schema-invariants.ts';
-import { removeAuditDebtGuard } from '../src/testing.ts';
+import { removeAuditDebtGuard, withOrg } from '../src/testing.ts';
 import { MEMBER_REFERENCES } from './catalogue/member-references.ts';
 import { NULL_PASSING_CHECKS } from './catalogue/null-passing-checks.ts';
 import { SEC_FUNCTIONS } from './catalogue/sec-functions.ts';

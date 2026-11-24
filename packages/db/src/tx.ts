@@ -9,13 +9,13 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 declare const organisation: unique symbol;
 /**
  * The id of an organisation that the database named: the verified session's member, the device
- * credential, or one of the other lookups of ./sec.ts. `withOrg` and `enterOrg` take nothing
- * else, so a string from a path, a query, a body or a header does not type-check as the
- * organisation a query runs for (AG-2.3). Only ./org-id.ts makes one, and lint refuses a cast
- * to it everywhere else (NO_ORG_ID_FORGERY in eslint.config.js). The offline tools have two
- * more sources, both in the '@tinnox/db/migrate' entry: `newOrgId` for an organisation that is
- * being created, and what `asDefiner` reads (D25). Tests make one with `testOrgId` from
- * '@tinnox/db/testing'.
+ * credential, or one of the other lookups of ./sec.ts. `readOrg`, `changeOrg` and `enterOrg`
+ * (and `withOrg`, which `changeOrg` runs on) take nothing else, so a string from a path, a
+ * query, a body or a header does not type-check as the organisation a query runs for (AG-2.3).
+ * Only ./org-id.ts makes one, and lint refuses a cast to it everywhere else (NO_ORG_ID_FORGERY
+ * in eslint.config.js). The offline tools have two more sources, both in the
+ * '@tinnox/db/migrate' entry: `newOrgId` for an organisation that is being created, and what
+ * `asDefiner` reads (D25). Tests make one with `testOrgId` from '@tinnox/db/testing'.
  */
 export type OrgId = string & { readonly [organisation]: true };
 
@@ -52,23 +52,23 @@ export interface OrgReadTx extends Autocommit {
 }
 
 /**
- * A transaction with the organisation set: the callback of `withOrg` and of `changeOrg`
- * receives it, and so does the caller of `enterOrg`. Row-level security limits every statement
- * on it to that organisation. With `OrgReadTx`, its read-only form, this is the only handle
- * request code can send a statement of its own on, so a tenant query cannot run where no
- * organisation is set (AG-2.1). The scoped audit writer and the sec.* wrappers that need the
- * organisation take it.
+ * A transaction with the organisation set: the callback of `changeOrg` (and of `withOrg`, which
+ * it runs on) receives it, and so does the caller of `enterOrg`. Row-level security limits
+ * every statement on it to that organisation. With `OrgReadTx`, its read-only form, this is the
+ * only handle request code can send a statement of its own on, so a tenant query cannot run
+ * where no organisation is set (AG-2.1). The scoped audit writer and the sec.* wrappers that
+ * need the organisation take it.
  */
 export interface OrgTx extends OrgReadTx {
   readonly [inTransaction]: 'org';
 }
 
 /**
- * A transaction before the organisation is known: the callback of `withoutOrg` and of
- * `withResolvedOrg` receives it. It has no `query`: tenant tables show no rows here, so the
- * only thing to do with it is to hand it to a sec.* wrapper of ./sec.ts that takes one (they
- * resolve a credential to its organisation, or record what has none), and then to `enterOrg`
- * (AG-2.2).
+ * A transaction before the organisation is known: the callback of `changePreOrg` receives it
+ * (and of `withResolvedOrg`, which it runs on, and `withoutOrg`, which tests use). It has no
+ * `query`: tenant tables show no rows here, so the only thing to do with it is to hand it to a
+ * sec.* wrapper of ./sec.ts that takes one (they resolve a credential to its organisation, or
+ * record what has none), and then to `enterOrg` (AG-2.2).
  */
 export interface PreOrgTx {
   readonly [inTransaction]: 'pre';
@@ -274,6 +274,10 @@ async function run<T>(
  *
  * `opener` is for `changeOrg` (./change.ts), which is this transaction with the audit rows
  * written before COMMIT: the name a refusal gives, as `poolAsTx` takes a `StandaloneCaller`.
+ *
+ * Not in the runtime entry (./index.ts; adoption plan step 20): it runs anything with no permit
+ * and no audit row, so application code changes data on `changeOrg` and reads on `readOrg`.
+ * Tests arrange data with it, from '@tinnox/db/testing'.
  */
 export async function withOrg<T>(
   pool: Pool,
@@ -323,7 +327,8 @@ export async function readOrg<T>(
 /**
  * Runs `fn` in one transaction with NO tenant context. Tenant tables show no
  * rows here, and the handle takes no statement of the caller's own. Use only for sec.* calls
- * that happen before the organisation is known.
+ * that happen before the organisation is known. Not in the runtime entry (./index.ts): tests
+ * reach it from '@tinnox/db/testing', and application code uses `changePreOrg`.
  */
 export async function withoutOrg<T>(pool: Pool, fn: (tx: PreOrgTx) => Promise<T>): Promise<T> {
   return run(
@@ -347,6 +352,8 @@ export async function withoutOrg<T>(pool: Pool, fn: (tx: PreOrgTx) => Promise<T>
  * organisation.
  *
  * `opener` is for `changePreOrg` (./change.ts), as the one of `withOrg` is for `changeOrg`.
+ * Not in the runtime entry (./index.ts), for the reason `withOrg` is not; tests reach it from
+ * '@tinnox/db/testing'.
  */
 export async function withResolvedOrg<T>(
   pool: Pool,

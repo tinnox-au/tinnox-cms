@@ -10,12 +10,11 @@
  * - Every write transaction re-reads the member row FOR SHARE as its first statement, so no
  *   write commits under a role, or a session, that was taken away while the request was on its
  *   way. `changeOrg` of @tinnox/db runs no change without a `WritePermit`, and this module is
- *   the only one that issues an operator's (`changeAsOperator`; `withOrgAllowed` for the route
- *   files that still write their audit rows by hand): the permit's re-check is that first
- *   statement (SCR-34, adoption plan step 19). A refusal recorded on its own has the permit of
- *   ./refusal.ts, which changes nothing. `changePreOrg` and `withResolvedOrg` enter an
- *   organisation with no permit, so lint keeps them to the files of PRE_ORG_CHANGE_FILES
- *   (eslint.config.js), whose transactions start before the organisation is known.
+ *   the only one that issues an operator's (`changeAsOperator`): the permit's re-check is that
+ *   first statement (SCR-34, adoption plan step 19). A refusal recorded on its own has the
+ *   permit of ./refusal.ts, which changes nothing. `changePreOrg` enters an organisation with
+ *   no permit, so lint keeps it to the files of PRE_ORG_CHANGE_FILES (eslint.config.js), whose
+ *   transactions start before the organisation is known.
  *
  * Who holds which key: ROLE_PERMISSIONS in packages/domain/src/permissions.ts.
  */
@@ -32,7 +31,6 @@ import {
 import {
   changeOrg,
   issueWritePermit,
-  legacyAudit,
   lockOrgMembership,
   membershipForCheck,
   type Change,
@@ -42,7 +40,6 @@ import {
 import { permissionsOf } from '@tinnox/domain';
 import type { FastifyReply, FastifyRequest, RouteOptions } from 'fastify';
 import type { AppContext } from '../context.ts';
-import type { Decision } from '../db-helpers.ts';
 import { HttpError, pgErrorCode } from '../errors.ts';
 import { audits, noAudit, type RouteAudit } from '../route-audit.ts';
 import {
@@ -486,7 +483,7 @@ function requirementOf(
 
 /**
  * A lock timeout (55P03) as 503 service_unavailable with retry-after 2; anything else unchanged.
- * For a write outside withOrgAllowed that waits for a row lock, such as the public alert
+ * For a write outside changeAsOperator that waits for a row lock, such as the public alert
  * confirmation (review findings SEC-3, BEH-3), so it answers as every other write does.
  */
 export function lockTimeoutAsUnavailable(request: FastifyRequest, error: unknown): unknown {
@@ -573,37 +570,4 @@ export async function changeAsOperator<T>(
   } catch (error) {
     throw await settle(ctx, request, session, error);
   }
-}
-
-/**
- * `changeAsOperator` for a callback that still writes its audit rows itself, with
- * `auditScoped(tx, event)`, and returns its value bare: the route files of
- * LEGACY_TRANSACTION_FILES (eslint.config.js). The same statements in the same order, and the
- * same refusals. A route moves by calling `changeAsOperator` and returning `{ value, audit }`
- * (adoption plan step 20); this goes with the last of them.
- */
-export async function withOrgAllowed<T>(
-  ctx: AppContext,
-  request: FastifyRequest,
-  fn: (tx: OrgTx, role: Role) => Promise<T>,
-  options?: WriteOptions,
-): Promise<T> {
-  return changeAsOperator(
-    ctx,
-    request,
-    async (tx, role) => ({ value: await fn(tx, role), audit: legacyAudit() }),
-    options,
-  );
-}
-
-/** The same around withOrgDecision: commits a refusal's trace, then throws the refusal. */
-export async function withOrgDecisionAllowed<T>(
-  ctx: AppContext,
-  request: FastifyRequest,
-  fn: (tx: OrgTx, role: Role) => Promise<Decision<T>>,
-  options?: WriteOptions,
-): Promise<T> {
-  const decision = await withOrgAllowed(ctx, request, fn, options);
-  if (!decision.ok) throw decision.error;
-  return decision.value;
 }

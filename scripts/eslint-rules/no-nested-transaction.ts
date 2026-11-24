@@ -25,7 +25,8 @@ import { createRule } from './create-rule.ts';
 // sessionRevokeUnaudited of packages/db/src/sec.ts, which take the pool; readOrg of tx.ts, and
 // changeOrg and changePreOrg of packages/db/src/change.ts, changeOrgAsMigrator of the migrate
 // entry), and the API's wrappers around them (apps/api/src/auth/permissions.ts, refusal.ts and
-// device.ts there, apps/api/src/jobs.ts, apps/api/src/db-helpers.ts). A new wrapper joins this
+// device.ts there, apps/api/src/jobs.ts). withOrg, withoutOrg and withResolvedOrg are for tests
+// only since step 20 ('@tinnox/db/testing'), which this rule reads too. A new wrapper joins this
 // list.
 const OPENERS: ReadonlySet<string> = new Set([
   'withOrg',
@@ -42,9 +43,6 @@ const OPENERS: ReadonlySet<string> = new Set([
   'changeAsJob',
   'changeOrgAsMigrator',
   'recordRefusal',
-  'withOrgAllowed',
-  'withOrgDecision',
-  'withOrgDecisionAllowed',
 ]);
 
 // The openers that take no callback: a function passed to one of them is not inside a transaction.
@@ -175,7 +173,7 @@ export default createRule({
       nested:
         '{{opener}}() is called inside {{outer}}, where a transaction is already open. This opens a second transaction on another connection that commits independently. Pass the outer tx to the helper: give it a `tx: OrgTx` parameter (from @tinnox/db) and run the statements on that; work that must commit on its own goes after the outer call has returned.',
       standaloneAudit:
-        '{{opener}}() is called inside {{outer}}, where a transaction is already open. This opens a second transaction on another connection that commits independently. Write the event on the outer transaction instead: inside changeOrg or changePreOrg, return it as { value, audit } and the wrapper writes it there; in a file of LEGACY_TRANSACTION_FILES (eslint.config.js), auditUnscoped(tx, event), or auditScoped(tx, event) when the outer transaction is withOrg (both from @tinnox/db). auditStandalone is only for a refusal that no transaction carries: call it after the outer call has returned or thrown.',
+        '{{opener}}() is called inside {{outer}}, where a transaction is already open. This opens a second transaction on another connection that commits independently. Write the event on the outer transaction instead: return it from that change as { value, audit }, and changeOrg or changePreOrg (or the wrapper the route calls: changeAsOperator, changeAsDevice, changeAsJob) writes it there. auditStandalone is only for a refusal that no transaction carries: call it after the outer call has returned or thrown.',
       unauditedRevoke:
         '{{opener}}() is called inside {{outer}}, where a transaction is already open. This opens a second transaction on another connection that commits independently. End the session on the outer tx instead: sessionRevoke(tx, idHash) (from @tinnox/db), with its audit row on the same tx. sessionRevokeUnaudited is only for the sign-out fallback: call it after the outer call has returned or thrown.',
       refusal:

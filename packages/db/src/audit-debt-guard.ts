@@ -212,7 +212,7 @@ export const SETTLE_FUNCTION = `
     owed text := coalesce(current_setting('audit_debt.owed', true), '');
   BEGIN
     IF owed <> '' AND coalesce(current_setting('audit_debt.paid', true), '') = '' THEN
-      RAISE EXCEPTION 'audit debt: this transaction changed % as tinnox_app and commits no audit_event row. Write the audit row on the same Tx as the change, with auditScoped(tx, event) or auditUnscoped(tx, event) from @tinnox/db, so both commit or neither does (AGENTS.md section 3). Only a write that a recorded decision exempts (D3, or the step 20 ruling for EXEMPT_SHAPES) goes in the lists of packages/db/src/audit-debt-guard.ts, with that decision''s reason; product code never moves to a connection the guard does not judge.', owed
+      RAISE EXCEPTION 'audit debt: this transaction changed % as tinnox_app and commits no audit_event row. Return the audit event from the change, as { value, audit }, and its wrapper writes the row on the same transaction, so both commit or neither does (AGENTS.md section 3): changeAsOperator, changeAsDevice or changeAsJob in the API (each on changeOrg of @tinnox/db), changePreOrg before the organisation is known, changeOrgAsMigrator in an offline tool. Only a write that a recorded decision exempts (D3, or the step 20 ruling for EXEMPT_SHAPES) goes in the lists of packages/db/src/audit-debt-guard.ts, with that decision''s reason; product code never moves to a connection the guard does not judge.', owed
         USING ERRCODE = '${AUDIT_DEBT_SQLSTATE}', CONSTRAINT = 'audit_debt';
     END IF;
     RETURN NULL;

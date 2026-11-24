@@ -861,7 +861,7 @@ describe('alert addresses and the member who added them (D22)', () => {
     expect(waitedMs).toBeGreaterThanOrEqual(4_500);
     expect(held.status).toBe(503);
     expect(held.headers.get('retry-after')).toBe('2');
-    // The body withOrgAllowed gives a write that waited too long for a lock.
+    // The body changeAsOperator gives a write that waited too long for a lock.
     const body = (await held.json()) as { error: Record<string, unknown> };
     expect({ ...body.error, requestId: null }).toEqual({
       code: 'service_unavailable',

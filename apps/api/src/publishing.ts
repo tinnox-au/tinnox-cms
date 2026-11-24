@@ -335,7 +335,7 @@ export async function loadPlaylistDrafts<T extends OrgReadTx>(
  * Schedules with their events, keyed by id. With `lock`, the schedules cannot be
  * edited or deleted until the transaction ends.
  *
- * Two statements when locking, as `loadPlaylistDrafts` does. `withOrg` runs at
+ * Two statements when locking, as `loadPlaylistDrafts` does. `changeOrg` runs at
  * READ COMMITTED: one `FOR SHARE OF s` join that waits for an edit took its
  * snapshot before that edit, and after the wait PostgreSQL re-reads only the
  * locked schedule row, so the events would still be the old ones. With the lock
@@ -408,7 +408,7 @@ export async function loadScheduleDrafts<T extends OrgReadTx>(
  * Layouts with their zones, keyed by id. With `lock`, the layouts cannot be edited or
  * deleted until the transaction ends.
  *
- * Two statements when locking, as `loadScheduleDrafts` does. `withOrg` runs at READ
+ * Two statements when locking, as `loadScheduleDrafts` does. `changeOrg` runs at READ
  * COMMITTED: one `FOR SHARE OF l` join that waits for a PUT's `FOR UPDATE` took its
  * snapshot before the PUT, and after the wait PostgreSQL re-reads only the locked layout
  * row, so the zones (child rows) would still be the old ones. With the lock taken first,

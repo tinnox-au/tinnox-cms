@@ -7,9 +7,7 @@ import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
-  auditScoped,
   auditStandalone,
-  auditUnscoped,
   deviceByRegistrationId,
   deviceByTokenHash,
   heartbeatLogPurge,
@@ -29,11 +27,10 @@ import {
   sessionRevoke,
   sessionRevokeUnaudited,
   sha256,
-  withOrg,
-  withoutOrg,
   type Autocommit,
   type Pool,
 } from '../src/index.ts';
+import { auditScoped, auditUnscoped, withOrg, withoutOrg } from '../src/testing.ts';
 import {
   appPool,
   asDefiner,
@@ -1126,7 +1123,7 @@ describe('the two writes outside a transaction (D2, CX-01)', () => {
         detail: { reason: 'mfa_evidence_missing', acr: marker, amr: [] },
       });
     await expect(withOrg(pool, a.orgId, () => writeRefusal())).rejects.toThrow(
-      /^auditStandalone was called while a transaction is open on the same asynchronous path .* Write the event on the outer tx with auditUnscoped\(tx, event\)/,
+      /^auditStandalone was called while a transaction is open on the same asynchronous path .* Return the event from the outer change as \{ value, audit \}/,
     );
     const stored = await asSuperuser((client) =>
       client.query("SELECT 1 FROM public.audit_event WHERE detail->>'acr' = $1", [marker]),

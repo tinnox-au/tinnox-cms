@@ -617,8 +617,9 @@ type Refusal<A extends AuditAction> = AuditEventOf<A> & {
  * Does a new kind of refusal belong here? Only when it comes before the organisation is
  * known, nothing but the login state was changed and nothing was issued on its path, and no
  * transaction is open to carry the row. A refusal inside an organisation is a scoped
- * audit-only transaction instead (`withOrg` and `auditScoped`, as the permission, CSRF and
- * upload refusals do).
+ * audit-only transaction instead: `recordRefusal` of apps/api/src/auth/refusal.ts, a `changeOrg`
+ * given the refusal event and nothing else, as the permission, CSRF and upload refusals do
+ * (SCR-32).
  */
 export type StandaloneAuditEvent =
   /** A sign-in that was refused, or that failed, before any session existed. */
@@ -634,15 +635,16 @@ export type StandaloneAuditEvent =
 
 /**
  * Appends an unscoped audit event in a statement of its own. For the refusals of
- * `StandaloneAuditEvent` only; everything else is written with `auditScoped` or
- * `auditUnscoped` on the transaction of the change.
+ * `StandaloneAuditEvent` only; every other event is returned from its change, and `changeOrg`
+ * or `changePreOrg` writes it with `auditScoped` or `auditUnscoped` on that change's
+ * transaction.
  */
 export async function auditStandalone(pool: Pool, event: StandaloneAuditEvent): Promise<void> {
   await writeUnscoped(
     poolAsTx(pool, {
       opener: 'auditStandalone',
       instead:
-        'Write the event on the outer tx with auditUnscoped(tx, event), or with auditScoped(tx, event) when the outer transaction is withOrg; inside changeOrg or changePreOrg, return it as { value, audit } and the wrapper writes it there.',
+        'Return the event from the outer change as { value, audit }: changeOrg and changePreOrg, and the wrappers built on them (changeAsOperator, changeAsDevice, changeAsJob, changeOrgAsMigrator), write it on that transaction.',
     }),
     event,
   );

@@ -9,17 +9,13 @@
 import type { GrantedUnauditedReason } from '@tinnox/contracts';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
-  auditScoped,
-  auditUnscoped,
   changeOrg,
   changePreOrg,
   issueAuditStatement,
   issueWritePermit,
-  legacyAudit,
   readOrg,
   termsOfStatement,
   unaudited,
-  withOrg,
   type Audit,
   type AuditInput,
   type AuditStatement,
@@ -33,7 +29,8 @@ import {
   type WritePermit,
 } from './index.ts';
 import { asDefiner, auditedInSql, changeOrgAsMigrator, type MigratorPool } from './migrate.ts';
-import { testOrgId } from './testing.ts';
+// What the change API is built on, which the runtime entry does not export (step 20).
+import { auditScoped, auditUnscoped, testOrgId, withOrg } from './testing.ts';
 
 const ORG = testOrgId('00000000-0000-4000-8000-000000000001');
 const SET_ORG = "SELECT set_config('app.org_id', $1, true)";
@@ -241,29 +238,16 @@ describe('what a change records against what its route states (D3)', () => {
     expect(statements).not.toContain('COMMIT');
   });
 
-  it('holds a row the callback wrote by hand to the same statement (the legacy callers)', async () => {
+  it('holds a row the callback wrote by hand to the same statement as the rows it returned', async () => {
     const { pool, statements } = fakePool();
     await expect(
       changeOrg(pool, ORG, FOLDER_WRITES, async (tx) => {
         await auditScoped(tx, DELETED);
-        return { value: 1, audit: legacyAudit() };
+        return { value: 1, audit: CREATED };
       }),
     ).rejects.toThrow(unstated('folder.delete', 'folder.create, folder.update'));
     expect(statements.at(-1)).toBe('ROLLBACK');
-
-    // A stated action written by hand passes, and nothing is written twice.
-    const stated = fakePool();
-    await changeOrg(stated.pool, ORG, FOLDER_WRITES, async (tx) => {
-      await auditScoped(tx, CREATED);
-      return { value: 1, audit: legacyAudit() };
-    });
-    expect(stated.statements.slice(3)).toEqual(['AUDIT folder.create', 'COMMIT']);
-    // Nor does the legacy callback have to write one: nothing here can tell.
-    const none = fakePool();
-    await changeOrg(none.pool, ORG, FOLDER_WRITES, () =>
-      Promise.resolve({ value: 1, audit: legacyAudit() }),
-    );
-    expect(none.statements.at(-1)).toBe('COMMIT');
+    expect(statements).not.toContain('COMMIT');
   });
 
   it('refuses any audit row on a route that states none', async () => {
@@ -530,7 +514,7 @@ describe('changePreOrg (AG-3.1)', () => {
     await expect(
       changePreOrg(pool, statementOf({ none: 'login_state' }, 'GET /fixture'), async (pre) => {
         await auditUnscoped(pre, PAIRING_CREATED);
-        return { value: 1, audit: legacyAudit() };
+        return { value: 1, audit: PAIRING_CREATED };
       }),
     ).rejects.toThrow(
       /^changePreOrg: the change recorded pairing\.create, which .* states no audit row \(login_state\)\./,

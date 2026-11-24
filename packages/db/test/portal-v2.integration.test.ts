@@ -10,11 +10,11 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   STAGE_A_CONSTRAINTS,
   violatedConstraint,
-  withOrg,
   type Pool,
   type PoolClient,
   type OrgTx,
 } from '../src/index.ts';
+import { withOrg } from '../src/testing.ts';
 import {
   appPool,
   createOrg,

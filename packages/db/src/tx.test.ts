@@ -5,15 +5,11 @@
 import pg from 'pg';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
-  auditScoped,
   CommitOutcomeUnknownError,
   lockOrgMembership,
   poolAsTx,
   readOrg,
   sessionRevokeMembership,
-  withOrg,
-  withoutOrg,
-  withResolvedOrg,
   type AuditInput,
   type Autocommit,
   type OrgId,
@@ -24,7 +20,14 @@ import {
   type Tx,
 } from './index.ts';
 import { newOrgId } from './migrate.ts';
-import { testOrgId, withNoOrgSet } from './testing.ts';
+import {
+  testOrgId,
+  withNoOrgSet,
+  auditScoped,
+  withOrg,
+  withoutOrg,
+  withResolvedOrg,
+} from './testing.ts';
 
 const ORG = testOrgId('00000000-0000-4000-8000-000000000001');
 

@@ -280,9 +280,10 @@ const NO_MIGRATOR_POOL_CAST = [
 ];
 
 // D2, CX-01 (adoption plan section 2.1 A), AG-2.1 (step 18): a transaction handle says it came
-// from withOrg, withoutOrg or withResolvedOrg, so everything written on it commits or rolls back
-// together, and which of the two it is says whether an organisation is set: an OrgTx takes a
-// tenant statement, a PreOrgTx only the sec.* wrappers. The audit writers and those wrappers
+// from one of the openers of packages/db/src/tx.ts (readOrg, and the ones changeOrg and
+// changePreOrg run on), so everything written on it commits or rolls back together, and which
+// of the two it is says whether an organisation is set: an OrgTx takes a tenant statement, a
+// PreOrgTx only the sec.* wrappers. The audit writers and those wrappers
 // rely on that alone, so nothing may make one by a cast: in every file, tests included, and in
 // packages/db too, where run() and asDefiner build them without one. Tx is either of the two,
 // OrgReadTx the read-only form of an OrgTx that the callback of readOrg receives (a cast from it
@@ -298,7 +299,7 @@ const NO_TX_CAST = [
       `:matches(TSAsExpression, TSTypeAssertion) > .typeAnnotation TSTypeReference${TX}`,
     ].join(', '),
     message:
-      'Do not cast to a transaction handle (Tx, OrgTx, OrgReadTx, PreOrgTx, DefinerTx): the type says the handle is inside a transaction, so an audit row written on it commits with the change it records, and whether an organisation is set, so a tenant statement runs under row-level security. Use the tx that the callback of readOrg receives (an OrgReadTx) or of changeOrg (an OrgTx; an operator route calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts), or, before the organisation is known, the one the callback of changePreOrg receives (a PreOrgTx, for the sec.* wrappers) and the OrgTx its enterOrg returns, all from @tinnox/db; withOrg, withoutOrg and withResolvedOrg give the same handles in a file of LEGACY_TRANSACTION_FILES (eslint.config.js). A test opens one the same way (inTx from @tinnox/db/testing). A refusal with no change to pair with is written with auditStandalone(pool, event).',
+      'Do not cast to a transaction handle (Tx, OrgTx, OrgReadTx, PreOrgTx, DefinerTx): the type says the handle is inside a transaction, so an audit row written on it commits with the change it records, and whether an organisation is set, so a tenant statement runs under row-level security. Use the tx that the callback of readOrg receives (an OrgReadTx) or of changeOrg (an OrgTx; an operator route calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts), or, before the organisation is known, the one the callback of changePreOrg receives (a PreOrgTx, for the sec.* wrappers) and the OrgTx its enterOrg returns, all from @tinnox/db. A test opens one with withOrg or inTx from @tinnox/db/testing. A refusal with no change to pair with is written with auditStandalone(pool, event).',
   },
 ];
 // OTH-12: a SqlFragment says the text was written in the source (sql`...`, sqlParameter, joinSql
@@ -318,10 +319,11 @@ const NO_SQL_FRAGMENT_CAST = [
 ];
 // AG-2.3 (adoption plan step 18, D25): an OrgId says the database named the organisation (for a
 // verified session, a device credential, a completed pairing, a media job, a confirmation link
-// or the alert check's list), and withOrg and enterOrg take nothing else. So a string from a path, a query, a body or a header never becomes one, and
-// nothing but packages/db/src/org-id.ts (its own block below) may say that a value is one. In
-// every file, tests included: a test names its organisation with testOrgId from
-// '@tinnox/db/testing', and scripts are in scope like the rest (D25). Reported:
+// or the alert check's list), and readOrg, changeOrg and enterOrg take nothing else. So a
+// string from a path, a query, a body or a header never becomes one, and nothing but
+// packages/db/src/org-id.ts (its own block below) may say that a value is one. In every file,
+// tests included: a test names its organisation with testOrgId from '@tinnox/db/testing', and
+// scripts are in scope like the rest (D25). Reported:
 //   - a cast, matched like MigratorPool above (`as OrgId`, `as unknown as OrgId`, `<OrgId>id`,
 //     `as OrgId | null`, `as Promise<OrgId>`);
 //   - a type predicate or an assertion signature (`value is OrgId`, `asserts value is OrgId`),
@@ -550,7 +552,7 @@ const NO_MIGRATOR_URL = [
 // value copied out of the request first (const input = request.body; input.orgId), a cast, a
 // destructured handler parameter and an API-local schema built with .extend or .merge are not
 // seen (LINT-6). The OrgId type holds those (adoption plan step 18): whatever the value is
-// called and however it left the request, it is a string, and withOrg takes an OrgId
+// called and however it left the request, it is a string, and readOrg and changeOrg take an OrgId
 // (apps/api/src/org-from-request.test.ts). This selector stays as the earlier and plainer
 // message for the direct forms.
 const ORG_KEY = '/^(x-)?org(ani[sz]ation)?[-_]?id$/i';
@@ -728,15 +730,15 @@ function dbEntryPatterns(dir) {
     .map(([name, entry]) => ({ regex: `^@tinnox/db/${name}(/|$)`, message: entry.message }));
 }
 
-// AG-2.2: withoutOrg and poolAsTx run with no organisation, so row-level security shows a tenant
-// read nothing and nobody notices. They are for sec.* calls only, and only these files may import
-// them, each with its reason. Three of the reasons are not "before the organisation is known",
+// AG-2.2: poolAsTx runs with no organisation, so row-level security shows a tenant read nothing
+// and nobody notices. It is for sec.* calls only, and only these files may import it, each with
+// its reason. Three of the reasons are not "before the organisation is known",
 // which is what the rule in AGENTS.md says: the list records what each file really does. A file
-// leaves the list when its use is gone. Since step 18 the handle of withoutOrg is a PreOrgTx,
-// which has no query, so what such a file can do with it is call a sec.* wrapper; the handle of
-// poolAsTx still has one, which tinnox/no-query-off-transaction refuses in these files. Test
-// files are outside the rule. Not seen: the names taken from a dynamic import
-// (`const { withoutOrg } = await import('@tinnox/db')`).
+// leaves the list when its use is gone. The handle of poolAsTx has a query, which
+// tinnox/no-query-off-transaction refuses in these files. withoutOrg, which ran with no
+// organisation too, is no longer exported by @tinnox/db since step 20 (tinnox/no-legacy-transaction
+// refuses the name everywhere in these workspaces). Test files are outside the rule. Not seen: the
+// name taken from a dynamic import (`const { poolAsTx } = await import('@tinnox/db')`).
 export const UNSCOPED_HELPER_FILES = {
   'apps/api/src/auth/session.ts':
     'before the organisation is known: poolAsTx for sessionByIdHash, which resolves the session cookie to its member and organisation',
@@ -751,7 +753,7 @@ export const UNSCOPED_HELPER_FILES = {
   'apps/api/src/media/pipeline.ts':
     'not before the organisation is known, but across all of them: poolAsTx for mediaProcessingJobs, the queue of media waiting for validation; each job is then handled inside readOrg and changeAsJob',
 };
-const UNSCOPED_HELPERS = ['withoutOrg', 'poolAsTx'];
+const UNSCOPED_HELPERS = ['poolAsTx'];
 
 // SCR-34 (adoption plan steps 19 and 20): changeOrg of @tinnox/db runs no change without a
 // WritePermit, and issueWritePermit makes one from any re-check and any statement, so only what
@@ -760,16 +762,12 @@ const UNSCOPED_HELPERS = ['withoutOrg', 'poolAsTx'];
 // role guard let through, the device the credential check returned, the pool connectMigrator
 // checked), carries the audit statement of the route, job or command, and never hands the
 // permit out. A new kind of caller is a new entry here, decided in its pull request; a route,
-// a job or a tool never issues its own. legacyAudit is the role guard's alone: it lets the
-// callback of withOrgAllowed write its audit rows by hand, until the last file of
-// LEGACY_TRANSACTION_FILES has moved (the lint below refuses it outside the issuers, and
-// scripts/lib/legacy-transaction-lint.test.ts in every issuer but the role guard). Test files
-// are outside the rule. Not seen: the names taken from a dynamic import. The last entry is in
-// packages/db, which the import rule does not read: packages/db/src/entries.test.ts holds that
-// no other file of the package issues a permit.
+// a job or a tool never issues its own. Test files are outside the rule. Not seen: the names
+// taken from a dynamic import. The last entry is in packages/db, which the import rule does not
+// read: packages/db/src/entries.test.ts holds that no other file of the package issues a permit.
 export const WRITE_PERMIT_ISSUERS = {
   'apps/api/src/auth/permissions.ts':
-    'the role guard: changeAsOperator issues the permit of an operator write from what permissionGuard resolved for the request, and withOrgAllowed returns legacyAudit for the callbacks that still write their audit rows by hand',
+    'the role guard: changeAsOperator issues the permit of an operator write from what permissionGuard resolved for the request, and checks the role again as the first statement of the change',
   'apps/api/src/auth/refusal.ts':
     'the refusal record of the guards (SCR-32, D2): recordRefusal issues a permit that reads no role again, because the request is already refused, and gives the transaction one refusal event and no callback, so nothing but that audit row is written',
   'apps/api/src/auth/device.ts':
@@ -779,7 +777,7 @@ export const WRITE_PERMIT_ISSUERS = {
   'packages/db/src/migrate.ts':
     'the migrator connection of the offline tools: changeOrgAsMigrator issues the permit of a provisioning or seed change to the pool that connectMigrator checked; the API cannot import this entry (AG-1.10)',
 };
-const PERMIT_MAKERS = ['issueWritePermit', 'legacyAudit'];
+const PERMIT_MAKERS = ['issueWritePermit'];
 
 // SCR-34 (adoption plan step 20, review): changePreOrg and changeOrgAsMigrator take an
 // AuditStatement where changeOrg takes a permit, and issueAuditStatement makes one from any
@@ -810,13 +808,14 @@ export const JOB_CHANGE_FILES = {
     'the media pipeline: it runs on a timer with no request, takes the jobs that mediaProcessingJobs names in every organisation, and records the verdict of each validation',
 };
 
-// SCR-34 (adoption plan step 19): changePreOrg, and withResolvedOrg of which it is the new form,
-// hand their callback enterOrg, which turns any OrgId into a handle that writes, with no permit
-// and no role check: operatorOf(request).orgId would do. So an operator write could skip the
-// role guard through them, and only the files whose transactions really start before the
-// organisation is known may import them, each with its reason. Inside these files that misuse
-// is left to review (alert-recipients.ts holds operator routes too). Test files are outside the
-// rule. Not seen: the names taken from a dynamic import.
+// SCR-34 (adoption plan step 19): changePreOrg hands its callback enterOrg, which turns any OrgId
+// into a handle that writes, with no permit and no role check: operatorOf(request).orgId would
+// do. So an operator write could skip the role guard through it, and only the files whose
+// transactions really start before the organisation is known may import it, each with its
+// reason. withResolvedOrg, which it runs on, is no longer exported by @tinnox/db since step 20
+// (tinnox/no-legacy-transaction refuses the name everywhere in these workspaces). Inside these
+// files that misuse is left to review (alert-recipients.ts holds operator routes too). Test files
+// are outside the rule. Not seen: the name taken from a dynamic import.
 export const PRE_ORG_CHANGE_FILES = {
   'apps/api/src/routes/auth.ts':
     'sign-in and sign-out: the identity, or the session being ended, is resolved to its member and organisation inside the transaction that records it, so no role has been checked yet',
@@ -827,7 +826,7 @@ export const PRE_ORG_CHANGE_FILES = {
   'scripts/lib/provision.ts':
     'the provisioning commands, run by TINNOX from a controlled host: each reads its member or invite as tinnox_definer and enters that organisation; there is no operator',
 };
-const PRE_ORG_OPENERS = ['changePreOrg', 'withResolvedOrg'];
+const PRE_ORG_OPENERS = ['changePreOrg'];
 
 // D25: newOrgId (the '@tinnox/db/migrate' entry) names an organisation that is being created,
 // so it turns any string into an OrgId. Only these offline tools may import it, each with its
@@ -869,8 +868,9 @@ export const QUERY_OFF_TRANSACTION = {
 };
 
 // AG-3.1, D25: the statements tinnox/no-raw-audit-insert lets a file write for itself, each with
-// its reason. Everything else writes its audit rows with auditScoped or auditUnscoped, which
-// packages/db/src/sec.ts (AUDIT_WRITERS below) holds. An entry is one whole statement, written
+// its reason. Everything else returns its audit rows from its change, and changeOrg or
+// changePreOrg writes them with auditScoped or auditUnscoped, which packages/db/src/sec.ts
+// (AUDIT_WRITERS below) holds. An entry is one whole statement, written
 // as a string or a template with nothing interpolated, that the pattern matches from its first
 // character to its last, so it opens nothing else in its file.
 export const RAW_AUDIT_INSERTS = {
@@ -885,21 +885,6 @@ export const RAW_AUDIT_INSERTS = {
 // The one file that holds INSERT INTO audit_event for everybody else: auditScoped (the unscoped
 // writer calls sec.audit_unscoped, a function of the migrations).
 const AUDIT_WRITERS = ['packages/db/src/sec.ts'];
-
-// AG-3.1, SCR-34 (adoption plan steps 19 and 20): the files that used the legacy transaction API
-// (withOrg, withoutOrg, withResolvedOrg, a hand-written auditScoped or auditUnscoped, and the
-// API's wrappers withOrgAllowed, withOrgDecisionAllowed and withOrgDecision) when changeOrg,
-// changePreOrg and readOrg landed. tinnox/no-legacy-transaction refuses the legacy API in every
-// other file of the API's source and the offline tools, and refuses a file here that no longer
-// uses it. THE LIST ONLY SHRINKS: step 20 moves one file at a time to the new API and removes
-// its line; nothing is added (scripts/lib/legacy-transaction-lint.test.ts holds the list to
-// what step 19 found). Test files are outside the rule: they arrange data with withOrg.
-export const LEGACY_TRANSACTION_FILES = [
-  // The legacy wrappers themselves (withOrgAllowed and withOrgDecisionAllowed, already on
-  // changeOrg; withOrgDecision), deleted when their last caller has moved.
-  'apps/api/src/auth/permissions.ts',
-  'apps/api/src/db-helpers.ts',
-];
 
 // OTH-12: the two places in packages/db that hand query() a statement another file wrote, and
 // the local name it has there. tinnox/sql-fragments checks the statement where it is written.
@@ -1202,7 +1187,7 @@ const IMPORT_FACETS = [
         regex: '^@tinnox/db$',
         importNames: UNSCOPED_HELPERS,
         message:
-          'withoutOrg and poolAsTx run without an organisation (AG-2.2). Use readOrg(pool, orgId, fn) for a read, or changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts for an operator change (it runs changeOrg of @tinnox/db), where row-level security limits every statement to that organisation; withOrg(pool, session.orgId, fn) is left to the files of LEGACY_TRANSACTION_FILES. If the organisation really is not known yet (a credential is still being resolved, or a sec.* wrapper works across every organisation), add this file to UNSCOPED_HELPER_FILES in eslint.config.js with its reason, and say why in the pull request.',
+          'poolAsTx runs without an organisation (AG-2.2). Use readOrg(pool, orgId, fn) for a read, or changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts for an operator change (it runs changeOrg of @tinnox/db), where row-level security limits every statement to that organisation. If the organisation really is not known yet (a credential is still being resolved, or a sec.* wrapper works across every organisation), add this file to UNSCOPED_HELPER_FILES in eslint.config.js with its reason, and say why in the pull request.',
       },
     ],
   },
@@ -1216,7 +1201,7 @@ const IMPORT_FACETS = [
         regex: '^@tinnox/db$',
         importNames: PERMIT_MAKERS,
         message:
-          "Only what judges the caller of a change issues its WritePermit (SCR-34; the files of WRITE_PERMIT_ISSUERS in eslint.config.js), and legacyAudit is for the role guard's withOrgAllowed alone. An operator route calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts and returns { value, audit }; it never holds the permit. A change with no operator behind it does not make a permit of its own either: a player route calls changeAsDevice(ctx, request, device, fn) with the device verifyDeviceCredential returned (apps/api/src/auth/device.ts), the alert check and the media pipeline call changeAsJob(pool, job, orgId, fn) (apps/api/src/jobs.ts), an offline tool calls changeOrgAsMigrator(pool, orgId, statement, fn) from @tinnox/db/migrate, and a refusal that changed nothing is written with recordRefusal(ctx, request, session, event) (apps/api/src/auth/refusal.ts). A caller of a kind none of these fits is decided in its pull request, as a new entry of WRITE_PERMIT_ISSUERS.",
+          'Only what judges the caller of a change issues its WritePermit (SCR-34; the files of WRITE_PERMIT_ISSUERS in eslint.config.js). An operator route calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts and returns { value, audit }; it never holds the permit. A change with no operator behind it does not make a permit of its own either: a player route calls changeAsDevice(ctx, request, device, fn) with the device verifyDeviceCredential returned (apps/api/src/auth/device.ts), the alert check and the media pipeline call changeAsJob(pool, job, orgId, fn) (apps/api/src/jobs.ts), an offline tool calls changeOrgAsMigrator(pool, orgId, statement, fn) from @tinnox/db/migrate, and a refusal that changed nothing is written with recordRefusal(ctx, request, session, event) (apps/api/src/auth/refusal.ts). A caller of a kind none of these fits is decided in its pull request, as a new entry of WRITE_PERMIT_ISSUERS.',
       },
     ],
   },
@@ -1258,7 +1243,7 @@ const IMPORT_FACETS = [
         regex: '^@tinnox/db$',
         importNames: PRE_ORG_OPENERS,
         message:
-          'changePreOrg and withResolvedOrg are for a transaction that starts before the organisation is known (SCR-34): their enterOrg gives a handle that writes for any OrgId, with no permit and no role check. An operator change calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts, which checks the role again first, and returns { value, audit }; a read calls readOrg(pool, orgId, fn) from @tinnox/db. If this file really resolves a credential to its organisation inside the transaction, add it to PRE_ORG_CHANGE_FILES in eslint.config.js with its reason, and say why in the pull request.',
+          'changePreOrg is for a transaction that starts before the organisation is known (SCR-34): its enterOrg gives a handle that writes for any OrgId, with no permit and no role check. An operator change calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts, which checks the role again first, and returns { value, audit }; a read calls readOrg(pool, orgId, fn) from @tinnox/db. If this file really resolves a credential to its organisation inside the transaction, add it to PRE_ORG_CHANGE_FILES in eslint.config.js with its reason, and say why in the pull request.',
       },
     ],
   },
@@ -1813,9 +1798,11 @@ export default tseslint.config(
     },
   })),
   {
-    // AG-3.1, SCR-34: no legacy transaction API outside the files that still use it
-    // (scripts/eslint-rules/no-legacy-transaction.ts). The API's source and the offline tools;
-    // tests arrange data with withOrg. A rule of its own, so no other block replaces its options.
+    // AG-3.1, SCR-34 (adoption plan steps 19 and 20): no legacy transaction API in the API's
+    // source and the offline tools, with no file excepted
+    // (scripts/eslint-rules/no-legacy-transaction.ts). packages/db/src builds the new API on it,
+    // and tests arrange data with withOrg from @tinnox/db/testing. A rule of its own, so no
+    // other block replaces its options.
     files: DB_CALLER_FILES,
     ignores: TEST_FILES,
     plugins: { tinnox },
@@ -1823,19 +1810,11 @@ export default tseslint.config(
       'tinnox/no-legacy-transaction': 'error',
     },
   },
-  // ...and in a file of the list, the rule reports the entry once the file needs it no more.
-  // One block per file, so the last file to leave the list leaves no block without files.
-  ...LEGACY_TRANSACTION_FILES.map((file) => ({
-    files: [file],
-    plugins: { tinnox },
-    rules: {
-      'tinnox/no-legacy-transaction': ['error', { listed: true }],
-    },
-  })),
   {
-    // AG-3.1, D25: an audit row is written by auditScoped or auditUnscoped, never by a statement
-    // of the file's own (scripts/eslint-rules/no-raw-audit-insert.ts). The API's source, the
-    // offline tools and packages/db; tests write rows raw to test the table's own rules.
+    // AG-3.1, D25: an audit row is written by auditScoped or auditUnscoped (called by changeOrg
+    // and changePreOrg), never by a statement of the file's own
+    // (scripts/eslint-rules/no-raw-audit-insert.ts). The API's source, the offline tools and
+    // packages/db; tests write rows raw to test the table's own rules.
     files: [...DB_CALLER_FILES, 'packages/db/src/**/*.ts'],
     ignores: [...TEST_FILES, ...AUDIT_WRITERS],
     plugins: { tinnox },

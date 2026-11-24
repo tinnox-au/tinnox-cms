@@ -7,13 +7,8 @@
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import {
-  STAGE_A_CONSTRAINTS,
-  STAGE_B_CONSTRAINTS,
-  withOrg,
-  type Pool,
-  type OrgTx,
-} from '../src/index.ts';
+import { STAGE_A_CONSTRAINTS, STAGE_B_CONSTRAINTS, type Pool, type OrgTx } from '../src/index.ts';
+import { withOrg } from '../src/testing.ts';
 import {
   appPool,
   createOrg,

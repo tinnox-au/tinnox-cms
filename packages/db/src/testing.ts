@@ -25,6 +25,12 @@ export { removeAuditFault, whileAuditFails, type AuditFaultOutcome } from './aud
 // The audit rows of every organisation, for the scan after each integration test file (AG-3.4).
 export { auditRowsSince, auditScanMark, type StoredAuditRow } from './audit-rows.ts';
 
+// What the change API of ./change.ts is built on, which the runtime entry does not export
+// (adoption plan step 20, SCR-34): tests arrange their data in a transaction of their own,
+// with no permit and no route statement, and the tests of the audit writers call them by hand.
+export { auditScoped, auditUnscoped } from './sec.ts';
+export { withOrg, withoutOrg, withResolvedOrg } from './tx.ts';
+
 /**
  * Runs `fn` in a transaction of its own with no organisation, as a route does before the
  * organisation is known. For the sec.* wrappers that change data there and the unscoped audit

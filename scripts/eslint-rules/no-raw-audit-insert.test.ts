@@ -14,7 +14,7 @@ RuleTester.it = it;
 const tester = new RuleTester({ languageOptions: { parser: tseslint.parser } });
 
 const MESSAGE =
-  'Do not write an audit row with a statement of your own: use auditScoped(tx, event), or auditUnscoped(tx, event) when no organisation is known yet (both from @tinnox/db), on the tx of the change it records. They take an AuditInput, so the action is a member of AUDIT_ACTIONS and the detail has the shape AuditEventShapes gives it (packages/contracts/src/audit.ts); add the action or the field there first. A refusal with no change to pair with is auditStandalone(pool, event).';
+  'Do not write an audit row with a statement of your own: return the event from the change it records, as { value, audit }, and changeOrg or changePreOrg (or the wrapper the route calls: changeAsOperator, changeAsDevice, changeAsJob, changeOrgAsMigrator) writes it on the transaction of that change. The event is an AuditInput, so the action is a member of AUDIT_ACTIONS and the detail has the shape AuditEventShapes gives it (packages/contracts/src/audit.ts); add the action or the field there first. A refusal with no change to pair with is auditStandalone(pool, event).';
 
 // One whole statement, as eslint.config.js names provisioning's: anchored at both ends.
 const EXPIRY = [

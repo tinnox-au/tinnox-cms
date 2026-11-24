@@ -29,12 +29,11 @@ import {
   pairingComplete,
   pairingCreate,
   poolAsTx,
-  withOrg,
   type Autocommit,
   type Pool,
 } from '../src/index.ts';
 import { resetTestDatabase, runMigrations, type MigrationResult } from '../src/migrate.ts';
-import { whileAuditFails, type AuditFaultOutcome } from '../src/testing.ts';
+import { whileAuditFails, type AuditFaultOutcome, withOrg } from '../src/testing.ts';
 import {
   appPool,
   createOrg,

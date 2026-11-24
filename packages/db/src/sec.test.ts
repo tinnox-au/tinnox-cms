@@ -7,11 +7,9 @@
 import type { AuditAction } from '@tinnox/contracts';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
-  auditScoped,
   auditStandalone,
   poolAsTx,
   sessionRevokeUnaudited,
-  withoutOrg,
   type AnyScope,
   type AuditInput,
   type OrgId,
@@ -20,6 +18,7 @@ import {
   type PreOrgTx,
   type StandaloneAuditEvent,
 } from './index.ts';
+import { auditScoped, withoutOrg } from './testing.ts';
 import * as members from './members.ts';
 import * as sec from './sec.ts';
 
@@ -78,7 +77,7 @@ const nested = (opener: string, instead: string): string =>
   `${opener} was called while a transaction is open on the same asynchronous path (inside the callback of withOrg, withoutOrg, withResolvedOrg, readOrg, changeOrg or changePreOrg, or in a helper it called). This opens a second transaction on another connection that commits independently. ${instead}`;
 const NESTED_AUDIT = nested(
   'auditStandalone',
-  'Write the event on the outer tx with auditUnscoped(tx, event), or with auditScoped(tx, event) when the outer transaction is withOrg; inside changeOrg or changePreOrg, return it as { value, audit } and the wrapper writes it there.',
+  'Return the event from the outer change as { value, audit }: changeOrg and changePreOrg, and the wrappers built on them (changeAsOperator, changeAsDevice, changeAsJob, changeOrgAsMigrator), write it on that transaction.',
 );
 const NESTED_REVOKE = nested(
   'sessionRevokeUnaudited',

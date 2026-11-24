@@ -9,8 +9,6 @@ import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
-  auditScoped,
-  auditUnscoped,
   createPool,
   heartbeatLogPurge,
   loginStatePut,
@@ -25,9 +23,6 @@ import {
   sessionPurgeExpired,
   sessionRevoke,
   sessionRevokeUnaudited,
-  withOrg,
-  withoutOrg,
-  withResolvedOrg,
   type OrgTx,
   type Pool,
 } from '../src/index.ts';
@@ -39,6 +34,11 @@ import {
   removeAuditDebtGuard,
   watchAuditDebt,
   whileUnauditedAllowed,
+  auditScoped,
+  auditUnscoped,
+  withOrg,
+  withoutOrg,
+  withResolvedOrg,
 } from '../src/testing.ts';
 import {
   appPool,
@@ -172,13 +172,13 @@ async function newSession(): Promise<Buffer> {
 }
 
 describe('the audit-debt guard refuses a change with no audit row (D3)', () => {
-  it('fails the COMMIT, names the table and says to write the audit row on the same Tx', async () => {
+  it('fails the COMMIT, names the table and says to return the audit row from the change', async () => {
     const message = await refusalOf(withOrg(judged, org.orgId, (tx) => newFolder(tx, 'Unpaid')));
     expect(message).toMatch(
       /^audit debt: this transaction changed public\.folder \(INSERT\) as tinnox_app and commits no audit_event row\./,
     );
     expect(message).toMatch(
-      /Write the audit row on the same Tx as the change, with auditScoped\(tx, event\) or auditUnscoped\(tx, event\) from @tinnox\/db/,
+      /Return the audit event from the change, as \{ value, audit \}, and its wrapper writes the row on the same transaction, so both commit or neither does \(AGENTS\.md section 3\): changeAsOperator, changeAsDevice or changeAsJob in the API \(each on changeOrg of @tinnox\/db\), changePreOrg before the organisation is known, changeOrgAsMigrator in an offline tool\./,
     );
     expect(message).toMatch(/packages\/db\/src\/audit-debt-guard\.ts/);
     // Refused means rolled back: run() treats class 23 at COMMIT as a definite failure.

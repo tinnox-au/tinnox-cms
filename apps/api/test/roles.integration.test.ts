@@ -7,7 +7,8 @@
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { auditCategoryOf, ROLES, SessionResponseSchema, type Role } from '@tinnox/contracts';
-import { sessionRevokeMembership, withOrg } from '@tinnox/db';
+import { sessionRevokeMembership } from '@tinnox/db';
+import { withOrg } from '@tinnox/db/testing';
 import { ACTIVITY_CATEGORIES, permissionsOf } from '@tinnox/domain';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';

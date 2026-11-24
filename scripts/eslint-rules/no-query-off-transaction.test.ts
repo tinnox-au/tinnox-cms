@@ -30,11 +30,12 @@ const typed = new RuleTester({
 const untyped = new RuleTester({ languageOptions: { parser: tseslint.parser } });
 
 const message = (receiver: string): string =>
-  `Do not call query() on ${receiver}: only a transaction handle with an organisation takes a statement (the tx that the callback of readOrg or changeOrg receives, or that enterOrg returns inside changePreOrg; withOrg and withResolvedOrg give the same in a file of LEGACY_TRANSACTION_FILES). On the pool, a pooled client or the handle of poolAsTx the statement runs outside any transaction and with no organisation. Use readOrg(pool, orgId, (tx) => tx.query(...)) for a read, changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts for an operator change, a typed sec.* wrapper from @tinnox/db (add it to packages/db/src/sec.ts if it is missing), or ping(pool) for a liveness probe. An offline tool that reads across organisations sends the statement on the handle asDefiner gives its work (@tinnox/db/migrate).`;
+  `Do not call query() on ${receiver}: only a transaction handle with an organisation takes a statement (the tx that the callback of readOrg or changeOrg receives, or that enterOrg returns inside changePreOrg). On the pool, a pooled client or the handle of poolAsTx the statement runs outside any transaction and with no organisation. Use readOrg(pool, orgId, (tx) => tx.query(...)) for a read, changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts for an operator change, a typed sec.* wrapper from @tinnox/db (add it to packages/db/src/sec.ts if it is missing), or ping(pool) for a liveness probe. An offline tool that reads across organisations sends the statement on the handle asDefiner gives its work (@tinnox/db/migrate).`;
 
 const HEAD = `
-  import { poolAsTx, withOrg, withResolvedOrg, type Autocommit, type OrgId, type OrgTx, type Pool } from '@tinnox/db';
+  import { poolAsTx, type Autocommit, type OrgId, type OrgTx, type Pool } from '@tinnox/db';
   import { asDefiner, type DefinerTx, type MigratorPool } from '@tinnox/db/migrate';
+  import { withOrg, withResolvedOrg } from '@tinnox/db/testing';
   declare const pool: Pool;
   declare const migrator: MigratorPool;
   declare const orgId: OrgId;

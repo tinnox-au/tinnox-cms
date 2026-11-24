@@ -2,9 +2,9 @@
 // request code cannot send a statement of its own where no organisation is set (AG-2.2). run()
 // in ./tx.ts keeps the statements here, and three modules of this package take them out again:
 // ./sec.ts for its typed sec.* wrappers, ./definer.ts for asDefiner, and ./testing.ts for tests
-// of row-level security itself. In a file of its own because everything ./tx.ts exports is part
-// of the runtime entry (./index.ts), and this is not: no entry of the package exports this
-// module (./entries.test.ts).
+// of row-level security itself. In a file of its own because the runtime entry (./index.ts)
+// exports most of ./tx.ts, and no entry of the package may export this module
+// (./entries.test.ts).
 import type { Autocommit, Tx } from './tx.ts';
 
 // Keyed by any object, as ./tx-pool.ts is: a lookup with the handle of poolAsTx finds nothing.
@@ -25,6 +25,6 @@ export function statementsOf(handle: Autocommit | Tx): Autocommit {
   if (statements !== undefined) return statements;
   if ('query' in handle) return handle;
   throw new Error(
-    'this is not a transaction handle of @tinnox/db: use the tx that the callback of withoutOrg or withResolvedOrg receives',
+    'this is not a transaction handle of @tinnox/db: use the tx that the callback of changePreOrg receives (in a test, inTx from @tinnox/db/testing)',
   );
 }

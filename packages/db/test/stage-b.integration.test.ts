@@ -5,7 +5,8 @@
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { withOrg, type Pool } from '../src/index.ts';
+import type { Pool } from '../src/index.ts';
+import { withOrg } from '../src/testing.ts';
 import { appPool, createOrg, migratorClient, PG, pgCode, type TestOrg } from './support.ts';
 
 let pool: Pool;

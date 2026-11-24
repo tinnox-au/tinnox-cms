@@ -35,13 +35,12 @@ import {
   sessionCreate,
   sessionRevokeMembership,
   sha256,
-  withOrg,
-  withoutOrg,
   type Autocommit,
   type OrgId,
   type Pool,
   type SessionCreateResult,
 } from '../src/index.ts';
+import { withOrg, withoutOrg } from '../src/testing.ts';
 import { resetTestDatabase, runMigrations, type MigrationResult } from '../src/migrate.ts';
 import {
   appPool,

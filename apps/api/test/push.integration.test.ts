@@ -19,7 +19,7 @@ import {
   type PushPlanRow,
   type PushResult,
 } from '@tinnox/contracts';
-import { withOrg } from '@tinnox/db';
+import { withOrg } from '@tinnox/db/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { MANIFEST_BATCH_SIZE } from '../src/publishing.ts';
 import {

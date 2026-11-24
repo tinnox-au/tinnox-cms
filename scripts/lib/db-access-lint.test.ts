@@ -107,7 +107,7 @@ const TESTS = [
 ] as const;
 
 const OFF_TRANSACTION =
-  /^Do not call query\(\) on .+: only a transaction handle with an organisation takes a statement \(the tx that the callback of readOrg or changeOrg receives, or that enterOrg returns inside changePreOrg; withOrg and withResolvedOrg give the same in a file of LEGACY_TRANSACTION_FILES\)\. .* Use readOrg\(pool, orgId, \(tx\) => tx\.query\(\.\.\.\)\) for a read, changeAsOperator\(ctx, request, fn\) from apps\/api\/src\/auth\/permissions\.ts for an operator change, a typed sec\.\* wrapper from @tinnox\/db .*, or ping\(pool\) for a liveness probe\. An offline tool that reads across organisations sends the statement on the handle asDefiner gives its work \(@tinnox\/db\/migrate\)\.$/;
+  /^Do not call query\(\) on .+: only a transaction handle with an organisation takes a statement \(the tx that the callback of readOrg or changeOrg receives, or that enterOrg returns inside changePreOrg\)\. .* Use readOrg\(pool, orgId, \(tx\) => tx\.query\(\.\.\.\)\) for a read, changeAsOperator\(ctx, request, fn\) from apps\/api\/src\/auth\/permissions\.ts for an operator change, a typed sec\.\* wrapper from @tinnox\/db .*, or ping\(pool\) for a liveness probe\. An offline tool that reads across organisations sends the statement on the handle asDefiner gives its work \(@tinnox\/db\/migrate\)\.$/;
 
 // The first case of each describe may be the one that loads eslint.config.js, which a busy CI
 // runner can stretch towards the unit project's 5 s default (GAP-1).
@@ -418,7 +418,7 @@ describe('the role switch (D25)', { timeout: 30_000 }, () => {
 
 describe('raw audit inserts (AG-3.1, D25)', { timeout: 30_000 }, () => {
   const RAW_INSERT =
-    /^Do not write an audit row with a statement of your own: use auditScoped\(tx, event\), or auditUnscoped\(tx, event\) when no organisation is known yet \(both from @tinnox\/db\), on the tx of the change it records\./;
+    /^Do not write an audit row with a statement of your own: return the event from the change it records, as \{ value, audit \}, and changeOrg or changePreOrg \(or the wrapper the route calls: changeAsOperator, changeAsDevice, changeAsJob, changeOrgAsMigrator\) writes it on the transaction of that change\./;
   const CODE = `
     await tx.query("INSERT INTO audit_event (org_id, action) VALUES (app_org_id(), 'x.y')");
     await auditScoped(tx, event);
@@ -577,9 +577,11 @@ describe('casts to SqlFragment (OTH-12)', { timeout: 30_000 }, () => {
 describe('the unscoped helpers (AG-2.2)', { timeout: 30_000 }, () => {
   const unscoped = (name: string): RegExp =>
     new RegExp(
-      `^'${name}' import from '@tinnox/db' is restricted from being used by a pattern\\. withoutOrg and poolAsTx run without an organisation \\(AG-2\\.2\\)\\. Use readOrg\\(pool, orgId, fn\\) for a read, or changeAsOperator\\(ctx, request, fn\\) from apps/api/src/auth/permissions\\.ts for an operator change .*; withOrg\\(pool, session\\.orgId, fn\\) is left to the files of LEGACY_TRANSACTION_FILES\\. .* add this file to UNSCOPED_HELPER_FILES in eslint\\.config\\.js with its reason, and say why in the pull request\\.$`,
+      `^'${name}' import from '@tinnox/db' is restricted from being used by a pattern\\. poolAsTx runs without an organisation \\(AG-2\\.2\\)\\. Use readOrg\\(pool, orgId, fn\\) for a read, or changeAsOperator\\(ctx, request, fn\\) from apps/api/src/auth/permissions\\.ts for an operator change .* add this file to UNSCOPED_HELPER_FILES in eslint\\.config\\.js with its reason, and say why in the pull request\\.$`,
     );
-  const BOTH = "import { poolAsTx, withOrg, withoutOrg, type Pool } from '@tinnox/db';";
+  // withoutOrg left this rule in step 20: @tinnox/db no longer exports it, and
+  // tinnox/no-legacy-transaction refuses the name (scripts/lib/legacy-transaction-lint.test.ts).
+  const BOTH = "import { poolAsTx, readOrg, type Pool } from '@tinnox/db';";
   const ALLOW_LIST = [
     'apps/api/src/alerts.ts',
     'apps/api/src/auth/session.ts',
@@ -607,26 +609,25 @@ describe('the unscoped helpers (AG-2.2)', { timeout: 30_000 }, () => {
   ])('are refused in %s', async (path) => {
     expect(await flagged(path, BOTH, IMPORTS)).toEqual([
       expect.stringMatching(unscoped('poolAsTx')),
-      expect.stringMatching(unscoped('withoutOrg')),
     ]);
   });
 
   it('are refused under another name, as a re-export and as a namespace', async () => {
     const path = 'apps/api/src/routes/fixture.ts';
-    expect(
-      await flagged(path, "import { withoutOrg as open } from '@tinnox/db';", IMPORTS),
-    ).toEqual([expect.stringMatching(unscoped('withoutOrg'))]);
+    expect(await flagged(path, "import { poolAsTx as open } from '@tinnox/db';", IMPORTS)).toEqual([
+      expect.stringMatching(unscoped('poolAsTx')),
+    ]);
     expect(await flagged(path, "export { poolAsTx } from '@tinnox/db';", IMPORTS)).toEqual([
       expect.stringMatching(unscoped('poolAsTx')),
     ]);
     expect(await flagged(path, "import * as db from '@tinnox/db';", IMPORTS)).toEqual([
       expect.stringMatching(
-        /^\* import is invalid because 'withoutOrg' and 'poolAsTx' from '@tinnox\/db' are restricted from being used by a pattern\. withoutOrg and poolAsTx run without an organisation/,
+        /^\* import is invalid because 'poolAsTx' from '@tinnox\/db' is restricted from being used by a pattern\. poolAsTx runs without an organisation/,
       ),
       // A namespace also carries the maker of a WritePermit, which only the role guard imports
       // (step 19; scripts/lib/legacy-transaction-lint.test.ts).
       expect.stringMatching(
-        /^\* import is invalid because 'issueWritePermit' and 'legacyAudit' from '@tinnox\/db' are restricted from being used by a pattern\. Only what judges the caller of a change issues its WritePermit \(SCR-34; the files of WRITE_PERMIT_ISSUERS in eslint\.config\.js\)/,
+        /^\* import is invalid because 'issueWritePermit' from '@tinnox\/db' is restricted from being used by a pattern\. Only what judges the caller of a change issues its WritePermit \(SCR-34; the files of WRITE_PERMIT_ISSUERS in eslint\.config\.js\)/,
       ),
       // ...the maker of an audit statement, which only the files that read the tables import
       // (step 20 review; the same file)...
@@ -636,14 +637,15 @@ describe('the unscoped helpers (AG-2.2)', { timeout: 30_000 }, () => {
       // ...and the openers that enter an organisation with no permit, which only the files
       // whose transactions start before the organisation is known import (the same file).
       expect.stringMatching(
-        /^\* import is invalid because 'changePreOrg' and 'withResolvedOrg' from '@tinnox\/db' are restricted from being used by a pattern\. changePreOrg and withResolvedOrg are for a transaction that starts before the organisation is known/,
+        /^\* import is invalid because 'changePreOrg' from '@tinnox\/db' is restricted from being used by a pattern\. changePreOrg is for a transaction that starts before the organisation is known/,
       ),
     ]);
   });
 
   it('leaves the scoped openers and the rest of the entry alone', async () => {
-    // withResolvedOrg is held to PRE_ORG_CHANGE_FILES (scripts/lib/legacy-transaction-lint.test.ts).
-    const code = "import { auditScoped, changeOrg, readOrg, withOrg, type Tx } from '@tinnox/db';";
+    // changePreOrg is held to PRE_ORG_CHANGE_FILES, and the legacy names to no file at all
+    // (scripts/lib/legacy-transaction-lint.test.ts).
+    const code = "import { auditStandalone, changeOrg, readOrg, type Tx } from '@tinnox/db';";
     expect(await flagged('apps/api/src/routes/fixture.ts', code, IMPORTS)).toEqual([]);
   });
 
@@ -678,8 +680,8 @@ describe('the unscoped helpers (AG-2.2)', { timeout: 30_000 }, () => {
       expect(existsSync(join(repoRoot, file)), `${file} is gone`).toBe(true);
       const imports = /import\s*\{([^}]*)\}\s*from\s*'@tinnox\/db';/.exec(source(file))?.[1] ?? '';
       expect(
-        /\b(withoutOrg|poolAsTx)\b/.test(imports),
-        `${file} no longer imports withoutOrg or poolAsTx: remove it from UNSCOPED_HELPER_FILES in eslint.config.js`,
+        /\bpoolAsTx\b/.test(imports),
+        `${file} no longer imports poolAsTx: remove it from UNSCOPED_HELPER_FILES in eslint.config.js`,
       ).toBe(true);
     }
   });
@@ -727,10 +729,10 @@ describe('newOrgId (D25)', { timeout: 30_000 }, () => {
   );
 
   it('keeps the other import rules of the two tools: neither gets an unscoped helper', async () => {
-    const code = `${CODE} import { poolAsTx, withOrg } from '@tinnox/db'; import pg from 'pg';`;
+    const code = `${CODE} import { poolAsTx, readOrg } from '@tinnox/db'; import pg from 'pg';`;
     for (const path of MAKERS) {
       expect(await flagged(path, code, IMPORTS), path).toEqual([
-        expect.stringMatching(/withoutOrg and poolAsTx run without an organisation/),
+        expect.stringMatching(/poolAsTx runs without an organisation/),
         expect.stringMatching(/^'pg' import is restricted/),
       ]);
     }

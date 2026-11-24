@@ -19,7 +19,6 @@ import {
   readOrg,
   termsOfStatement,
   unaudited,
-  withOrg,
   type AuditInput,
   type AuditStatement,
   type OrgTx,
@@ -39,6 +38,7 @@ import {
   ensureAuditDebtGuard,
   watchAuditDebt,
   whileAuditFails,
+  withOrg,
 } from '../src/testing.ts';
 import {
   appPool,

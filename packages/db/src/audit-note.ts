@@ -1,10 +1,10 @@
 // Which audit actions were written on each transaction handle. The two audit writers of
 // ./sec.ts note every row here, and changeOrg and changePreOrg (./change.ts) read the notes
 // before COMMIT, to compare what a change recorded with what its route says it audits (adoption
-// plan step 19). So a row a callback still writes by hand with auditScoped counts like one the
-// wrapper wrote from what the callback returned. In a file of its own because everything
-// ./sec.ts exports is part of the runtime entry (./index.ts), and this is not: no entry of the
-// package exports this module.
+// plan step 19). So a row written by hand with auditScoped counts like one the wrapper wrote
+// from what the callback returned (only a test can write one: since step 20 the runtime entry
+// exports neither writer). In a file of its own because the runtime entry (./index.ts) exports
+// the rest of ./sec.ts, and no entry of the package may export this module.
 import type { AuditAction } from '@tinnox/contracts';
 
 // Keyed by the handle, so the notes go when the handle does, with its transaction.

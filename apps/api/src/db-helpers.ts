@@ -1,4 +1,3 @@
-import { withOrg, type OrgId, type OrgTx, type Pool } from '@tinnox/db';
 import type { HttpError } from './errors.ts';
 
 export function iso(value: unknown): string {
@@ -17,24 +16,14 @@ export function bigintToNumber(value: unknown): number {
   return n;
 }
 
+/**
+ * What a change returns as its value when a refused request must still leave a committed trace
+ * (an audit event, a failed-attempt counter): `{ value: refuse(error), audit }` commits the
+ * trace, and the route throws the error once the change has returned (adoption plan section
+ * 2.1 B). Throwing inside the change rolls everything back.
+ */
 export type Decision<T> =
   { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: HttpError };
 
 export const accept = <T>(value: T): Decision<T> => ({ ok: true, value });
 export const refuse = (error: HttpError): Decision<never> => ({ ok: false, error });
-
-/**
- * Runs `fn` inside `withOrg` and COMMITS whatever it wrote, then throws the
- * refusal if there is one. Use it when a refused request must still leave a
- * committed trace (an audit event, a failed-attempt counter). Throwing inside
- * `fn` still rolls everything back.
- */
-export async function withOrgDecision<T>(
-  pool: Pool,
-  orgId: OrgId,
-  fn: (tx: OrgTx) => Promise<Decision<T>>,
-): Promise<T> {
-  const decision = await withOrg(pool, orgId, fn);
-  if (!decision.ok) throw decision.error;
-  return decision.value;
-}

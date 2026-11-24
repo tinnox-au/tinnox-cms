@@ -12,11 +12,9 @@ import {
   readRuntimeRole,
   RuntimeRoleError,
   runtimeRoleProblems,
-  withOrg,
-  withoutOrg,
-  withResolvedOrg,
   type Pool,
 } from '../src/index.ts';
+import { withOrg, withoutOrg, withResolvedOrg } from '../src/testing.ts';
 import {
   actingAs,
   appPool,

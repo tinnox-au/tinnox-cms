@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { inviteReference } from '@tinnox/contracts';
-import { unaudited, withOrg, withoutOrg, type OrgId } from '@tinnox/db';
+import { unaudited, type OrgId } from '@tinnox/db';
 import {
   asDefiner,
   changeOrgAsMigrator,
@@ -19,7 +19,13 @@ import {
   seedStatement,
   type MigratorPool,
 } from '@tinnox/db/migrate';
-import { removeAuditFault, testOrgId, whileAuditFails } from '@tinnox/db/testing';
+import {
+  removeAuditFault,
+  testOrgId,
+  whileAuditFails,
+  withOrg,
+  withoutOrg,
+} from '@tinnox/db/testing';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { IdpAccount, IdpDirectory } from '../../scripts/lib/idp.ts';

@@ -1,6 +1,6 @@
 // The lints of adoption plan steps 19 and 20 as eslint.config.js gives them to real paths, run
-// against fixture text: the legacy transaction API and its list of files that only shrinks
-// (AG-3.1, SCR-34), the import of the permit's maker and who issues a permit, the entry of the
+// against fixture text: the legacy transaction API, refused in every file of the API and the
+// offline tools since step 20 emptied its list (AG-3.1, SCR-34), the import of the permit's maker and who issues a permit, the entry of the
 // jobs, the maker of an audit statement, and the casts to WritePermit, VerifiedDevice and
 // AuditStatement. Each case takes the entry the config resolves for a path, so a block that took
 // a rule away from a file group would fail here. The rule's own cases are in
@@ -70,14 +70,6 @@ async function exported(name: string): Promise<unknown> {
   return (loaded as Record<string, unknown>)[name];
 }
 
-async function legacyFiles(): Promise<string[]> {
-  const list = await exported('LEGACY_TRANSACTION_FILES');
-  if (!Array.isArray(list) || !list.every((file) => typeof file === 'string')) {
-    throw new Error('LEGACY_TRANSACTION_FILES is not a list of paths');
-  }
-  return list;
-}
-
 const source = (path: string): string => readFileSync(join(repoRoot, path), 'utf8');
 
 /** A module specifier of the migrate entry: the package's, or a relative one inside packages/db. */
@@ -118,17 +110,9 @@ function takesSeedStatement(path: string, text: string): boolean {
   return visit(tree);
 }
 
-/**
- * The files that used the legacy API when step 19 landed the new one. NEVER ADD TO THIS LIST:
- * it is what "only shrinks" is measured against. A file that leaves LEGACY_TRANSACTION_FILES
- * leaves this list in the same change (step 20, one file per pull request), and the day both
- * are empty the rule, its two lists and this test's allow-list cases can go.
- */
-const FOUND_BY_STEP_19 = ['apps/api/src/auth/permissions.ts', 'apps/api/src/db-helpers.ts'];
-
 const LEGACY_CODE = `
 import { auditScoped, withOrg, type OrgTx } from '@tinnox/db';
-import { withOrgAllowed } from '../auth/permissions.ts';
+import { withResolvedOrg } from '@tinnox/db/testing';
 await withOrg(pool, orgId, (tx) => auditScoped(tx, event));
 `;
 const NEW_CODE = `
@@ -140,9 +124,7 @@ await changeAsOperator(ctx, request, async (tx) => ({ value: 1, audit: unaudited
 // Plan section 3.4, with the names as they are built: there is no `db` handle yet, so the
 // functions take the pool.
 const MESSAGE =
-  /^(auditScoped|withOrg|withOrgAllowed) is the legacy transaction API: it .*\. Use readOrg\(pool, orgId, fn\) for reads and changeOrg\(pool, orgId, permit, fn\) returning \{ value, audit \} for changes; the permit comes from the role guard: an operator route calls changeAsOperator\(ctx, request, fn\) \(apps\/api\/src\/auth\/permissions\.ts\), .* This file is not in LEGACY_TRANSACTION_FILES of eslint\.config\.js, and that list only shrinks: do not add to it\.$/;
-const STALE =
-  /^This file no longer uses the legacy transaction API .*: remove it from LEGACY_TRANSACTION_FILES in eslint\.config\.js\. The list only shrinks/;
+  /^(auditScoped|withOrg|withResolvedOrg) is the legacy transaction API: it .*\. Use readOrg\(pool, orgId, fn\) for reads and changeOrg\(pool, orgId, permit, fn\) returning \{ value, audit \} for changes; the permit comes from the role guard: an operator route calls changeAsOperator\(ctx, request, fn\) \(apps\/api\/src\/auth\/permissions\.ts\), .* The legacy names are for packages\/db\/src, which builds the new API on them, and for tests \(@tinnox\/db\/testing\)\.$/;
 
 // The first case loads eslint.config.js, which a busy CI runner can stretch towards the unit
 // project's 5 s default (GAP-1).
@@ -150,6 +132,9 @@ describe('the legacy transaction API (AG-3.1, SCR-34)', { timeout: 30_000 }, () 
   it.each([
     // A new route file, a new module of the API, and files with lists of their own for other rules.
     'apps/api/src/routes/fixture.ts',
+    // The last two files of the list, emptied by step 20: the role guard and the row helpers.
+    'apps/api/src/auth/permissions.ts',
+    'apps/api/src/db-helpers.ts',
     'apps/api/src/fixture.ts',
     'apps/api/src/main.ts',
     'apps/api/src/alerts-once.ts',
@@ -167,7 +152,9 @@ describe('the legacy transaction API (AG-3.1, SCR-34)', { timeout: 30_000 }, () 
     'scripts/migrate.ts',
     'scripts/lib/fixture.ts',
     'scripts/fixture.ts',
-  ])('is refused in %s, which is not on the list', async (path) => {
+  ])('is refused in %s, with no file excepted', async (path) => {
+    // No options: the list that once excepted files is gone (step 20).
+    expect(await entryFor(path, LEGACY)).toEqual([2]);
     expect(await flagged(path, LEGACY_CODE, LEGACY)).toEqual([
       expect.stringMatching(MESSAGE),
       expect.stringMatching(MESSAGE),
@@ -176,40 +163,16 @@ describe('the legacy transaction API (AG-3.1, SCR-34)', { timeout: 30_000 }, () 
     expect(await flagged(path, NEW_CODE, LEGACY)).toEqual([]);
   });
 
-  it('is left to every file of the list, and each is told when it needs its entry no more', async () => {
-    const files = await legacyFiles();
-    expect(files).not.toEqual([]);
-    for (const path of files) {
-      expect(await entryFor(path, LEGACY), path).toEqual([2, { listed: true }]);
-      expect(await flagged(path, LEGACY_CODE, LEGACY), path).toEqual([]);
-      expect(await flagged(path, NEW_CODE, LEGACY), path).toEqual([expect.stringMatching(STALE)]);
-    }
-  });
-
-  it('the list only shrinks: every entry is a file step 19 found, once, and nothing was added', async () => {
-    const files = await legacyFiles();
-    expect(new Set(files).size, 'an entry is listed twice').toBe(files.length);
+  it('eslint.config.js keeps no list of files excepted from it', async () => {
+    const config: unknown = await import(pathToFileURL(join(repoRoot, 'eslint.config.js')).href);
     expect(
-      files.filter((file) => !FOUND_BY_STEP_19.includes(file)),
-      'LEGACY_TRANSACTION_FILES of eslint.config.js only shrinks. Write the new file on readOrg, changeAsOperator (or changeOrg) and changePreOrg, which return { value, audit }; do not add it to the list',
-    ).toEqual([]);
-    expect(
-      FOUND_BY_STEP_19.filter((file) => !files.includes(file)),
-      'a file left LEGACY_TRANSACTION_FILES: remove it from FOUND_BY_STEP_19 in this test too, in the same change',
-    ).toEqual([]);
-  });
-
-  it('keeps no entry whose file is gone or no longer uses the legacy API', async () => {
-    for (const path of await legacyFiles()) {
-      expect(existsSync(join(repoRoot, path)), `${path} is gone: remove its entry`).toBe(true);
-      // With the entry the config resolves (listed), the rule speaks only when the file has no
-      // legacy use left. `npm run lint` says the same; this says it in the unit run.
-      expect(await flagged(path, source(path), LEGACY), path).toEqual([]);
-    }
+      Object.keys(config as object),
+      'the legacy transaction API is refused in every file of the API and the offline tools since step 20: write the file on readOrg, changeAsOperator (or another wrapper on changeOrg) and changePreOrg, which return { value, audit }',
+    ).not.toContain('LEGACY_TRANSACTION_FILES');
   });
 
   it.each([
-    // Tests arrange data with withOrg and call the audit writers to test them.
+    // Tests arrange data with withOrg (@tinnox/db/testing) and call the audit writers to test them.
     'apps/api/src/fixture.test.ts',
     'apps/api/test/support.ts',
     'apps/api/test/fixture.integration.test.ts',
@@ -231,12 +194,11 @@ describe('the legacy transaction API (AG-3.1, SCR-34)', { timeout: 30_000 }, () 
 
 // SCR-34: changeOrg runs no change without a WritePermit, so who can make one is the rule.
 describe('the maker of a WritePermit (SCR-34)', { timeout: 30_000 }, () => {
-  const MAKERS =
-    "import { changeOrg, issueWritePermit, legacyAudit, type WritePermit } from '@tinnox/db';";
+  const MAKERS = "import { changeOrg, issueWritePermit, type WritePermit } from '@tinnox/db';";
   // Plan section 3.4: the message names what each kind of caller does instead.
   const refused = (name: string): RegExp =>
     new RegExp(
-      `^'${name}' import from '@tinnox/db' is restricted from being used by a pattern\\. Only what judges the caller of a change issues its WritePermit \\(SCR-34; the files of WRITE_PERMIT_ISSUERS in eslint\\.config\\.js\\), .* An operator route calls changeAsOperator\\(ctx, request, fn\\) from apps/api/src/auth/permissions\\.ts and returns \\{ value, audit \\}; it never holds the permit\\. .* a player route calls changeAsDevice\\(ctx, request, device, fn\\) .* \\(apps/api/src/auth/device\\.ts\\), the alert check and the media pipeline call changeAsJob\\(pool, job, orgId, fn\\) \\(apps/api/src/jobs\\.ts\\), an offline tool calls changeOrgAsMigrator\\(pool, orgId, statement, fn\\) from @tinnox/db/migrate, and a refusal that changed nothing is written with recordRefusal\\(ctx, request, session, event\\) \\(apps/api/src/auth/refusal\\.ts\\)\\. .* a new entry of WRITE_PERMIT_ISSUERS\\.$`,
+      `^'${name}' import from '@tinnox/db' is restricted from being used by a pattern\\. Only what judges the caller of a change issues its WritePermit \\(SCR-34; the files of WRITE_PERMIT_ISSUERS in eslint\\.config\\.js\\)\\. An operator route calls changeAsOperator\\(ctx, request, fn\\) from apps/api/src/auth/permissions\\.ts and returns \\{ value, audit \\}; it never holds the permit\\. .* a player route calls changeAsDevice\\(ctx, request, device, fn\\) .* \\(apps/api/src/auth/device\\.ts\\), the alert check and the media pipeline call changeAsJob\\(pool, job, orgId, fn\\) \\(apps/api/src/jobs\\.ts\\), an offline tool calls changeOrgAsMigrator\\(pool, orgId, statement, fn\\) from @tinnox/db/migrate, and a refusal that changed nothing is written with recordRefusal\\(ctx, request, session, event\\) \\(apps/api/src/auth/refusal\\.ts\\)\\. .* a new entry of WRITE_PERMIT_ISSUERS\\.$`,
     );
   const ROLE_GUARD = 'apps/api/src/auth/permissions.ts';
   /** The issuers the import rule reads: the API's and the offline tools', not packages/db. */
@@ -269,7 +231,6 @@ describe('the maker of a WritePermit (SCR-34)', { timeout: 30_000 }, () => {
   ])('is refused in %s, which keeps changeOrg and the type', async (path) => {
     expect(await flagged(path, MAKERS, IMPORTS)).toEqual([
       expect.stringMatching(refused('issueWritePermit')),
-      expect.stringMatching(refused('legacyAudit')),
     ]);
   });
 
@@ -278,8 +239,8 @@ describe('the maker of a WritePermit (SCR-34)', { timeout: 30_000 }, () => {
     expect(
       await flagged(path, "import { issueWritePermit as permit } from '@tinnox/db';", IMPORTS),
     ).toEqual([expect.stringMatching(refused('issueWritePermit'))]);
-    expect(await flagged(path, "export { legacyAudit } from '@tinnox/db';", IMPORTS)).toEqual([
-      expect.stringMatching(refused('legacyAudit')),
+    expect(await flagged(path, "export { issueWritePermit } from '@tinnox/db';", IMPORTS)).toEqual([
+      expect.stringMatching(refused('issueWritePermit')),
     ]);
     const namespace = await flagged(path, "import * as db from '@tinnox/db';", IMPORTS);
     expect(namespace.join('\n')).toMatch(
@@ -302,7 +263,7 @@ describe('the maker of a WritePermit (SCR-34)', { timeout: 30_000 }, () => {
     for (const path of LINTED_ISSUERS) {
       expect(await flagged(path, code, IMPORTS), path).toEqual([
         expect.stringMatching(/^'changePreOrg' import from '@tinnox\/db' is restricted/),
-        expect.stringMatching(/withoutOrg and poolAsTx run without an organisation/),
+        expect.stringMatching(/poolAsTx runs without an organisation/),
         expect.stringMatching(/^'pg' import is restricted/),
       ]);
     }
@@ -325,11 +286,6 @@ describe('the maker of a WritePermit (SCR-34)', { timeout: 30_000 }, () => {
         /\bissueWritePermit\b/.test(imports),
         `${file} no longer imports issueWritePermit: remove it from WRITE_PERMIT_ISSUERS in eslint.config.js`,
       ).toBe(true);
-      // legacyAudit lets a callback write its audit rows by hand: the role guard's bridge alone.
-      expect(
-        /\blegacyAudit\b/.test(source(file)),
-        `${file}: legacyAudit is for withOrgAllowed of the role guard only, until the last file of LEGACY_TRANSACTION_FILES has moved`,
-      ).toBe(file === ROLE_GUARD);
     }
   });
 
@@ -337,7 +293,7 @@ describe('the maker of a WritePermit (SCR-34)', { timeout: 30_000 }, () => {
     for (const file of Object.keys((await exported('WRITE_PERMIT_ISSUERS')) as object)) {
       const text = source(file);
       expect(
-        /export\s*\{[^}]*\b(issueWritePermit|legacyAudit)\b/.test(text),
+        /export\s*\{[^}]*\bissueWritePermit\b/.test(text),
         `${file} re-exports the maker of a permit`,
       ).toBe(false);
       expect(
@@ -405,32 +361,29 @@ describe('the entry of the jobs (SCR-34)', { timeout: 30_000 }, () => {
       'a file that may import the entry of the jobs changes organisations with no role check: it is a job, with a row in JOB_AUDIT (apps/api/src/route-audit.ts) that names its file',
     ).toEqual(JOB_FILES);
     const jobAudit = source('apps/api/src/route-audit.ts');
-    const legacy = await legacyFiles();
     for (const [file, reason] of Object.entries(list as object)) {
       expect(typeof reason === 'string' && reason.length >= 60, `${file} needs its reason`).toBe(
         true,
       );
       expect(jobAudit, `${file} has no row in JOB_AUDIT`).toContain(`file: '${file}'`);
-      // A job file imports the entry once it has moved to the new API (step 20). Until then it
-      // is on the legacy list, and its entry here waits for the move; after it, an entry whose
-      // file no longer imports the entry is stale.
+      // An entry whose file no longer imports the entry of the jobs is stale.
       expect(
-        /from '(\.\.?\/)+jobs\.ts'/.test(source(file)) || legacy.includes(file),
+        /from '(\.\.?\/)+jobs\.ts'/.test(source(file)),
         `${file} no longer imports apps/api/src/jobs.ts: remove it from JOB_CHANGE_FILES in eslint.config.js`,
       ).toBe(true);
     }
   });
 });
 
-// SCR-34: enterOrg of changePreOrg (and of withResolvedOrg) gives a handle that writes for any
-// OrgId with no permit, so an operator write could skip the role guard through it. Only the
-// files whose transactions start before the organisation is known may import the two.
+// SCR-34: enterOrg of changePreOrg gives a handle that writes for any OrgId with no permit, so an
+// operator write could skip the role guard through it. Only the files whose transactions start
+// before the organisation is known may import it. withResolvedOrg, which it runs on, is no longer
+// exported by @tinnox/db (step 20), and tinnox/no-legacy-transaction refuses the name.
 describe(
   'the openers that enter an organisation without a permit (SCR-34)',
   { timeout: 30_000 },
   () => {
-    const OPENERS =
-      "import { changeOrg, changePreOrg, readOrg, withResolvedOrg } from '@tinnox/db';";
+    const OPENERS = "import { changeOrg, changePreOrg, readOrg } from '@tinnox/db';";
     const PRE_ORG = [
       'apps/api/src/routes/alert-recipients.ts',
       'apps/api/src/routes/auth.ts',
@@ -439,7 +392,7 @@ describe(
     ];
     const refused = (name: string): RegExp =>
       new RegExp(
-        `^'${name}' import from '@tinnox/db' is restricted from being used by a pattern\\. changePreOrg and withResolvedOrg are for a transaction that starts before the organisation is known \\(SCR-34\\): .* An operator change calls changeAsOperator\\(ctx, request, fn\\) from apps/api/src/auth/permissions\\.ts, .* a read calls readOrg\\(pool, orgId, fn\\) from @tinnox/db\\. .* add it to PRE_ORG_CHANGE_FILES in eslint\\.config\\.js with its reason, and say why in the pull request\\.$`,
+        `^'${name}' import from '@tinnox/db' is restricted from being used by a pattern\\. changePreOrg is for a transaction that starts before the organisation is known \\(SCR-34\\): .* An operator change calls changeAsOperator\\(ctx, request, fn\\) from apps/api/src/auth/permissions\\.ts, .* a read calls readOrg\\(pool, orgId, fn\\) from @tinnox/db\\. .* add it to PRE_ORG_CHANGE_FILES in eslint\\.config\\.js with its reason, and say why in the pull request\\.$`,
       );
 
     it.each([
@@ -457,7 +410,6 @@ describe(
     ])('are refused in %s, which keeps changeOrg and readOrg', async (path) => {
       expect(await flagged(path, OPENERS, IMPORTS)).toEqual([
         expect.stringMatching(refused('changePreOrg')),
-        expect.stringMatching(refused('withResolvedOrg')),
       ]);
     });
 
@@ -466,12 +418,12 @@ describe(
       expect(
         await flagged(path, "import { changePreOrg as open } from '@tinnox/db';", IMPORTS),
       ).toEqual([expect.stringMatching(refused('changePreOrg'))]);
-      expect(await flagged(path, "export { withResolvedOrg } from '@tinnox/db';", IMPORTS)).toEqual(
-        [expect.stringMatching(refused('withResolvedOrg'))],
-      );
+      expect(await flagged(path, "export { changePreOrg } from '@tinnox/db';", IMPORTS)).toEqual([
+        expect.stringMatching(refused('changePreOrg')),
+      ]);
       const namespace = await flagged(path, "import * as db from '@tinnox/db';", IMPORTS);
       expect(namespace.join('\n')).toMatch(
-        /'changePreOrg' and 'withResolvedOrg' from '@tinnox\/db' are restricted .* changePreOrg and withResolvedOrg are for a transaction that starts before the organisation is known/,
+        /'changePreOrg' from '@tinnox\/db' is restricted .* changePreOrg is for a transaction that starts before the organisation is known/,
       );
     });
 
@@ -492,7 +444,7 @@ describe(
       ]);
     });
 
-    it('lists four files, each with its reason, and each still imports one of the two', async () => {
+    it('lists four files, each with its reason, and each still imports changePreOrg', async () => {
       const list = await exported('PRE_ORG_CHANGE_FILES');
       expect(Object.keys(list as object).sort()).toEqual(PRE_ORG);
       for (const [file, reason] of Object.entries(list as object)) {
@@ -502,8 +454,8 @@ describe(
         const imports =
           /import\s*\{([^}]*)\}\s*from\s*'@tinnox\/db';/.exec(source(file))?.[1] ?? '';
         expect(
-          /\b(changePreOrg|withResolvedOrg)\b/.test(imports),
-          `${file} no longer imports changePreOrg or withResolvedOrg: remove it from PRE_ORG_CHANGE_FILES in eslint.config.js`,
+          /\bchangePreOrg\b/.test(imports),
+          `${file} no longer imports changePreOrg: remove it from PRE_ORG_CHANGE_FILES in eslint.config.js`,
         ).toBe(true);
       }
     });

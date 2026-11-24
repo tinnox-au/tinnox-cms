@@ -196,7 +196,7 @@ describe('the SQL of the audit-debt guard', () => {
     expect(AUDIT_DEBT_SQLSTATE).toBe('23U01');
     expect(SETTLE_FUNCTION).toContain("USING ERRCODE = '23U01', CONSTRAINT = 'audit_debt'");
     expect(SETTLE_FUNCTION).toContain(
-      'Write the audit row on the same Tx as the change, with auditScoped(tx, event) or auditUnscoped(tx, event) from @tinnox/db',
+      'Return the audit event from the change, as { value, audit }, and its wrapper writes the row on the same transaction',
     );
     expect(SETTLE_FUNCTION).toContain('packages/db/src/audit-debt-guard.ts');
     // It never points a test author at the connection the guard does not judge.

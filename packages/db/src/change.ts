@@ -2,11 +2,13 @@
  * A change and its audit rows as one thing (adoption plan section 2.1 B, step 19; AG-3.1,
  * SCR-34).
  *
- * `changeOrg` and `changePreOrg` run a callback in one transaction, as `withOrg` and
- * `withResolvedOrg` do, but the callback does not write its audit rows: it returns them, as
- * `{ value, audit }`, and the wrapper writes them on that transaction and then sends COMMIT. So
- * the audit row of a change cannot land on another transaction, and a change that records
- * nothing has to say so with `unaudited(reason)`, which a reviewer can search for.
+ * `changeOrg` and `changePreOrg` run a callback in one transaction, on `withOrg` and
+ * `withResolvedOrg` of ./tx.ts (which the runtime entry does not export: since step 20 only
+ * tests reach them, through '@tinnox/db/testing'), but the callback does not write its audit
+ * rows: it returns them, as `{ value, audit }`, and the wrapper writes them on that transaction
+ * and then sends COMMIT. So the audit row of a change cannot land on another transaction, and a
+ * change that records nothing has to say so with `unaudited(reason)`, which a reviewer can
+ * search for.
  *
  * `changeOrg` also takes a `WritePermit`, which only the thing that judged the caller issues
  * (lint keeps `issueWritePermit` to the files of WRITE_PERMIT_ISSUERS in eslint.config.js):
@@ -33,7 +35,7 @@
  * `changePreOrg` takes no permit: its `enterOrg` gives a handle that writes for any `OrgId`,
  * `operatorOf(request).orgId` included. Lint holds it instead: only the files of
  * PRE_ORG_CHANGE_FILES in eslint.config.js, whose transactions start before the organisation is
- * known, may import it (or `withResolvedOrg`). An operator write inside one of those files is
+ * known, may import it. An operator write inside one of those files is
  * left to review. It does take the statement of its route, and is held to it like `changeOrg`.
  *
  * What this cannot see: an `unaudited(reason)` that is not true, `nothing_changed` above all,
@@ -106,34 +108,13 @@ const GIVEN_BY = {
       : 'any';
 };
 
-/** Marks what `legacyAudit` returns. Not exported. */
-const writtenByCallback: unique symbol = Symbol('legacyAudit');
-
-/** What `withOrgAllowed` returns for its callers, which still write their audit rows by hand. */
-export interface LegacyAudit {
-  readonly [writtenByCallback]: true;
-}
-
-const LEGACY = Object.freeze<LegacyAudit>({ [writtenByCallback]: true });
-
-/**
- * Says that the callback wrote its audit rows itself, with `auditScoped(tx, event)`, or wrote
- * none: nothing here can tell which. Only `withOrgAllowed` of the role guard uses it, for the
- * route files that have not moved to `{ value, audit }` yet (the files of
- * LEGACY_TRANSACTION_FILES in eslint.config.js), and lint refuses the import everywhere else.
- * It goes when the last of those files has moved (adoption plan step 20).
- */
-export function legacyAudit(): LegacyAudit {
-  return LEGACY;
-}
-
 /**
  * The audit rows of a change: one event, several, or `unaudited(reason)`. An empty list is
  * refused when the change runs, because it gives no reason. An offline tool whose one statement
  * wrote the change and its audit rows together gives `auditedInSql(result, action)` of
  * '@tinnox/db/migrate' instead (D25): the wrapper then writes nothing and checks the count.
  */
-export type Audit = AuditInput | readonly AuditInput[] | Unaudited | LegacyAudit | AuditedInSql;
+export type Audit = AuditInput | readonly AuditInput[] | Unaudited | AuditedInSql;
 
 /** What the callback of `changeOrg` and `changePreOrg` returns. */
 export interface Change<T> {
@@ -272,7 +253,6 @@ function termsOf<Granted>(permit: WritePermit<Granted>): PermitTerms<Granted> {
 }
 
 const isUnaudited = (audit: Audit): audit is Unaudited => unauditedBecause in audit;
-const isLegacy = (audit: Audit): audit is LegacyAudit => writtenByCallback in audit;
 
 const describeStated = (stated: StatedAudit): string => {
   if (!('actions' in stated)) return `no audit row (${stated.none})`;
@@ -284,7 +264,7 @@ const describeStated = (stated: StatedAudit): string => {
  * Writes the audit rows a change returned and checks what its transaction recorded, before
  * COMMIT. Throws to roll the change back. `handles` are the handles of the transaction: the
  * audit writers note on them every action written, the ones `write` just wrote and any the
- * callback wrote by hand.
+ * callback wrote by hand (only a test can: the audit writers are not in the runtime entry).
  */
 async function record<T>(
   opener: string,
@@ -310,7 +290,7 @@ async function record<T>(
       );
     }
   }
-  if (!isUnaudited(audit) && !isLegacy(audit) && !isAuditedInSql(audit)) {
+  if (!isUnaudited(audit) && !isAuditedInSql(audit)) {
     const events = 'action' in audit ? [audit] : audit;
     if (events.length === 0) {
       throw new Error(

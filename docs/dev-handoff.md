@@ -78,13 +78,15 @@ Roles: `tinnox_migrator` owns the schema. `tinnox_app` is `NOSUPERUSER NOBYPASSR
 
 ```ts
 createPool(options: { connectionString: string; applicationName?: string; max?: number; statementTimeoutMs?: number }): Pool
-withOrg<T>(pool: Pool, orgId: OrgId, fn: (tx: OrgTx) => Promise<T>): Promise<T>
-withoutOrg<T>(pool: Pool, fn: (tx: PreOrgTx) => Promise<T>): Promise<T>
-withResolvedOrg<T>(pool: Pool, fn: (tx: PreOrgTx, enterOrg: (orgId: OrgId) => Promise<OrgTx>) => Promise<T>): Promise<T>
+readOrg<T>(pool: Pool, orgId: OrgId, fn: (tx: OrgReadTx) => Promise<T>): Promise<T>   // BEGIN READ ONLY
+changeOrg<T, G>(pool: Pool, orgId: OrgId, permit: WritePermit<G>, fn: (tx: OrgTx, granted: G) => Promise<Change<T>>): Promise<T>
+changePreOrg<T>(pool: Pool, statement: AuditStatement, fn: (tx: PreOrgTx, enterOrg: (orgId: OrgId) => Promise<OrgTx>) => Promise<Change<T>>): Promise<T>
+interface Change<T> { value: T; audit: Audit }   // the change returns its audit events; changeOrg and changePreOrg write them before COMMIT
 poolAsTx(pool: Pool): Autocommit    // single-statement sec.* lookups; each statement commits on its own
 type OrgId = string & { /* marked */ }  // an organisation the database named; only the sec.* lookups return one
 interface Autocommit { query<R>(text: string, values?: readonly unknown[]): Promise<QueryResult<R>> }
-interface OrgTx extends Autocommit {}   // marked; a transaction with the organisation set: takes your statements
+interface OrgReadTx extends Autocommit {}  // marked; the READ ONLY transaction of readOrg
+interface OrgTx extends OrgReadTx {}    // marked; a transaction with the organisation set: takes your statements
 interface PreOrgTx {}                   // marked; a transaction before the organisation is known: no query()
 type Tx = OrgTx | PreOrgTx
 assertConnectionRole(connectionString: string, expectedRole: string): void
@@ -94,17 +96,17 @@ sql`...`, sqlParameter(position), joinSql(parts, separator): SqlFragment   // fi
 sha256(value: string | Uint8Array): Buffer
 ```
 
-The package has three entries. `@tinnox/db` is the runtime API above. `@tinnox/db/migrate` holds what only an offline tool that connects as `tinnox_migrator` may use: `connectMigrator`, `MigratorPool`, `runMigrations`, `resetTestDatabase`, `asDefiner(pool, tx, work)`, the one place that switches to `tinnox_definer` (provisioning's reads across organisations: `work` sends them on the handle it is given, and a row it reads has its `org_id` typed `OrgId`), and `newOrgId()`, for an organisation that is being created (org-create and the seed only; lint refuses it in every other script). `@tinnox/db/testing` holds what only tests may use (`inTx`, `testOrgId` to name a test's organisation, `withNoOrgSet` to send a statement where no organisation is set). Lint refuses the migrator entry in the API's source and the testing entry in every file that is not a test.
+The package has three entries. `@tinnox/db` is the runtime API above. `@tinnox/db/migrate` holds what only an offline tool that connects as `tinnox_migrator` may use: `connectMigrator`, `MigratorPool`, `runMigrations`, `resetTestDatabase`, `asDefiner(pool, tx, work)`, the one place that switches to `tinnox_definer` (provisioning's reads across organisations: `work` sends them on the handle it is given, and a row it reads has its `org_id` typed `OrgId`), and `newOrgId()`, for an organisation that is being created (org-create and the seed only; lint refuses it in every other script). `@tinnox/db/testing` holds what only tests may use (`inTx`, `testOrgId` to name a test's organisation, `withNoOrgSet` to send a statement where no organisation is set, the openers `withOrg`, `withoutOrg` and `withResolvedOrg`, and the audit writers `auditScoped` and `auditUnscoped`; `changeOrg` runs on `withOrg`, `changePreOrg` on `withResolvedOrg`, and both write a change's events with the audit writers). Lint refuses the migrator entry in the API's source and the testing entry in every file that is not a test.
 
 Lint also holds how the API and the scripts reach the database (`eslint.config.js`; `scripts/lib/db-access-lint.test.ts` runs each rule against fixture text):
 
-- `tinnox/no-query-off-transaction`: `query()` is called only on an `OrgTx` (or, in an offline tool, on the handle `asDefiner` gives its work). A statement on the pool, a pooled client or a `poolAsTx` handle is an error; use `withOrg`, a typed `sec.*` wrapper, or `ping(pool)`. The alert check's session lock is the one listed exception (`QUERY_OFF_TRANSACTION`).
+- `tinnox/no-query-off-transaction`: `query()` is called only on an `OrgTx` (or, in an offline tool, on the handle `asDefiner` gives its work). A statement on the pool, a pooled client or a `poolAsTx` handle is an error; use `readOrg` for a read, `changeAsOperator` (`apps/api/src/auth/permissions.ts`) for an operator change, a typed `sec.*` wrapper, or `ping(pool)`. The alert check's session lock is the one listed exception (`QUERY_OFF_TRANSACTION`).
 - `sec.*` SQL is written only in `packages/db/src/sec.ts`; add a wrapper there.
-- `withoutOrg` and `poolAsTx` may be imported only by the files of `UNSCOPED_HELPER_FILES`, each with its reason.
+- `poolAsTx` may be imported only by the files of `UNSCOPED_HELPER_FILES`, each with its reason.
 - Nothing makes an `OrgId` or a transaction handle by a cast, a type predicate or a type argument of a call such as the row type of `query()` (`NO_ORG_ID_FORGERY`, `NO_TX_CAST`); `packages/db/src/org-id.ts` is the one file that makes an `OrgId`.
 - `tinnox/sql-fragments`: the statement given to `query()` is a literal or a template that interpolates only an UPPER_CASE module constant or a `SqlFragment`. Everything else is a parameter (`$1`).
 - Outside tests, `SET ROLE` text in TypeScript exists only in `asDefiner` (`packages/db/src/definer.ts`); the incident SQL scripts (`scripts/revoke-*-sessions.sql`) carry their own.
-- `tinnox/no-raw-audit-insert`: an audit row is written with `auditScoped` or `auditUnscoped`, never with a statement that inserts into `audit_event` itself. The set-based invite expiry of provisioning is the one listed exception (`RAW_AUDIT_INSERTS`). Its change returns `auditedInSql(result, action)` (`@tinnox/db/migrate`) in place of its events, and `changePreOrg` refuses that when the statement inserted no row.
+- `tinnox/no-raw-audit-insert`: a change returns its audit events as `{ value, audit }` and `changeOrg` or `changePreOrg` writes them, never a statement that inserts into `audit_event` itself. The set-based invite expiry of provisioning is the one listed exception (`RAW_AUDIT_INSERTS`). Its change returns `auditedInSql(result, action)` (`@tinnox/db/migrate`) in place of its events, and `changePreOrg` refuses that when the statement inserted no row.
 
 `withOrg` does `BEGIN`, `SELECT set_config('app.org_id', $1, true)`, runs `fn` on that one connection, then `COMMIT` (or `ROLLBACK` when `fn` throws). `orgId` is an `OrgId`: the type checker takes only what a verified session or device lookup (or another lookup of `packages/db/src/sec.ts`) returned, so a string from the request does not compile there; the value is still checked to be a lower-case UUID. Outside `withOrg` every tenant table is empty to the application, and the handle of `withoutOrg` and of `withResolvedOrg` (a `PreOrgTx`) has no `query()` at all: it goes to the `sec.*` wrappers, and `enterOrg(orgId)` returns the `OrgTx` for the tenant statements of the same transaction. The `tx` handle works only until `fn` returns or throws: a `query` on it afterwards rejects and sends nothing, so await every query inside `fn`. `withOrg`, `withoutOrg`, `withResolvedOrg` and a `poolAsTx` statement reject when called while a transaction is open on the same asynchronous path, in `fn` or in a helper it calls: a second transaction takes another connection and commits on its own, so pass the outer `tx` to the helper instead (lint reports the cases it can read as `tinnox/no-nested-transaction`). A test that plays a second writer starts that writer's transaction from the test body, not from inside the first transaction. pg returns `bigint` columns (`audit_event.id`, `media.bytes`, `last_seq`) as strings.
 
@@ -112,7 +114,7 @@ Inside `withOrg` write `org_id` explicitly or use `app_org_id()`: `INSERT INTO p
 
 ### Lookups before the organisation is known (schema `sec`, wrappers in `@tinnox/db`)
 
-The wrappers that change data and the two audit writers take a transaction handle, so the change and its audit row commit together, and each names the kind it needs: `sessionCreate`, `sessionRevoke`, `pairingCreate`, `pairingPoll`, `pairingComplete` and `auditUnscoped` take a `PreOrgTx` (inside `withoutOrg` or `withResolvedOrg`); `pairingClaim`, `pairingCancelClaims`, `sessionRevokeMembership`, `auditScoped`, `lockOrgMembership` and `membershipForCheck` take an `OrgTx` (inside `withOrg`, or after `enterOrg`). The other kind of handle, a pool, or the handle of `poolAsTx(pool)`, is a type error there. The lookups, the login state and the purges take any handle, so `poolAsTx(pool)` or a transaction of either kind will do. A lookup that resolves a credential, a job or a confirmation link returns its organisation as an `OrgId` (`membershipByOidcSub`, which takes whatever subject the caller names, returns a plain string). Two functions take the pool and write in a statement of their own: `auditStandalone(pool, event)`, for a refused or failed sign-in and a rejected device credential only (its event type has no `success`), and `sessionRevokeUnaudited(pool, idHash)`, for the sign-out fallback only. Called while a transaction is open, both are refused like any second transaction, and the message names what to call on the outer `tx` instead: `auditUnscoped` or `auditScoped`, and `sessionRevoke`. Nothing casts to a transaction handle (lint refuses it); a test opens a transaction with `withoutOrg`, or `inTx` from `@tinnox/db/testing`.
+The wrappers that change data and the two audit writers take a transaction handle, so the change and its audit row commit together, and each names the kind it needs: `sessionCreate`, `sessionRevoke`, `pairingCreate`, `pairingPoll`, `pairingComplete` and `auditUnscoped` take a `PreOrgTx` (inside `changePreOrg`, or `withoutOrg` or `withResolvedOrg` in a test); `pairingClaim`, `pairingCancelClaims`, `sessionRevokeMembership`, `auditScoped`, `lockOrgMembership` and `membershipForCheck` take an `OrgTx` (inside `changeOrg` or `withOrg`, or after `enterOrg`). The other kind of handle, a pool, or the handle of `poolAsTx(pool)`, is a type error there. The lookups, the login state and the purges take any handle, so `poolAsTx(pool)` or a transaction of either kind will do. A lookup that resolves a credential, a job or a confirmation link returns its organisation as an `OrgId` (`membershipByOidcSub`, which takes whatever subject the caller names, returns a plain string). Two functions take the pool and write in a statement of their own: `auditStandalone(pool, event)`, for a refused or failed sign-in and a rejected device credential only (its event type has no `success`), and `sessionRevokeUnaudited(pool, idHash)`, for the sign-out fallback only. Called while a transaction is open, both are refused like any second transaction, and the message names what to do on the outer transaction instead: return the event from the outer change, and `sessionRevoke`. Nothing casts to a transaction handle (lint refuses it); a test opens a transaction with `withoutOrg`, or `inTx` from `@tinnox/db/testing`.
 
 ```ts
 membershipByOidcSub(tx, oidcSub): Promise<{ membershipId, orgId, role, orgName } | null>
@@ -132,8 +134,8 @@ pairingComplete(tx, { pairingId, pollingTokenHash, deviceTokenHash })
   : Promise<{ outcome: 'completed', registrationId, orgId, displayId } | { outcome: 'not_claimable' }>
 pairingPurge(tx, olderThanSeconds): Promise<number>
 deviceByTokenHash(tx, tokenHash): Promise<{ registrationId, orgId, displayId } | null>         // null when revoked
-auditScoped(tx /* withOrg */, event): Promise<void>
-auditUnscoped(tx, event): Promise<void>                                                         // org_id NULL
+auditScoped(tx /* withOrg */, event): Promise<void>                                             // @tinnox/db/testing only
+auditUnscoped(tx, event): Promise<void>                                                         // org_id NULL; @tinnox/db/testing only
 auditStandalone(pool, event): Promise<void>                                                     // org_id NULL, refusals only
 sessionRevokeUnaudited(pool, idHash): Promise<boolean>                                          // sign-out fallback only
 ```
@@ -145,7 +147,7 @@ An audit `event` is an `AuditInput`: its `action` is a member of `AUDIT_ACTIONS`
 Pairing sequence the API should implement:
 
 1. `POST /player/pairing`: generate a code (8 symbols from `PAIRING_CODE_ALPHABET`, CSPRNG) and a polling token (32 random bytes, base64url); call `pairingCreate` with `clientKey` = HMAC of the client address under `PAIRING_CLIENT_KEY_SECRET`. On `code_collision` generate a new code and retry.
-2. `POST /api/displays/:id/claim`: inside `withOrg`, call `pairingClaim` with the session's `membershipId`. It also revokes the display's current registration and returns its id for the audit record.
+2. `POST /api/displays/:id/claim`: inside `changeAsOperator`, call `pairingClaim` with the session's `membershipId`. It also revokes the display's current registration and returns its id for the audit record.
 3. `GET /player/pairing/:id` (polling token as `Authorization: Bearer`): call `pairingPoll`. On `claimed`, generate the device token, call `pairingComplete` with its hash and return the token in a `claimed` response. Map `completed` to the contract's `consumed`; map `expired` to `expired`; answer `locked`, `not_found` and `wrong_token` with the same 404 so they cannot be told apart.
 
 The device token is delivered in exactly one response. If that response is lost, the player starts a new pairing.
@@ -214,7 +216,7 @@ buildDeliveryStatusView({ displayId, activeRegistrationId, desired, reported, no
 EMPTY_REPORTED_STATE
 ```
 
-Publishing in the API: load display, items and media inside `withOrg`; `planPublication` with `registry.get(display.route)`; on success generate the id, `buildManifest`, insert `publication` and `publication_asset`, upsert `display_delivery.desired_publication_id`. On an idempotency-key conflict return the existing row (`replayed: true`) if the playlist matches and the stored manifest has no `schedule` or `zones` block, otherwise `idempotency_conflict`.
+Publishing in the API: load display, items and media inside `changeAsOperator`; `planPublication` with `registry.get(display.route)`; on success generate the id, `buildManifest`, insert `publication` and `publication_asset`, upsert `display_delivery.desired_publication_id`. On an idempotency-key conflict return the existing row (`replayed: true`) if the playlist matches and the stored manifest has no `schedule` or `zones` block, otherwise `idempotency_conflict`.
 
 `ReportedState` maps onto `display_delivery` (`reporting_registration_id`, `last_seq`, `downloaded_publication_id`, `active_publication_id`, `active_item_index`, `player_state`, `staging`, `last_errors`, `last_heartbeat_at`). A heartbeat from a newly registered player starts a new sequence; `seq` only has to increase within one registration.
 
@@ -269,7 +271,7 @@ Written but not run: the GitHub Actions workflow (`.github/workflows/ci.yml`) ha
 
 Known gaps:
 
-- `tinnox_app` can set `app.org_id` to any organisation. Row-level security protects against a query that forgets its filter or runs outside `withOrg`; it does not protect against application code that passes the wrong organisation to `withOrg`.
+- `tinnox_app` can set `app.org_id` to any organisation. Row-level security protects against a query that forgets its filter or runs outside `readOrg` or `changeOrg`; it does not protect against application code that passes the wrong organisation to `readOrg` or `changeOrg`.
 - There is no way to delete an organisation or a publication: publications are immutable for every role. Deletion and retention need a designed, migrator-run procedure.
 - Audit events with no organisation (`auditUnscoped`) can be read only by a database administrator.
 - The Keycloak development database lives inside the container; removing the container loses Keycloak sessions and events (the realm is re-imported).

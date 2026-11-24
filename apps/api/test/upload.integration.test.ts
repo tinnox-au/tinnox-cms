@@ -4,7 +4,7 @@ import { appendFile, mkdir, rm, stat, symlink, unlink, utimes, writeFile } from 
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import type { MediaJobResult } from '@tinnox/contracts';
-import { withOrg } from '@tinnox/db';
+import { withOrg } from '@tinnox/db/testing';
 import { LocalObjectStorage } from '@tinnox/storage';
 import sharp from 'sharp';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';

@@ -17,7 +17,7 @@ const SECOND =
 const REMEDY = `${SECOND} Pass the outer tx to the helper: give it a \`tx: OrgTx\` parameter (from @tinnox/db) and run the statements on that; work that must commit on its own goes after the outer call has returned.`;
 // The two functions that take the pool and no tx: the message names what to call on the outer
 // tx, not a parameter the function does not have.
-const AUDIT_REMEDY = `${SECOND} Write the event on the outer transaction instead: inside changeOrg or changePreOrg, return it as { value, audit } and the wrapper writes it there; in a file of LEGACY_TRANSACTION_FILES (eslint.config.js), auditUnscoped(tx, event), or auditScoped(tx, event) when the outer transaction is withOrg (both from @tinnox/db). auditStandalone is only for a refusal that no transaction carries: call it after the outer call has returned or thrown.`;
+const AUDIT_REMEDY = `${SECOND} Write the event on the outer transaction instead: return it from that change as { value, audit }, and changeOrg or changePreOrg (or the wrapper the route calls: changeAsOperator, changeAsDevice, changeAsJob) writes it there. auditStandalone is only for a refusal that no transaction carries: call it after the outer call has returned or thrown.`;
 const REVOKE_REMEDY = `${SECOND} End the session on the outer tx instead: sessionRevoke(tx, idHash) (from @tinnox/db), with its audit row on the same tx. sessionRevokeUnaudited is only for the sign-out fallback: call it after the outer call has returned or thrown.`;
 const REFUSAL_REMEDY = `${SECOND} A refusal that commits with what the outer transaction wrote is returned from it, as { value: refuse(error), audit: event } (refuse from apps/api/src/db-helpers.ts): the wrapper writes the event there. recordRefusal is for a refusal that changed nothing: throw the refusal, and call it after the outer call has rolled back (SCR-32).`;
 const inCallback = (opener: string, outer: string, remedy = REMEDY) =>
@@ -64,7 +64,7 @@ tester.run('no-nested-transaction (U-3)', rule, {
         async function rename(tx: Tx, id: string): Promise<void> {
           await tx.query('UPDATE folder SET name = $2 WHERE id = $1', [id, 'a']);
         }
-        await withOrgAllowed(ctx, request, (tx) => rename(tx, id));
+        await changeAsOperator(ctx, request, (tx) => rename(tx, id));
       `,
     },
     {
@@ -92,7 +92,7 @@ tester.run('no-nested-transaction (U-3)', rule, {
     {
       name: 'a wrapper that passes its callback on: its parameter is a function, not a handle',
       code: `
-        export async function withOrgDecision<T>(pool: Pool, orgId: string, fn: (tx: Tx) => Promise<T>) {
+        export async function openWith<T>(pool: Pool, orgId: string, fn: (tx: Tx) => Promise<T>) {
           return withOrg(pool, orgId, fn);
         }
       `,
@@ -139,24 +139,24 @@ tester.run('no-nested-transaction (U-3)', rule, {
     {
       name: 'every opener inside every kind of callback, the API wrappers included',
       code: `
-        await withOrgAllowed(ctx, request, async (tx, role) => {
+        await changeAsOperator(ctx, request, async (tx, role) => {
           await withoutOrg(ctx.pool, (inner) => lookup(inner));
         });
         await withResolvedOrg(pool, async (tx, enterOrg) => {
-          await withOrgDecisionAllowed(ctx, request, (inner) => decide(inner));
+          await changeAsDevice(ctx, request, (inner) => decide(inner));
         });
         await withoutOrg(pool, async function (tx) {
           await withResolvedOrg(pool, (inner) => complete(inner));
         });
-        await withOrgDecision(pool, orgId, async (tx) => withOrgDecision(pool, orgId, decide));
-        await withOrgDecisionAllowed(ctx, request, async (tx) => withOrgAllowed(ctx, request, write));
+        await changeAsJob(pool, orgId, async (tx) => changeAsJob(pool, orgId, decide));
+        await changeAsDevice(ctx, request, async (tx) => changeAsOperator(ctx, request, write));
       `,
       errors: [
-        { message: inCallback('withoutOrg', 'withOrgAllowed') },
-        { message: inCallback('withOrgDecisionAllowed', 'withResolvedOrg') },
+        { message: inCallback('withoutOrg', 'changeAsOperator') },
+        { message: inCallback('changeAsDevice', 'withResolvedOrg') },
         { message: inCallback('withResolvedOrg', 'withoutOrg') },
-        { message: inCallback('withOrgDecision', 'withOrgDecision') },
-        { message: inCallback('withOrgAllowed', 'withOrgDecisionAllowed') },
+        { message: inCallback('changeAsJob', 'changeAsJob') },
+        { message: inCallback('changeAsOperator', 'changeAsDevice') },
       ],
     },
     {
@@ -275,7 +275,7 @@ tester.run('no-nested-transaction (U-3)', rule, {
         async function b(tx: null | db.Tx, pool: Pool) { await withOrg(pool, orgId, work); }
         async function c(tx: Readonly<Tx>, pool: Pool) { await lookup(poolAsTx(pool)); }
         async function d(tx: NonNullable<Tx | undefined>) { await withResolvedOrg(pool, work); }
-        const e = async (tx: Readonly<Tx> | undefined) => withOrgAllowed(ctx, request, work);
+        const e = async (tx: Readonly<Tx> | undefined) => changeAsOperator(ctx, request, work);
         async function f(tx?: Tx) { await withoutOrg(pool, work); }
       `,
       errors: [
@@ -284,7 +284,7 @@ tester.run('no-nested-transaction (U-3)', rule, {
         { message: withHandle('withOrg', 'tx: Tx') },
         { message: withHandle('poolAsTx', 'tx: Tx') },
         { message: withHandle('withResolvedOrg', 'tx: Tx') },
-        { message: withHandle('withOrgAllowed', 'tx: Tx') },
+        { message: withHandle('changeAsOperator', 'tx: Tx') },
         { message: withHandle('withoutOrg', 'tx: Tx') },
       ],
     },
