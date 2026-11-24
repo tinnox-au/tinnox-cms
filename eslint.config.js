@@ -690,6 +690,24 @@ const NO_SESSION_LOCK = [
   },
 ];
 
+// Step 26 (adoption plan section 2.3): what a database error means is decided in one place,
+// classifyDbError in packages/db/src/outcome.ts, so no API source reads a SQLSTATE code (the
+// classes of integrity, transaction rollback, access, object state and operator intervention), in
+// string or template text: a route names the registered constraint it maps in the constraints
+// option of changeAsOperator, and the rest ask the classifier. The migration runner
+// (packages/db/src/migrate.ts) is held to it too: its lock wait asks isLockTimeout. Tests are
+// outside: they build the errors the classifier reads. Not seen: a code put together at run time,
+// or kept in a constant of another package.
+const CONSTRAINT_READ =
+  'Do not read the constraint of a database error in API source (step 26): add the constraint to CONSTRAINTS in packages/db/src/constraints.ts and map it in the constraints option of changeAsOperator(ctx, request, fn, { constraints: { name: () => error } }) (apps/api/src/auth/permissions.ts), which reads it through classifyDbError of @tinnox/db.';
+const NO_SQLSTATE_LITERAL = [
+  {
+    selector: stringMatching('/^(23|40|42|55|57)[0-9A-Z]{3}$/'),
+    message:
+      'Do not read a SQLSTATE code here (step 26): classifyDbError(error) from @tinnox/db (packages/db/src/outcome.ts) says what a database error means. To answer a constraint violation, add the constraint to CONSTRAINTS in packages/db/src/constraints.ts and map it in the constraints option of changeAsOperator(ctx, request, fn, { constraints: { name: () => error } }) (apps/api/src/auth/permissions.ts). Otherwise ask the classifier: classifyDbError(error)?.kind (denied, transient, other), or isLockTimeout(classifyDbError(error)) for a lock wait past lock_timeout.',
+  },
+];
+
 // EAX-08: a security exemption is decided on an address, never on a name. A loopback name or
 // literal, in any case, is refused where API code compares a host with it: an equality test, a
 // switch case, a list or Set to look it up in, and the argument of endsWith, startsWith or
@@ -1410,6 +1428,10 @@ const IMPORT_FACETS = [
       },
       ...(dir === 'packages/db' ? [] : [{ regex: '^pg(/|$)', message: pgMessage(dir) }]),
       ...dbEntryPatterns(dir),
+      // Step 26: API source reads no constraint name; the constraints option maps one.
+      ...(dir === 'apps/api'
+        ? [{ regex: '^@tinnox/db$', importNames: ['violatedConstraint'], message: CONSTRAINT_READ }]
+        : []),
     ],
   },
   {
@@ -1709,6 +1731,7 @@ const API_SYNTAX = [
   ...NO_GATED_REEXPORT,
   ...NO_SESSION_LOCK,
   ...NO_LOOPBACK_NAME,
+  ...NO_SQLSTATE_LITERAL,
 ];
 // The list of the offline tools (D25: scripts get the database rules too). The tools that read
 // the migrator URL get it as it is; every other script also gets NO_MIGRATOR_URL.
@@ -1729,9 +1752,10 @@ const DB_SYNTAX = PRODUCT_SYNTAX.filter((entry) => !NO_SESSION_LOCK.includes(ent
 
 // The files of packages/db that are the one place for something the rest may not write, with the
 // list each is excused from. The rest of the package's list is unchanged for them.
+const MIGRATION_RUNNER = 'packages/db/src/migrate.ts';
 const DB_ONE_PLACES = {
   // SEC-1: connectMigrator mints the MigratorPool brand here, after checking the role.
-  'packages/db/src/migrate.ts': NO_MIGRATOR_POOL_CAST,
+  [MIGRATION_RUNNER]: NO_MIGRATOR_POOL_CAST,
   // AG-2.2: the typed wrappers of the sec.* functions.
   'packages/db/src/sec.ts': NO_RAW_SEC,
   // D25: asDefiner, the one role switch.
@@ -1948,6 +1972,8 @@ export default tseslint.config(
         'error',
         ...DB_SYNTAX.filter((entry) => !excused.includes(entry)),
         ...outboundSyntax('packages/db', null),
+        // Step 26: the runner's lock wait asks isLockTimeout, as the API does.
+        ...(file === MIGRATION_RUNNER ? NO_SQLSTATE_LITERAL : []),
       ],
     },
   })),

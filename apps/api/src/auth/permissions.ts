@@ -30,17 +30,20 @@ import {
 } from '@tinnox/contracts';
 import {
   changeOrg,
+  classifyDbError,
+  isLockTimeout,
   issueWritePermit,
   lockOrgMembership,
   membershipForCheck,
   type Change,
+  type ConstraintName,
   type OrgTx,
   type WritePermit,
 } from '@tinnox/db';
 import { permissionsOf } from '@tinnox/domain';
 import type { FastifyReply, FastifyRequest, RouteOptions } from 'fastify';
 import type { AppContext } from '../context.ts';
-import { HttpError, pgErrorCode } from '../errors.ts';
+import { HttpError } from '../errors.ts';
 import { audits, noAudit, type RouteAudit } from '../route-audit.ts';
 import {
   recordPermissionDenied,
@@ -426,15 +429,19 @@ export function permissionGuard(
       request.permission = { required, audit: rule.audit };
       return;
     }
-    if (!SAFE_METHODS.has(request.method)) {
-      await recordPermissionDenied(ctx, request, session, {
-        keys: failed,
-        reason: 'role',
-        always: false,
-      });
+    try {
+      if (!SAFE_METHODS.has(request.method)) {
+        await recordPermissionDenied(ctx, request, session, {
+          keys: failed,
+          reason: 'role',
+          always: false,
+        });
+      }
+    } finally {
+      // A Viewer's upload is refused before any byte reaches storage, also when its refusal row
+      // fails the request (AUD-9). After the row, since abandonBody starts its 2 s cut-off.
+      if (key === `POST ${ROUTES.media}`) abandonBody(request, reply);
     }
-    // A Viewer's upload is refused before any byte reaches storage.
-    if (key === `POST ${ROUTES.media}`) abandonBody(request, reply);
     throw forbidden();
   };
 }
@@ -467,9 +474,6 @@ export async function assertStillAllowed(
   return role;
 }
 
-/** SQLSTATE lock_not_available: `lock_timeout` (5 s for tinnox_app) ran out. */
-const LOCK_NOT_AVAILABLE = '55P03';
-
 // SEC-5: the re-check is always the requirement the guard resolved. A handler could once name its
 // own, which could only loosen the one check the permit exists to run.
 function requirementOf(request: FastifyRequest): Requirement {
@@ -481,13 +485,15 @@ function requirementOf(request: FastifyRequest): Requirement {
 }
 
 /**
- * A lock timeout (55P03) as 503 service_unavailable with retry-after 2; anything else unchanged.
- * For a write outside changeAsOperator that waits for a row lock, such as the public alert
- * confirmation (review findings SEC-3, BEH-3), so it answers as every other write does.
+ * A lock timeout (`lock_timeout`, 5 s for tinnox_app, ran out; isLockTimeout of @tinnox/db) as
+ * 503 service_unavailable with retry-after 2; anything else unchanged. For a write outside
+ * changeAsOperator that waits for a row lock, such as the public alert confirmation (review
+ * findings SEC-3, BEH-3), so it answers as every other write does.
  */
 export function lockTimeoutAsUnavailable(request: FastifyRequest, error: unknown): unknown {
-  if (pgErrorCode(error) !== LOCK_NOT_AVAILABLE) return error;
-  request.log.warn({ pgCode: LOCK_NOT_AVAILABLE }, 'a write waited too long for a lock');
+  const failure = classifyDbError(error);
+  if (!isLockTimeout(failure)) return error;
+  request.log.warn({ pgCode: failure.sqlstate }, 'a write waited too long for a lock');
   return new HttpError(
     503,
     'service_unavailable',
@@ -496,16 +502,36 @@ export function lockTimeoutAsUnavailable(request: FastifyRequest, error: unknown
   );
 }
 
-/** Records a role refusal and maps a lock timeout; anything else passes unchanged. */
+/**
+ * What a change answers when the database refuses it with a constraint of the registry
+ * (CONSTRAINTS, packages/db/src/constraints.ts): each name the route maps, with the error to
+ * throw in place of the database's. A name the route does not map stays the database's error,
+ * a 500 logged by its name. The error is usually an HttpError; a route that does more than
+ * answer (publishing runs again after a lost race) maps the name to an error of its own and
+ * catches that.
+ */
+export type ConstraintAnswers = { readonly [Name in ConstraintName]?: () => Error };
+
+/**
+ * Records a role refusal, answers a registered constraint the route maps, and maps a lock
+ * timeout; anything else passes unchanged. (Step 27 of the adoption plan adds an exported
+ * settle() for commit outcomes, and renames or absorbs this one.)
+ */
 async function settle(
   ctx: AppContext,
   request: FastifyRequest,
   session: OperatorSession,
   error: unknown,
+  constraints: ConstraintAnswers | undefined,
 ): Promise<unknown> {
   if (error instanceof PermissionDeniedError) {
     await recordPermissionDenied(ctx, request, session, error.record);
     return error;
+  }
+  const failure = classifyDbError(error);
+  if (failure?.kind === 'constraint') {
+    const answer = constraints?.[failure.name];
+    if (answer !== undefined) return answer();
   }
   return lockTimeoutAsUnavailable(request, error);
 }
@@ -514,6 +540,11 @@ async function settle(
 export interface WriteOptions {
   /** Take the organisation's membership lock before the role is read again. */
   readonly lockMembership?: boolean;
+  /**
+   * The registered constraints the route answers, and with what (step 26): a route names them
+   * here and reads no SQLSTATE code or constraint name itself.
+   */
+  readonly constraints?: ConstraintAnswers;
 }
 
 /**
@@ -550,9 +581,10 @@ function writePermit(
  * assertStillAllowed → fn(tx, role) → the audit rows `fn` returned → COMMIT. `fn` returns
  * `{ value, audit }` and writes no audit row itself.
  * A PermissionDeniedError thrown anywhere inside rolls back, is recorded with
- * recordPermissionDenied in its own transaction, and is rethrown. A lock timeout (55P03)
- * raised anywhere inside (membership lock, actor row, target row, any other lock) becomes
- * 503 service_unavailable with retry-after 2.
+ * recordPermissionDenied in its own transaction, and is rethrown. A violation of a registered
+ * constraint that `options.constraints` maps is thrown as the route's answer instead (step 26).
+ * A lock timeout (55P03) raised anywhere inside (membership lock, actor row, target row, any
+ * other lock) becomes 503 service_unavailable with retry-after 2.
  */
 export async function changeAsOperator<T>(
   ctx: AppContext,
@@ -565,6 +597,6 @@ export async function changeAsOperator<T>(
   try {
     return await changeOrg(ctx.db, session.orgId, permit, fn);
   } catch (error) {
-    throw await settle(ctx, request, session, error);
+    throw await settle(ctx, request, session, error, options?.constraints);
   }
 }

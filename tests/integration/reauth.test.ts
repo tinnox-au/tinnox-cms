@@ -78,8 +78,53 @@ function setCookie(response: Response, name: string): string | null {
   return null;
 }
 
+/**
+ * A pool wrapper that has the server refuse the next statement matching `matches` with
+ * `sqlstate`: the statement is replaced by one that raises it, in the same transaction, so the
+ * route sees the server's own error and the transaction is really aborted.
+ */
+function statementRefusals() {
+  let armed: { matches: (text: string) => boolean; sqlstate: string } | null = null;
+  const bound = <T extends object>(target: T, key: string | symbol): unknown => {
+    const value: unknown = Reflect.get(target, key);
+    return typeof value === 'function'
+      ? (value as (...args: unknown[]) => unknown).bind(target)
+      : value;
+  };
+  return {
+    wrapPool: <P extends object>(pool: P): P =>
+      new Proxy(pool, {
+        get(target, key) {
+          if (key !== 'connect') return bound(target, key);
+          return async () => {
+            const client = await (target as unknown as pg.Pool).connect();
+            return new Proxy(client, {
+              get(real, name) {
+                if (name !== 'query') return bound(real, name);
+                return (text: string, values?: unknown[]) => {
+                  const refusal = armed;
+                  if (refusal !== null && typeof text === 'string' && refusal.matches(text)) {
+                    armed = null;
+                    return real.query(
+                      `DO $$ BEGIN RAISE EXCEPTION 'refused by the test' USING ERRCODE = '${refusal.sqlstate}'; END $$`,
+                    );
+                  }
+                  return real.query(text, values);
+                };
+              },
+            });
+          };
+        },
+      }),
+    refuseNext(matches: (text: string) => boolean, sqlstate: string): void {
+      armed = { matches, sqlstate };
+    },
+  };
+}
+
 describe('signing in again after the sessions were ended', () => {
   const holds = statementHolds();
+  const refusals = statementRefusals();
   let t: TestApp;
   let org: TestOrg;
   let owner: Operator;
@@ -94,7 +139,9 @@ describe('signing in again after the sessions were ended', () => {
   };
 
   beforeAll(async () => {
-    t = await startTestApp({}, 1000, { wrapPool: holds.wrapPool });
+    t = await startTestApp({}, 1000, {
+      wrapPool: (pool) => refusals.wrapPool(holds.wrapPool(pool)),
+    });
     const provider: IdentityProvider = {
       beginLogin: (options) => {
         idp.begins.push(options);
@@ -304,6 +351,38 @@ describe('signing in again after the sessions were ended', () => {
     expect(await unscopedLoginFailures('member_locked')).toBe(before + 1);
     expect(await liveSessions(locked.membershipId)).toBe(0);
   });
+
+  // Step 26 of the poteto adoption plan: the callback asks the classifier for a transient
+  // failure, so a deadlock, a serialization failure and a statement timeout take the lock
+  // timeout's path (they answered a 500 with no audit row before).
+  it.each([
+    ['a deadlock', '40P01'],
+    ['a serialization failure', '40001'],
+    ['a statement timeout', '57014'],
+  ])(
+    'records a sign-in ended by %s (%s) as member_locked and redirects with provider_unavailable',
+    async (_, sqlstate) => {
+      const ended = await addMember(org, 'editor');
+      const sub = idp.sub;
+      idp.sub = ended.oidcSub;
+      idp.authTime = nowSeconds();
+      const before = await unscopedLoginFailures('member_locked');
+      try {
+        const login = await startLogin();
+        refusals.refuseNext((text) => text.includes('sec.session_create'), sqlstate);
+        const response = await callback(login);
+        expect(response.status).toBe(303);
+        expect(response.headers.get('location')).toBe(
+          `${PORTAL_ORIGIN}/?authError=provider_unavailable`,
+        );
+        expect(setCookie(response, t.config.sessionCookieName) ?? '').toBe('');
+      } finally {
+        idp.sub = sub;
+      }
+      expect(await unscopedLoginFailures('member_locked')).toBe(before + 1);
+      expect(await liveSessions(ended.membershipId)).toBe(0);
+    },
+  );
 
   it('locks the member row before the old session, so a revocation meanwhile cannot deadlock', async () => {
     // The member's browser still sends a live session cookie.

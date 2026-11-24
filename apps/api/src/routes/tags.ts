@@ -16,19 +16,18 @@ import {
   type TagDto,
   type TagListResponse,
 } from '@tinnox/contracts';
-import {
-  readOrg,
-  STAGE_A_CONSTRAINTS,
-  violatedConstraint,
-  withCountedLimit,
-  type OrgReadTx,
-} from '@tinnox/db';
+import { readOrg, withCountedLimit, type OrgReadTx } from '@tinnox/db';
 import type { FastifyInstance } from 'fastify';
-import { changeAsOperator, requirePermission, tagScopeKey } from '../auth/permissions.ts';
+import {
+  changeAsOperator,
+  requirePermission,
+  tagScopeKey,
+  type ConstraintAnswers,
+} from '../auth/permissions.ts';
 import { operatorOf } from '../auth/session.ts';
 import type { AppContext } from '../context.ts';
 import { bigintToNumber } from '../db-helpers.ts';
-import { HttpError, notFound, parseInput, pgErrorCode } from '../errors.ts';
+import { HttpError, notFound, parseInput } from '../errors.ts';
 
 interface TagRow {
   id: string;
@@ -75,11 +74,8 @@ async function loadTag(tx: OrgReadTx, id: string): Promise<TagDto | null> {
 const nameTaken = (): HttpError =>
   new HttpError(409, 'conflict', 'Another tag of this kind already has that name.');
 
-function isNameTaken(error: unknown): boolean {
-  return (
-    pgErrorCode(error) === '23505' && violatedConstraint(error) === STAGE_A_CONSTRAINTS.tagNameTaken
-  );
-}
+/** Another tag of the organisation and scope has the name, ignoring case: its unique key refuses. */
+const NAME_TAKEN = { tag_org_scope_name_key: nameTaken } as const satisfies ConstraintAnswers;
 
 export function registerTagRoutes(app: FastifyInstance, ctx: AppContext): void {
   const { db } = ctx;
@@ -102,9 +98,10 @@ export function registerTagRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.post(ROUTES.tags, async (request, reply): Promise<TagDto> => {
     const session = operatorOf(request);
     const input = parseInput(TagCreateSchema, request.body, 'tag');
-    let created: TagDto;
-    try {
-      created = await changeAsOperator(ctx, request, async (tx) => {
+    const created = await changeAsOperator(
+      ctx,
+      request,
+      async (tx) => {
         // One at a time per organisation, so the ceiling cannot be passed by a burst.
         const id = await withCountedLimit(
           tx,
@@ -150,11 +147,9 @@ export function registerTagRoutes(app: FastifyInstance, ctx: AppContext): void {
             detail: { scope: input.scope, colour: input.colour },
           },
         };
-      });
-    } catch (error) {
-      if (isNameTaken(error)) throw nameTaken();
-      throw error;
-    }
+      },
+      { constraints: NAME_TAKEN },
+    );
     void reply.code(201);
     return created;
   });
@@ -163,8 +158,10 @@ export function registerTagRoutes(app: FastifyInstance, ctx: AppContext): void {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     const patch = parseInput(TagPatchSchema, request.body, 'tag');
-    try {
-      return await changeAsOperator(ctx, request, async (tx, role) => {
+    return changeAsOperator(
+      ctx,
+      request,
+      async (tx, role) => {
         // The scope decides the key; the row stays locked until the change commits.
         const stored = await tx.query<{ scope: string }>(
           'SELECT scope FROM tag WHERE id = $1 AND org_id = app_org_id() FOR UPDATE',
@@ -193,11 +190,9 @@ export function registerTagRoutes(app: FastifyInstance, ctx: AppContext): void {
             detail: { fields: Object.keys(patch).sort() },
           },
         };
-      });
-    } catch (error) {
-      if (isNameTaken(error)) throw nameTaken();
-      throw error;
-    }
+      },
+      { constraints: NAME_TAKEN },
+    );
   });
 
   // Removes the tag from everything that carried it (the join rows cascade).

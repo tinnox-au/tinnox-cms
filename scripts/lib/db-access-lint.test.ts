@@ -912,6 +912,11 @@ describe('the unscoped helpers (AG-2.2)', { timeout: 30_000 }, () => {
       expect.stringMatching(unscoped('poolAsTx')),
     ]);
     expect(await flagged(path, "import * as db from '@tinnox/db';", IMPORTS)).toEqual([
+      // A namespace carries the constraint reader, which API source does not import (step 26;
+      // scripts/lib/sqlstate-lint.test.ts)...
+      expect.stringMatching(
+        /^\* import is invalid because 'violatedConstraint' from '@tinnox\/db' is restricted from being used by a pattern\. Do not read the constraint of a database error in API source \(step 26\)/,
+      ),
       expect.stringMatching(
         /^\* import is invalid because 'poolAsTx' from '@tinnox\/db' is restricted from being used by a pattern\. poolAsTx runs without an organisation/,
       ),

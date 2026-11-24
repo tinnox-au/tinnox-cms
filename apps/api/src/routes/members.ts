@@ -35,9 +35,7 @@ import {
   sessionRevokeMembership,
   sql,
   sqlParameter,
-  STAGE_C_CONSTRAINTS,
   unaudited,
-  violatedConstraint,
   withCountedLimit,
   type AuditInput,
   type SqlFragment,
@@ -45,11 +43,16 @@ import {
 } from '@tinnox/db';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { recordPermissionDenied, type DenialReason } from '../auth/permission-audit.ts';
-import { changeAsOperator, parseRole, PermissionDeniedError } from '../auth/permissions.ts';
+import {
+  changeAsOperator,
+  parseRole,
+  PermissionDeniedError,
+  type ConstraintAnswers,
+} from '../auth/permissions.ts';
 import { operatorOf, type OperatorSession } from '../auth/session.ts';
 import { perMinute, type AppContext } from '../context.ts';
 import { bigintToNumber, iso, isoOrNull } from '../db-helpers.ts';
-import { HttpError, notFound, parseInput, pgErrorCode } from '../errors.ts';
+import { HttpError, notFound, parseInput } from '../errors.ts';
 
 interface MemberRow {
   id: string;
@@ -153,25 +156,29 @@ const inviteNameTaken = (): HttpError =>
 const inviteEmailTaken = (): HttpError =>
   fieldConflict('email', 'An invite for this address is already waiting.');
 
-function isUniqueViolation(error: unknown, constraint: string): boolean {
-  return pgErrorCode(error) === '23505' && violatedConstraint(error) === constraint;
-}
+/**
+ * A last-Owner refusal from the database trigger answers 409 `last_owner`, which answerRefusal
+ * then records (the API's own check comes first; the trigger is the last word).
+ */
+const LAST_OWNER = { membership_last_owner: lastOwner } as const satisfies ConstraintAnswers;
+
+/** An invite that a race past the checks made a duplicate of a pending one. */
+const INVITE_TAKEN = {
+  member_invite_pending_email_key: inviteEmailTaken,
+  member_invite_pending_name_key: inviteNameTaken,
+} as const satisfies ConstraintAnswers;
 
 /**
- * Records a refused change that answered 409 and rethrows the answer. Every other error is
- * rethrown as it is; a last-Owner refusal from the database trigger becomes 409 `last_owner`.
+ * Records a refused change that answered 409 (RefusedConflict, the last-Owner answer of
+ * LAST_OWNER included) and rethrows the answer. Every other error is rethrown as it is.
  */
 async function answerRefusal(
   ctx: AppContext,
   request: FastifyRequest,
   session: OperatorSession,
   targetId: string,
-  error: unknown,
+  refusal: unknown,
 ): Promise<never> {
-  const refusal =
-    pgErrorCode(error) === '23001' && violatedConstraint(error) === STAGE_C_CONSTRAINTS.lastOwner
-      ? lastOwner()
-      : error;
   if (refusal instanceof RefusedConflict) {
     await recordPermissionDenied(ctx, request, session, {
       keys: ['member.manage'],
@@ -393,10 +400,12 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): voi
           }
           return { value: { member: toMemberDto(row), sessionsEnded, invitesCancelled }, audit };
         },
-        { lockMembership: true },
+        {
+          lockMembership: true,
+          constraints: { ...LAST_OWNER, membership_org_display_name_key: memberNameTaken },
+        },
       );
     } catch (error) {
-      if (isUniqueViolation(error, STAGE_C_CONSTRAINTS.memberNameTaken)) throw memberNameTaken();
       return answerRefusal(ctx, request, session, id, error);
     }
   });
@@ -447,7 +456,7 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): voi
               ],
             };
           },
-          { lockMembership: true },
+          { lockMembership: true, constraints: LAST_OWNER },
         );
       } catch (error) {
         return answerRefusal(ctx, request, session, id, error);
@@ -504,87 +513,80 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): voi
   app.post(ROUTES.invites, writeLimit, async (request, reply): Promise<InviteDto> => {
     const session = operatorOf(request);
     const input = parseInput(InviteCreateSchema, request.body, 'invite');
-    let created: InviteDto;
-    try {
-      created = await changeAsOperator(
-        ctx,
-        request,
-        async (tx, role) => {
-          if (!grantableRoles(role, 'invite').includes(input.role)) throw refused('grant', null);
-          // shortcut: 100 pending invites per organisation, counted under the membership lock,
-          // which { lockMembership: true } already took before the role check (taking it again is
-          // free); raise ABSOLUTE.maxPendingInvites (and page the list) when self-service sign-up
-          // (CMS-20) lands.
-          const row = await withCountedLimit(
-            tx,
-            {
-              lock: 'membership',
-              count: async (counting) => {
-                const pending = await counting.query<{ n: string }>(
-                  "SELECT count(*) AS n FROM member_invite WHERE org_id = app_org_id() AND status = 'pending'",
-                );
-                return bigintToNumber(pending.rows[0]?.n ?? 0);
-              },
-              max: ABSOLUTE.maxPendingInvites,
-              whenFull: () => {
-                throw new HttpError(
-                  409,
-                  'conflict',
-                  `The organisation already has ${ABSOLUTE.maxPendingInvites} invites waiting for TINNOX. Cancel ones that are no longer needed.`,
-                );
-              },
+    const created = await changeAsOperator(
+      ctx,
+      request,
+      async (tx, role) => {
+        if (!grantableRoles(role, 'invite').includes(input.role)) throw refused('grant', null);
+        // shortcut: 100 pending invites per organisation, counted under the membership lock,
+        // which { lockMembership: true } already took before the role check (taking it again is
+        // free); raise ABSOLUTE.maxPendingInvites (and page the list) when self-service sign-up
+        // (CMS-20) lands.
+        const row = await withCountedLimit(
+          tx,
+          {
+            lock: 'membership',
+            count: async (counting) => {
+              const pending = await counting.query<{ n: string }>(
+                "SELECT count(*) AS n FROM member_invite WHERE org_id = app_org_id() AND status = 'pending'",
+              );
+              return bigintToNumber(pending.rows[0]?.n ?? 0);
             },
-            async () => {
-              // A removed member's name is allowed: a person who comes back keeps their row and name.
-              const nameUsed = await tx.query(
-                `SELECT 1 FROM membership
+            max: ABSOLUTE.maxPendingInvites,
+            whenFull: () => {
+              throw new HttpError(
+                409,
+                'conflict',
+                `The organisation already has ${ABSOLUTE.maxPendingInvites} invites waiting for TINNOX. Cancel ones that are no longer needed.`,
+              );
+            },
+          },
+          async () => {
+            // A removed member's name is allowed: a person who comes back keeps their row and name.
+            const nameUsed = await tx.query(
+              `SELECT 1 FROM membership
                  WHERE org_id = app_org_id() AND lower(display_name) = lower($1) AND removed_at IS NULL
                  UNION ALL
                  SELECT 1 FROM member_invite
                  WHERE org_id = app_org_id() AND status = 'pending' AND lower(name) = lower($1)
                  LIMIT 1`,
-                [input.name],
-              );
-              if (nameUsed.rows.length > 0) throw inviteNameTaken();
-              const emailUsed = await tx.query(
-                `SELECT 1 FROM member_invite
+              [input.name],
+            );
+            if (nameUsed.rows.length > 0) throw inviteNameTaken();
+            const emailUsed = await tx.query(
+              `SELECT 1 FROM member_invite
                  WHERE org_id = app_org_id() AND status = 'pending' AND lower(email) = lower($1)
                  LIMIT 1`,
-                [input.email],
-              );
-              if (emailUsed.rows.length > 0) throw inviteEmailTaken();
-              const inserted = await tx.query<InviteRow>(
-                `INSERT INTO member_invite (org_id, role, name, email, invited_by, expires_at)
+              [input.email],
+            );
+            if (emailUsed.rows.length > 0) throw inviteEmailTaken();
+            const inserted = await tx.query<InviteRow>(
+              `INSERT INTO member_invite (org_id, role, name, email, invited_by, expires_at)
                  VALUES (app_org_id(), $1, $2, $3, $4, now() + interval '14 days')
                  RETURNING ${INVITE_COLUMNS}`,
-                [input.role, input.name, input.email, session.membershipId],
-              );
-              const invite = inserted.rows[0];
-              if (invite === undefined) throw new Error('invite insert returned no row');
-              return invite;
-            },
-          );
-          return {
-            value: toInviteDto(row),
-            audit: {
-              actorType: 'operator',
-              actorId: session.membershipId,
-              action: 'invite.create',
-              objectType: 'invite',
-              objectId: row.id,
-              result: 'success',
-              detail: { role: input.role },
-            },
-          };
-        },
-        { lockMembership: true },
-      );
-    } catch (error) {
-      // A race past the checks above (the membership lock makes it unlikely).
-      if (isUniqueViolation(error, STAGE_C_CONSTRAINTS.inviteEmailTaken)) throw inviteEmailTaken();
-      if (isUniqueViolation(error, STAGE_C_CONSTRAINTS.inviteNameTaken)) throw inviteNameTaken();
-      throw error;
-    }
+              [input.role, input.name, input.email, session.membershipId],
+            );
+            const invite = inserted.rows[0];
+            if (invite === undefined) throw new Error('invite insert returned no row');
+            return invite;
+          },
+        );
+        return {
+          value: toInviteDto(row),
+          audit: {
+            actorType: 'operator',
+            actorId: session.membershipId,
+            action: 'invite.create',
+            objectType: 'invite',
+            objectId: row.id,
+            result: 'success',
+            detail: { role: input.role },
+          },
+        };
+      },
+      // A race past the checks inside (the membership lock makes it unlikely).
+      { lockMembership: true, constraints: INVITE_TAKEN },
+    );
     void reply.code(201);
     return created;
   });

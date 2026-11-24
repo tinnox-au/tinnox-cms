@@ -29,22 +29,15 @@ import {
   type PublishResponse,
   type Transition,
 } from '@tinnox/contracts';
-import {
-  readOrg,
-  STAGE_A_CONSTRAINTS,
-  unaudited,
-  violatedConstraint,
-  type Change,
-  type OrgReadTx,
-} from '@tinnox/db';
+import { readOrg, unaudited, type Change, type OrgReadTx } from '@tinnox/db';
 import { isAppDraftItem, validatePlaylist } from '@tinnox/domain';
 import type { FastifyInstance } from 'fastify';
 import { APP_COLUMNS, toAppDto, type AppRow } from '../app-rows.ts';
-import { changeAsOperator } from '../auth/permissions.ts';
+import { changeAsOperator, type ConstraintAnswers } from '../auth/permissions.ts';
 import { operatorOf } from '../auth/session.ts';
 import { perMinute, type AppContext } from '../context.ts';
 import { accept, bigintToNumber, iso, refuse, type Decision } from '../db-helpers.ts';
-import { HttpError, notFound, parseInput, pgErrorCode } from '../errors.ts';
+import { HttpError, notFound, parseInput } from '../errors.ts';
 import { MEDIA_COLUMNS, toMediaDto, type MediaRow } from '../media/rows.ts';
 import {
   auditRejectedPublication,
@@ -60,8 +53,38 @@ import {
   lockPublishKey,
   planDraft,
   publicationRejected,
+  PublishRaceLost,
   type PublicationRow,
 } from '../publishing.ts';
+
+/** A file or an app of a playlist being saved was deleted between the check and the write. */
+const itemDeletedMeanwhile = (): HttpError =>
+  new HttpError(
+    409,
+    'conflict',
+    'A file or app in this playlist was deleted meanwhile. Reload and try again.',
+  );
+const ITEM_GONE = {
+  playlist_item_media_id_org_id_fkey: itemDeletedMeanwhile,
+  playlist_item_app_fk: itemDeletedMeanwhile,
+} as const satisfies ConstraintAnswers;
+
+/**
+ * A publish: a concurrent request with the same key won (run again, which returns its
+ * publication), or a file of the playlist, or the playlist the display is given, went away
+ * between the plan and the write.
+ */
+const publishChangedMeanwhile = (): HttpError =>
+  new HttpError(
+    409,
+    'conflict',
+    'A file, app or screen used by this playlist changed meanwhile. Try again.',
+  );
+const PUBLISH_RACES = {
+  publication_idempotency: () => new PublishRaceLost(),
+  publication_asset_media_id_org_id_fkey: publishChangedMeanwhile,
+  display_assigned_playlist_fk: publishChangedMeanwhile,
+} as const satisfies ConstraintAnswers;
 
 interface PlaylistRow {
   id: string;
@@ -286,8 +309,10 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     const input = parseInput(PlaylistReplaceSchema, request.body, 'playlist');
-    try {
-      return await changeAsOperator(ctx, request, async (tx) => {
+    return changeAsOperator(
+      ctx,
+      request,
+      async (tx) => {
         const locked = await tx.query(
           `SELECT 1 FROM playlist
            WHERE id = $1 AND org_id = app_org_id() AND deleted_at IS NULL FOR UPDATE`,
@@ -366,17 +391,9 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
             },
           },
         };
-      });
-    } catch (error) {
-      if (pgErrorCode(error) === '23503') {
-        throw new HttpError(
-          409,
-          'conflict',
-          'A file or app in this playlist was deleted meanwhile. Reload and try again.',
-        );
-      }
-      throw error;
-    }
+      },
+      { constraints: ITEM_GONE },
+    );
   });
 
   /**
@@ -457,8 +474,10 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     const inUse = (message: string, details?: { path: string; message: string }[]): HttpError =>
       new HttpError(409, 'playlist_in_use', message, details === undefined ? {} : { details });
-    try {
-      await changeAsOperator(ctx, request, async (tx) => {
+    await changeAsOperator(
+      ctx,
+      request,
+      async (tx) => {
         const locked = await tx.query(
           `SELECT 1 FROM playlist
            WHERE id = $1 AND org_id = app_org_id() AND deleted_at IS NULL FOR UPDATE`,
@@ -527,20 +546,18 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
             detail: { itemCount: removed.rowCount ?? 0 },
           },
         };
-      });
-    } catch (error) {
-      // A display was given this playlist, or a schedule or a layout took it, between
-      // the checks above and the delete; the database guard refuses.
-      if (
-        pgErrorCode(error) === '23001' &&
-        violatedConstraint(error) === STAGE_A_CONSTRAINTS.playlistStillAssigned
-      ) {
-        throw inUse(
-          'This playlist has just been assigned to a screen or added to a schedule or a layout. Try again.',
-        );
-      }
-      throw error;
-    }
+      },
+      {
+        // A display was given this playlist, or a schedule or a layout took it, between
+        // the checks above and the delete; the database guard refuses.
+        constraints: {
+          playlist_delete_guard: () =>
+            inUse(
+              'This playlist has just been assigned to a screen or added to a schedule or a layout. Try again.',
+            ),
+        },
+      },
+    );
     return reply.code(204).send();
   });
 
@@ -653,6 +670,7 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
               audit: made.audit,
             };
           },
+          { constraints: PUBLISH_RACES },
         );
         if (!decision.ok) throw decision.error;
         return decision.value;
@@ -662,19 +680,9 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
       try {
         outcome = await attempt();
       } catch (error) {
-        const pg = pgErrorCode(error);
-        if (pg === '23505') {
-          // Lost a race the advisory lock should already prevent; the winner's row is returned.
-          outcome = await attempt();
-        } else if (pg === '23503') {
-          throw new HttpError(
-            409,
-            'conflict',
-            'A file, app or screen used by this playlist changed meanwhile. Try again.',
-          );
-        } else {
-          throw error;
-        }
+        // Lost a race the advisory lock should already prevent; the winner's row is returned.
+        if (!(error instanceof PublishRaceLost)) throw error;
+        outcome = await attempt();
       }
       void reply.code(outcome.created ? 201 : 200);
       return outcome.response;

@@ -9,6 +9,7 @@
  * member and invite changes are always written.
  */
 import type { PermissionKey } from '@tinnox/contracts';
+import { classifyDbError, isCommitOutcomeUnknown } from '@tinnox/db';
 import type { FastifyRequest } from 'fastify';
 import type { AppContext } from '../context.ts';
 import { AuthFailureGuard } from './failure-guard.ts';
@@ -60,11 +61,14 @@ function guardOf(ctx: AppContext): AuthFailureGuard {
 
 /**
  * Writes the `security.permission_denied` row of a refused state-changing request, in its own
- * transaction. Refused reads are not recorded. Any failure is logged and swallowed, a refusal
- * of the row itself included because the route's refusal statement does not state it (a
- * programming error that no test or guard sees, since nothing changed; AUD-9): the refusal
- * stands whether or not it could be recorded. Every caller records only an unsafe method, and
- * OPERATOR_GUARD_AUDIT (apps/api/src/route-audit.ts) states the row for all of them.
+ * transaction. Refused reads are not recorded. An error the database raised while writing it,
+ * or a COMMIT of the row that did not confirm, is logged and swallowed: the refusal stands
+ * whether or not it could be recorded, and answering `commit_outcome_unknown` would say the
+ * refused change may have been saved. Anything else is rethrown (AUD-9, step 26): `changeOrg`
+ * refusing the row because the route's refusal statement does not state it is a programming
+ * error, and fails the request loudly instead of losing the row. Every caller records only an
+ * unsafe method, and OPERATOR_GUARD_AUDIT (apps/api/src/route-audit.ts) states the row for all
+ * of them.
  */
 export async function recordPermissionDenied(
   ctx: AppContext,
@@ -96,6 +100,7 @@ export async function recordPermissionDenied(
       },
     });
   } catch (error) {
+    if (classifyDbError(error) === null && !isCommitOutcomeUnknown(error)) throw error;
     request.log.error({ err: error }, 'failed to record permission refusal');
   }
 }

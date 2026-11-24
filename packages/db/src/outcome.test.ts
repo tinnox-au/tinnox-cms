@@ -13,7 +13,7 @@ import {
   STAGE_C_CONSTRAINTS,
   type ConstraintName,
 } from './constraints.ts';
-import { classifyDbError, type DbFailure } from './outcome.ts';
+import { classifyDbError, isLockTimeout, type DbFailure } from './outcome.ts';
 
 /** What PostgreSQL sends when it refuses a statement, as the pg driver parses it. */
 function serverError(code: string | undefined, constraint?: string): pg.DatabaseError {
@@ -137,6 +137,17 @@ describe('classifyDbError (step 25)', () => {
       expect(unknown).toBeInstanceOf(CommitOutcomeUnknownError);
       expect(classifyDbError(unknown)).toBeNull();
     }
+  });
+
+  it('tells a lock timeout from the other transient failures (step 26)', () => {
+    expect(isLockTimeout(classifyDbError(serverError('55P03')))).toBe(true);
+    for (const code of ['40001', '40P01', '57014', '23505', '42501']) {
+      expect(isLockTimeout(classifyDbError(serverError(code))), code).toBe(false);
+    }
+    // Only an error the server raised: a look-alike with the code is not one.
+    const lookalike = Object.assign(new Error('lock timeout'), { code: '55P03' });
+    expect(isLockTimeout(classifyDbError(lookalike))).toBe(false);
+    expect(isLockTimeout(classifyDbError(commitFailure(serverError('57P01'))))).toBe(false);
   });
 
   it('returns a closed union', () => {

@@ -3,7 +3,7 @@
  * carry stack traces, SQL text or internal messages.
  */
 import { apiError, HEADERS, type ApiErrorCode, type ApiErrorDetail } from '@tinnox/contracts';
-import { errorField, isCommitOutcomeUnknown } from '@tinnox/db';
+import { classifyDbError, errorField, isCommitOutcomeUnknown } from '@tinnox/db';
 import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { z } from 'zod';
 
@@ -50,8 +50,11 @@ export function parseInput<S extends z.ZodType>(
   throw new HttpError(400, 'validation_failed', `The ${what} is not valid.`, { details });
 }
 
-/** PostgreSQL error code of an unknown error, or null. */
-export function pgErrorCode(error: unknown): string | null {
+/**
+ * PostgreSQL error code of an unknown error, or null: for the log only. What a code means is
+ * classifyDbError's (@tinnox/db), so nothing outside this file reads one (step 26).
+ */
+function pgErrorCode(error: unknown): string | null {
   if (typeof error !== 'object' || error === null) return null;
   const code = errorField(error, 'code');
   return typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) ? code : null;
@@ -185,14 +188,23 @@ export function registerErrorHandling(app: FastifyInstance): void {
 
     // Database errors that mean "that row is not yours" (docs/dev-handoff.md section 5):
     // answered as not found, never as a message that confirms another tenant's row.
+    const failure = classifyDbError(error);
     const pg = pgErrorCode(error);
-    if (pg === '42501') {
+    if (failure?.kind === 'denied') {
       request.log.warn({ pgCode: pg }, 'database refused the statement');
       send(request, reply, 404, 'not_found', 'The requested item was not found.');
       return;
     }
-    if (pg !== null) {
-      request.log.error({ pgCode: pg, err: { name: error.name } }, 'unhandled database error');
+    if (failure !== null) {
+      // A constraint no route maps is logged by its name (adoption plan section 2.3).
+      const constraint =
+        failure.kind === 'constraint' || failure.kind === 'unmapped_constraint'
+          ? { constraint: failure.name }
+          : {};
+      request.log.error(
+        { pgCode: pg, ...constraint, err: { name: error.name } },
+        'unhandled database error',
+      );
       send(request, reply, 500, 'internal_error', 'Something went wrong. Try again.');
       return;
     }

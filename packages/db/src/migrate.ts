@@ -16,8 +16,8 @@ import {
 } from './change.ts';
 import { commitMigration, isCommitOutcomeUnknown } from './commit-outcome.ts';
 import { registerOwnHandle, type Database } from './database.ts';
-import { errorField } from './error-field.ts';
 import { mintOrgId } from './org-id.ts';
+import { classifyDbError, isLockTimeout } from './outcome.ts';
 import type { Pool } from './pool.ts';
 import {
   SchemaInvariantError,
@@ -190,8 +190,6 @@ const ADVISORY_LOCK_KEY = 7_411_660_001;
  * for ad-hoc sessions as tinnox_migrator.
  */
 export const MIGRATION_LOCK_TIMEOUT = '30s';
-/** SQLSTATE lock_not_available: a lock wait passed MIGRATION_LOCK_TIMEOUT. */
-const LOCK_NOT_AVAILABLE = '55P03';
 
 export type MigrationNameProblem =
   | { readonly kind: 'pattern'; readonly name: string }
@@ -276,7 +274,7 @@ export async function runMigrations(options: MigrationOptions): Promise<Migratio
       .query('SELECT pg_advisory_lock($1)', [ADVISORY_LOCK_KEY])
       .catch((error: unknown) => {
         // PostgreSQL's own text does not say whose lock it waited for (review finding BEH-2).
-        if (errorField(error, 'code') !== LOCK_NOT_AVAILABLE) throw error;
+        if (!isLockTimeout(classifyDbError(error))) throw error;
         throw new Error(
           `another migration run holds the runner's advisory lock and did not finish within ` +
             `${MIGRATION_LOCK_TIMEOUT}: wait for it to finish and run db:migrate again`,

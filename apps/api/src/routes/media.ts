@@ -24,24 +24,39 @@ import {
 import {
   CommitOutcomeUnknownError,
   readOrg,
-  STAGE_A_CONSTRAINTS,
-  violatedConstraint,
   withCountedLimit,
   type Change,
   type OrgReadTx,
 } from '@tinnox/db';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { abandonBody, changeAsOperator } from '../auth/permissions.ts';
+import { abandonBody, changeAsOperator, type ConstraintAnswers } from '../auth/permissions.ts';
 import { recordRefusal } from '../auth/refusal.ts';
 import { operatorOf, type OperatorSession } from '../auth/session.ts';
 import { perMinute, type AppContext } from '../context.ts';
 import { accept, refuse, type Decision } from '../db-helpers.ts';
-import { HttpError, notFound, parseInput, pgErrorCode } from '../errors.ts';
+import { HttpError, notFound, parseInput } from '../errors.ts';
 import { MEDIA_COLUMNS, toMediaDto, usedBytes, type MediaRow } from '../media/rows.ts';
 import { serveObject } from '../media/serve.ts';
 import { sniffMediaType } from '../media/sniff.ts';
 import { displayNameFromUpload } from '../media/upload-name.ts';
-import { isUnknownTag, replaceTags } from '../tags.ts';
+import { replaceTags, UNKNOWN_TAG } from '../tags.ts';
+
+/** The folder or a tag of a media change was deleted between the check and the write. */
+const FOLDER_OR_TAG_GONE = {
+  media_folder_fk: () => notFound('The folder'),
+  ...UNKNOWN_TAG,
+} as const satisfies ConstraintAnswers;
+
+/**
+ * A publish or a playlist edit referenced the media item between the checks of its delete and
+ * the DELETE. The two keys that point at a media item and do not cascade.
+ */
+const usedMeanwhile = (): HttpError =>
+  new HttpError(409, 'media_in_use', 'This file has just been used elsewhere. Try again.');
+const USED_MEANWHILE = {
+  playlist_item_media_id_org_id_fkey: usedMeanwhile,
+  publication_asset_media_id_org_id_fkey: usedMeanwhile,
+} as const satisfies ConstraintAnswers;
 
 /** What a refused upload records: the reason and sizes, never the file or its name. */
 type UploadRefusal = Extract<AuditEventShapes['media.upload']['detail'], { reason: unknown }>;
@@ -300,8 +315,10 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     const patch = parseInput(MediaPatchSchema, request.body, 'media item');
-    try {
-      return await changeAsOperator(ctx, request, async (tx) => {
+    return changeAsOperator(
+      ctx,
+      request,
+      async (tx) => {
         const locked = await tx.query<{
           kind: 'image' | 'video';
           name: string | null;
@@ -399,18 +416,9 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
             detail: { fields: Object.keys(patch).sort() },
           },
         };
-      });
-    } catch (error) {
-      // The folder or a tag was deleted between the check above and the write.
-      if (
-        pgErrorCode(error) === '23503' &&
-        violatedConstraint(error) === STAGE_A_CONSTRAINTS.mediaFolder
-      ) {
-        throw notFound('The folder');
-      }
-      if (isUnknownTag(error)) throw notFound('The tag');
-      throw error;
-    }
+      },
+      { constraints: FOLDER_OR_TAG_GONE },
+    );
   });
 
   /**
@@ -519,9 +527,10 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
   app.delete(ROUTES.mediaItemPattern, async (request, reply) => {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
-    let keysToRemove: (string | null)[];
-    try {
-      keysToRemove = await changeAsOperator(ctx, request, async (tx) => {
+    const keysToRemove = await changeAsOperator(
+      ctx,
+      request,
+      async (tx): Promise<Change<(string | null)[]>> => {
         const { rows } = await tx.query<{
           status: string;
           storage_key: string | null;
@@ -585,18 +594,9 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
             detail: { bytesRetainedForPublications: retained },
           },
         };
-      });
-    } catch (error) {
-      // A publish or playlist edit referenced the row between the checks and the DELETE.
-      if (pgErrorCode(error) === '23503') {
-        throw new HttpError(
-          409,
-          'media_in_use',
-          'This file has just been used elsewhere. Try again.',
-        );
-      }
-      throw error;
-    }
+      },
+      { constraints: USED_MEANWHILE },
+    );
     for (const key of keysToRemove) {
       if (key === null) continue;
       try {

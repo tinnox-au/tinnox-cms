@@ -7,11 +7,14 @@
 import pg from 'pg';
 import { CONSTRAINTS, isConstraintName, type ConstraintName } from './constraints.ts';
 
+/** SQLSTATE lock_not_available: a lock wait ran past `lock_timeout`. */
+const LOCK_NOT_AVAILABLE = '55P03';
+
 /** SQLSTATEs after which the same statement may succeed if sent again in a new transaction. */
 const TRANSIENT = [
   '40001', // serialization_failure
   '40P01', // deadlock_detected
-  '55P03', // lock_not_available: lock_timeout ran out
+  LOCK_NOT_AVAILABLE, // 55P03: lock_timeout ran out
   '57014', // query_canceled: statement_timeout ran out
 ] as const;
 export type TransientSqlstate = (typeof TRANSIENT)[number];
@@ -68,4 +71,20 @@ export function classifyDbError(error: unknown): DbFailure | null {
   if (sqlstate === INSUFFICIENT_PRIVILEGE) return { kind: 'denied' };
   if (isTransient(sqlstate)) return { kind: 'transient', sqlstate };
   return { kind: 'other', sqlstate };
+}
+
+/** The failure of a statement that waited for a lock longer than `lock_timeout`. */
+export type LockTimeout = Extract<DbFailure, { kind: 'transient' }> & {
+  readonly sqlstate: typeof LOCK_NOT_AVAILABLE;
+};
+
+/**
+ * True when classifyDbError found the server's lock_not_available (55P03): a statement waited
+ * for a lock longer than `lock_timeout`. The one transient failure the API answers on its own
+ * (503 with Retry-After, lockTimeoutAsUnavailable in apps/api/src/auth/permissions.ts) and the
+ * migration runner reports as a busy advisory lock (./migrate.ts), so neither reads the SQLSTATE
+ * itself (step 26).
+ */
+export function isLockTimeout(failure: DbFailure | null): failure is LockTimeout {
+  return failure?.kind === 'transient' && failure.sqlstate === LOCK_NOT_AVAILABLE;
 }

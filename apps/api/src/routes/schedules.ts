@@ -20,11 +20,11 @@ import {
 } from '@tinnox/contracts';
 import { readOrg, type Change, type OrgReadTx, type OrgTx } from '@tinnox/db';
 import type { FastifyInstance } from 'fastify';
-import { changeAsOperator } from '../auth/permissions.ts';
+import { changeAsOperator, type ConstraintAnswers } from '../auth/permissions.ts';
 import { operatorOf, type OperatorSession } from '../auth/session.ts';
 import type { AppContext } from '../context.ts';
 import { bigintToNumber, iso } from '../db-helpers.ts';
-import { HttpError, notFound, parseInput, pgErrorCode } from '../errors.ts';
+import { HttpError, notFound, parseInput } from '../errors.ts';
 
 interface ScheduleRow {
   id: string;
@@ -214,20 +214,31 @@ async function saveSchedule(
   };
 }
 
-/** A playlist went away between the check in `saveSchedule` and the write: the database refuses. */
-function playlistDeletedMeanwhile(error: unknown): HttpError | null {
-  const pg = pgErrorCode(error);
-  return pg === '23503' || pg === '23001'
-    ? new HttpError(
-        409,
-        'conflict',
-        'A playlist in this schedule was deleted meanwhile. Reload and try again.',
-      )
-    : null;
-}
+/**
+ * A playlist went away between the check in `saveSchedule` and the write: its foreign key or its
+ * guard refuses.
+ */
+const playlistDeletedMeanwhile = (): HttpError =>
+  new HttpError(
+    409,
+    'conflict',
+    'A playlist in this schedule was deleted meanwhile. Reload and try again.',
+  );
+const PLAYLIST_GONE = {
+  schedule_default_playlist_fk: playlistDeletedMeanwhile,
+  schedule_default_playlist_guard: playlistDeletedMeanwhile,
+  schedule_event_playlist_fk: playlistDeletedMeanwhile,
+  schedule_event_playlist_guard: playlistDeletedMeanwhile,
+} as const satisfies ConstraintAnswers;
 
 const scheduleInUse = (message: string, details?: { path: string; message: string }[]): HttpError =>
   new HttpError(409, 'schedule_in_use', message, details === undefined ? {} : { details });
+
+/** A display took the schedule between the check of its delete and the DELETE. */
+const ASSIGNED_MEANWHILE = {
+  display_assigned_schedule_fk: () =>
+    scheduleInUse('This schedule has just been assigned to a screen. Try again.'),
+} as const satisfies ConstraintAnswers;
 
 export function registerScheduleRoutes(app: FastifyInstance, ctx: AppContext): void {
   const { db } = ctx;
@@ -255,17 +266,18 @@ export function registerScheduleRoutes(app: FastifyInstance, ctx: AppContext): v
   app.post(ROUTES.schedules, async (request, reply): Promise<ScheduleDto> => {
     const session = operatorOf(request);
     const input = parseInput(ScheduleInputSchema, request.body, 'schedule');
-    try {
-      const dto = await changeAsOperator(ctx, request, async (tx) => {
+    const dto = await changeAsOperator(
+      ctx,
+      request,
+      async (tx) => {
         const saved = await saveSchedule(tx, session, null, input);
         if (saved === null) throw new Error('created schedule is not visible');
         return saved;
-      });
-      void reply.code(201);
-      return dto;
-    } catch (error) {
-      throw playlistDeletedMeanwhile(error) ?? error;
-    }
+      },
+      { constraints: PLAYLIST_GONE },
+    );
+    void reply.code(201);
+    return dto;
   });
 
   app.get(ROUTES.schedulePattern, async (request): Promise<ScheduleDto> => {
@@ -285,15 +297,16 @@ export function registerScheduleRoutes(app: FastifyInstance, ctx: AppContext): v
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     const input = parseInput(ScheduleInputSchema, request.body, 'schedule');
-    try {
-      return await changeAsOperator(ctx, request, async (tx) => {
+    return changeAsOperator(
+      ctx,
+      request,
+      async (tx) => {
         const saved = await saveSchedule(tx, session, id, input);
         if (saved === null) throw notFound('The schedule');
         return saved;
-      });
-    } catch (error) {
-      throw playlistDeletedMeanwhile(error) ?? error;
-    }
+      },
+      { constraints: PLAYLIST_GONE },
+    );
   });
 
   // Refused while a display has the schedule assigned: the operator assigns other
@@ -302,8 +315,10 @@ export function registerScheduleRoutes(app: FastifyInstance, ctx: AppContext): v
   app.delete(ROUTES.schedulePattern, async (request, reply) => {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
-    try {
-      await changeAsOperator(ctx, request, async (tx) => {
+    await changeAsOperator(
+      ctx,
+      request,
+      async (tx) => {
         const locked = await tx.query<{ event_count: string }>(
           `SELECT (SELECT count(*) FROM schedule_event e
                    WHERE e.schedule_id = s.id AND e.org_id = s.org_id) AS event_count
@@ -338,14 +353,9 @@ export function registerScheduleRoutes(app: FastifyInstance, ctx: AppContext): v
             detail: { eventCount: bigintToNumber(current.event_count) },
           },
         };
-      });
-    } catch (error) {
-      // A display took the schedule between the check above and the delete.
-      if (pgErrorCode(error) === '23503') {
-        throw scheduleInUse('This schedule has just been assigned to a screen. Try again.');
-      }
-      throw error;
-    }
+      },
+      { constraints: ASSIGNED_MEANWHILE },
+    );
     return reply.code(204).send();
   });
 }

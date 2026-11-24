@@ -16,11 +16,11 @@ import {
 } from '@tinnox/contracts';
 import { readOrg, unaudited, type Change } from '@tinnox/db';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { changeAsOperator } from '../auth/permissions.ts';
+import { changeAsOperator, type ConstraintAnswers } from '../auth/permissions.ts';
 import { operatorOf, type OperatorSession } from '../auth/session.ts';
 import { perMinute, type AppContext } from '../context.ts';
 import { iso } from '../db-helpers.ts';
-import { HttpError, notFound, parseInput, pgErrorCode } from '../errors.ts';
+import { HttpError, notFound, parseInput } from '../errors.ts';
 import {
   assessDisplays,
   auditRejectedPublication,
@@ -32,8 +32,25 @@ import {
   loadPushPlan,
   lockPublishKey,
   pendingCount,
+  PublishRaceLost,
   type DisplayAssessment,
 } from '../publishing.ts';
+
+/**
+ * A push to one display: a concurrent request with the same key won (run again, which returns
+ * its publication), or a file of the screen's content was deleted between the plan and the
+ * write. Displays pushed so far keep their publications; a repeat with the same Idempotency-Key
+ * returns them and carries on with the rest.
+ */
+const PUSH_RACES = {
+  publication_idempotency: () => new PublishRaceLost(),
+  publication_asset_media_id_org_id_fkey: () =>
+    new HttpError(
+      409,
+      'conflict',
+      "Something used by a screen's assigned content changed meanwhile. Nothing is lost: try again.",
+    ),
+} as const satisfies ConstraintAnswers;
 
 function toPlanRow(assessment: DisplayAssessment): PushPlanRow {
   return {
@@ -72,82 +89,87 @@ export function registerPushRoutes(app: FastifyInstance, ctx: AppContext): void 
     displayId: string,
     key: string,
   ): Promise<PushResult> {
-    return changeAsOperator(ctx, request, async (tx): Promise<Change<PushResult>> => {
-      await lockPublishKey(tx, displayId, key);
-      // Checked before anything else, so a repeat answers as the first call did
-      // even when the display would by now count as up to date.
-      const previous = await findPublicationByKey(tx, displayId, key);
-      if (previous !== null) {
-        return {
-          value: { displayId, outcome: 'published', publicationId: previous.id, issues: [] },
-          audit: unaudited('idempotent_replay'),
-        };
-      }
-      const display = await lockDisplayForPublish(tx, displayId);
-      if (display === null) throw notFound('The screen');
-      const [assessment] = await assessDisplays(tx, ctx, [display], {
-        lock: true,
-        keepDraft: true,
-      });
-      if (assessment === undefined) throw new Error('a display was not assessed');
+    return changeAsOperator(
+      ctx,
+      request,
+      async (tx): Promise<Change<PushResult>> => {
+        await lockPublishKey(tx, displayId, key);
+        // Checked before anything else, so a repeat answers as the first call did
+        // even when the display would by now count as up to date.
+        const previous = await findPublicationByKey(tx, displayId, key);
+        if (previous !== null) {
+          return {
+            value: { displayId, outcome: 'published', publicationId: previous.id, issues: [] },
+            audit: unaudited('idempotent_replay'),
+          };
+        }
+        const display = await lockDisplayForPublish(tx, displayId);
+        if (display === null) throw notFound('The screen');
+        const [assessment] = await assessDisplays(tx, ctx, [display], {
+          lock: true,
+          keepDraft: true,
+        });
+        if (assessment === undefined) throw new Error('a display was not assessed');
 
-      // Still "nothing is assigned": a display with a schedule or a layout carries its
-      // default or main-zone playlist here.
-      if (assessment.playlist === null) {
+        // Still "nothing is assigned": a display with a schedule or a layout carries its
+        // default or main-zone playlist here.
+        if (assessment.playlist === null) {
+          return {
+            value: { displayId, outcome: 'skipped', publicationId: null, issues: [] },
+            audit: unaudited('nothing_changed'),
+          };
+        }
+        if (assessment.state === 'blocked') {
+          // Nothing is written but the audit event: the display keeps the
+          // publication it has, and what it is playing is not interrupted.
+          return {
+            value: {
+              displayId,
+              outcome: 'rejected',
+              publicationId: null,
+              issues: issueDetails(assessment.issues),
+            },
+            audit: auditRejectedPublication({
+              membershipId: session.membershipId,
+              playlistId: assessment.playlist.id,
+              scheduleId: assessment.schedule?.id ?? null,
+              layoutId: assessment.layout?.id ?? null,
+              displayId,
+              issues: assessment.issues,
+              via: 'push',
+            }),
+          };
+        }
+        if (assessment.state === 'up_to_date' && assessment.current !== null) {
+          return {
+            value: {
+              displayId,
+              outcome: 'unchanged',
+              publicationId: assessment.current.publicationId,
+              issues: [],
+            },
+            audit: unaudited('nothing_changed'),
+          };
+        }
+        // Asked for above (`keepDraft`); without it nothing may be published.
+        if (assessment.draft === null) throw new Error('a display was assessed without its draft');
+        const made = await createPublication(tx, ctx, {
+          display,
+          playlistId: assessment.playlist.id,
+          scheduleId: assessment.schedule?.id ?? null,
+          layoutId: assessment.layout?.id ?? null,
+          draft: assessment.draft,
+          idempotencyKey: key,
+          membershipId: session.membershipId,
+          via: 'push',
+        });
         return {
-          value: { displayId, outcome: 'skipped', publicationId: null, issues: [] },
-          audit: unaudited('nothing_changed'),
+          value: { displayId, outcome: 'published', publicationId: made.value.id, issues: [] },
+          audit: made.audit,
         };
-      }
-      if (assessment.state === 'blocked') {
-        // Nothing is written but the audit event: the display keeps the
-        // publication it has, and what it is playing is not interrupted.
-        return {
-          value: {
-            displayId,
-            outcome: 'rejected',
-            publicationId: null,
-            issues: issueDetails(assessment.issues),
-          },
-          audit: auditRejectedPublication({
-            membershipId: session.membershipId,
-            playlistId: assessment.playlist.id,
-            scheduleId: assessment.schedule?.id ?? null,
-            layoutId: assessment.layout?.id ?? null,
-            displayId,
-            issues: assessment.issues,
-            via: 'push',
-          }),
-        };
-      }
-      if (assessment.state === 'up_to_date' && assessment.current !== null) {
-        return {
-          value: {
-            displayId,
-            outcome: 'unchanged',
-            publicationId: assessment.current.publicationId,
-            issues: [],
-          },
-          audit: unaudited('nothing_changed'),
-        };
-      }
-      // Asked for above (`keepDraft`); without it nothing may be published.
-      if (assessment.draft === null) throw new Error('a display was assessed without its draft');
-      const made = await createPublication(tx, ctx, {
-        display,
-        playlistId: assessment.playlist.id,
-        scheduleId: assessment.schedule?.id ?? null,
-        layoutId: assessment.layout?.id ?? null,
-        draft: assessment.draft,
-        idempotencyKey: key,
-        membershipId: session.membershipId,
-        via: 'push',
-      });
-      return {
-        value: { displayId, outcome: 'published', publicationId: made.value.id, issues: [] },
-        audit: made.audit,
-      };
-    });
+      },
+      { constraints: PUSH_RACES },
+    );
   }
 
   app.post(
@@ -182,21 +204,9 @@ export function registerPushRoutes(app: FastifyInstance, ctx: AppContext): void 
         try {
           results.push(await pushDisplay(request, session, displayId, key));
         } catch (error) {
-          const pg = pgErrorCode(error);
-          if (pg === '23505') {
-            // Lost a race the advisory lock should already prevent; the winner's row is returned.
-            results.push(await pushDisplay(request, session, displayId, key));
-          } else if (pg === '23503') {
-            // Displays pushed so far keep their publications; a repeat with the same
-            // Idempotency-Key returns them and carries on with the rest.
-            throw new HttpError(
-              409,
-              'conflict',
-              "Something used by a screen's assigned content changed meanwhile. Nothing is lost: try again.",
-            );
-          } else {
-            throw error;
-          }
+          // Lost a race the advisory lock should already prevent; the winner's row is returned.
+          if (!(error instanceof PublishRaceLost)) throw error;
+          results.push(await pushDisplay(request, session, displayId, key));
         }
       }
       return { results };

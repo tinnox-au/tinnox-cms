@@ -11,19 +11,13 @@ import {
   type FolderDto,
   type FolderListResponse,
 } from '@tinnox/contracts';
-import {
-  readOrg,
-  STAGE_A_CONSTRAINTS,
-  violatedConstraint,
-  withCountedLimit,
-  type OrgReadTx,
-} from '@tinnox/db';
+import { readOrg, withCountedLimit, type OrgReadTx } from '@tinnox/db';
 import type { FastifyInstance } from 'fastify';
-import { changeAsOperator } from '../auth/permissions.ts';
+import { changeAsOperator, type ConstraintAnswers } from '../auth/permissions.ts';
 import { operatorOf } from '../auth/session.ts';
 import type { AppContext } from '../context.ts';
 import { bigintToNumber } from '../db-helpers.ts';
-import { HttpError, notFound, parseInput, pgErrorCode } from '../errors.ts';
+import { HttpError, notFound, parseInput } from '../errors.ts';
 
 interface FolderRow {
   id: string;
@@ -52,12 +46,8 @@ async function loadFolder(tx: OrgReadTx, id: string): Promise<FolderDto | null> 
 const nameTaken = (): HttpError =>
   new HttpError(409, 'conflict', 'Another folder already has that name.');
 
-function isNameTaken(error: unknown): boolean {
-  return (
-    pgErrorCode(error) === '23505' &&
-    violatedConstraint(error) === STAGE_A_CONSTRAINTS.folderNameTaken
-  );
-}
+/** Another folder of the organisation has the name, ignoring case: its unique key refuses. */
+const NAME_TAKEN = { folder_org_name_key: nameTaken } as const satisfies ConstraintAnswers;
 
 export function registerFolderRoutes(app: FastifyInstance, ctx: AppContext): void {
   const { db } = ctx;
@@ -79,9 +69,10 @@ export function registerFolderRoutes(app: FastifyInstance, ctx: AppContext): voi
   app.post(ROUTES.folders, async (request, reply): Promise<FolderDto> => {
     const session = operatorOf(request);
     const input = parseInput(FolderCreateSchema, request.body, 'folder');
-    let created: FolderDto;
-    try {
-      created = await changeAsOperator(ctx, request, async (tx) => {
+    const created = await changeAsOperator(
+      ctx,
+      request,
+      async (tx) => {
         // One at a time per organisation, so the ceiling cannot be passed by a burst.
         const id = await withCountedLimit(
           tx,
@@ -126,11 +117,9 @@ export function registerFolderRoutes(app: FastifyInstance, ctx: AppContext): voi
             detail: null,
           },
         };
-      });
-    } catch (error) {
-      if (isNameTaken(error)) throw nameTaken();
-      throw error;
-    }
+      },
+      { constraints: NAME_TAKEN },
+    );
     void reply.code(201);
     return created;
   });
@@ -139,8 +128,10 @@ export function registerFolderRoutes(app: FastifyInstance, ctx: AppContext): voi
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     const patch = parseInput(FolderPatchSchema, request.body, 'folder');
-    try {
-      return await changeAsOperator(ctx, request, async (tx) => {
+    return changeAsOperator(
+      ctx,
+      request,
+      async (tx) => {
         const updated = await tx.query(
           'UPDATE folder SET name = $2 WHERE id = $1 AND org_id = app_org_id()',
           [id, patch.name],
@@ -160,11 +151,9 @@ export function registerFolderRoutes(app: FastifyInstance, ctx: AppContext): voi
             detail: { fields: ['name'] },
           },
         };
-      });
-    } catch (error) {
-      if (isNameTaken(error)) throw nameTaken();
-      throw error;
-    }
+      },
+      { constraints: NAME_TAKEN },
+    );
   });
 
   // The media in the folder moves to the root: the foreign key sets folder_id to NULL.

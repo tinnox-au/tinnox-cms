@@ -525,8 +525,14 @@ describe('people routes', () => {
                     /^UPDATE membership SET role\b/.test(text)
                   ) {
                     armed = false;
+                    // As the driver parses the server's refusal: classifyDbError reads only
+                    // pg's DatabaseError (step 26).
                     throw Object.assign(
-                      new Error('an organisation keeps at least one active owner'),
+                      new pg.DatabaseError(
+                        'an organisation keeps at least one active owner',
+                        0,
+                        'error',
+                      ),
                       {
                         code: '23001',
                         constraint: 'membership_last_owner',

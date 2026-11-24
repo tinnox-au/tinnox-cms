@@ -16,11 +16,11 @@ import {
 } from '@tinnox/contracts';
 import { readOrg, type Change, type OrgReadTx, type OrgTx } from '@tinnox/db';
 import type { FastifyInstance } from 'fastify';
-import { changeAsOperator } from '../auth/permissions.ts';
+import { changeAsOperator, type ConstraintAnswers } from '../auth/permissions.ts';
 import { operatorOf, type OperatorSession } from '../auth/session.ts';
 import type { AppContext } from '../context.ts';
 import { bigintToNumber, iso } from '../db-helpers.ts';
-import { HttpError, notFound, parseInput, pgErrorCode } from '../errors.ts';
+import { HttpError, notFound, parseInput } from '../errors.ts';
 
 interface LayoutZoneRow {
   id: string;
@@ -189,20 +189,29 @@ async function saveLayout(
   };
 }
 
-/** A playlist went away between the check in `saveLayout` and the write: the database refuses. */
-function playlistDeletedMeanwhile(error: unknown): HttpError | null {
-  const pg = pgErrorCode(error);
-  return pg === '23503' || pg === '23001'
-    ? new HttpError(
-        409,
-        'conflict',
-        'A playlist in this layout was deleted meanwhile. Reload and try again.',
-      )
-    : null;
-}
+/**
+ * A playlist went away between the check in `saveLayout` and the write: its foreign key or its
+ * guard refuses.
+ */
+const playlistDeletedMeanwhile = (): HttpError =>
+  new HttpError(
+    409,
+    'conflict',
+    'A playlist in this layout was deleted meanwhile. Reload and try again.',
+  );
+const PLAYLIST_GONE = {
+  layout_zone_playlist_fk: playlistDeletedMeanwhile,
+  layout_zone_playlist_guard: playlistDeletedMeanwhile,
+} as const satisfies ConstraintAnswers;
 
 const layoutInUse = (message: string, details?: { path: string; message: string }[]): HttpError =>
   new HttpError(409, 'layout_in_use', message, details === undefined ? {} : { details });
+
+/** A display took the layout between the check of its delete and the DELETE. */
+const ASSIGNED_MEANWHILE = {
+  display_assigned_layout_fk: () =>
+    layoutInUse('This layout has just been assigned to a screen. Try again.'),
+} as const satisfies ConstraintAnswers;
 
 export function registerLayoutRoutes(app: FastifyInstance, ctx: AppContext): void {
   const { db } = ctx;
@@ -216,17 +225,18 @@ export function registerLayoutRoutes(app: FastifyInstance, ctx: AppContext): voi
   app.post(ROUTES.layouts, async (request, reply): Promise<LayoutDto> => {
     const session = operatorOf(request);
     const input = parseInput(LayoutInputSchema, request.body, 'layout');
-    try {
-      const dto = await changeAsOperator(ctx, request, async (tx) => {
+    const dto = await changeAsOperator(
+      ctx,
+      request,
+      async (tx) => {
         const saved = await saveLayout(tx, session, null, input);
         if (saved === null) throw new Error('created layout is not visible');
         return saved;
-      });
-      void reply.code(201);
-      return dto;
-    } catch (error) {
-      throw playlistDeletedMeanwhile(error) ?? error;
-    }
+      },
+      { constraints: PLAYLIST_GONE },
+    );
+    void reply.code(201);
+    return dto;
   });
 
   app.get(ROUTES.layoutPattern, async (request): Promise<LayoutDto> => {
@@ -246,15 +256,16 @@ export function registerLayoutRoutes(app: FastifyInstance, ctx: AppContext): voi
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     const input = parseInput(LayoutInputSchema, request.body, 'layout');
-    try {
-      return await changeAsOperator(ctx, request, async (tx) => {
+    return changeAsOperator(
+      ctx,
+      request,
+      async (tx) => {
         const saved = await saveLayout(tx, session, id, input);
         if (saved === null) throw notFound('The layout');
         return saved;
-      });
-    } catch (error) {
-      throw playlistDeletedMeanwhile(error) ?? error;
-    }
+      },
+      { constraints: PLAYLIST_GONE },
+    );
   });
 
   // Refused while a display has the layout assigned: the operator assigns other
@@ -263,8 +274,10 @@ export function registerLayoutRoutes(app: FastifyInstance, ctx: AppContext): voi
   app.delete(ROUTES.layoutPattern, async (request, reply) => {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
-    try {
-      await changeAsOperator(ctx, request, async (tx) => {
+    await changeAsOperator(
+      ctx,
+      request,
+      async (tx) => {
         const locked = await tx.query(
           'SELECT 1 FROM layout WHERE id = $1 AND org_id = app_org_id() FOR UPDATE',
           [id],
@@ -301,14 +314,9 @@ export function registerLayoutRoutes(app: FastifyInstance, ctx: AppContext): voi
             detail: { zoneCount: zones.rowCount ?? 0 },
           },
         };
-      });
-    } catch (error) {
-      // A display took the layout between the check above and the delete.
-      if (pgErrorCode(error) === '23503') {
-        throw layoutInUse('This layout has just been assigned to a screen. Try again.');
-      }
-      throw error;
-    }
+      },
+      { constraints: ASSIGNED_MEANWHILE },
+    );
     return reply.code(204).send();
   });
 }

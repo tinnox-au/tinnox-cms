@@ -31,20 +31,17 @@ import {
   pairingCancelClaims,
   pairingClaim,
   readOrg,
-  STAGE_A_CONSTRAINTS,
-  STAGE_B_CONSTRAINTS,
-  violatedConstraint,
   type AuditInput,
   type OrgReadTx,
 } from '@tinnox/db';
 import type { FastifyInstance } from 'fastify';
-import { changeAsOperator } from '../auth/permissions.ts';
+import { changeAsOperator, type ConstraintAnswers } from '../auth/permissions.ts';
 import { operatorOf } from '../auth/session.ts';
 import { perMinute, type AppContext } from '../context.ts';
 import { accept, iso, refuse, type Decision } from '../db-helpers.ts';
 import { contentRectOf, loadStatusViews } from '../display-state.ts';
-import { HttpError, notFound, parseInput, pgErrorCode } from '../errors.ts';
-import { isUnknownTag, replaceTags } from '../tags.ts';
+import { HttpError, notFound, parseInput } from '../errors.ts';
+import { replaceTags, UNKNOWN_TAG } from '../tags.ts';
 
 interface DisplayRow {
   id: string;
@@ -219,6 +216,19 @@ function assertCanvasWithinLimits(canvas: Canvas, limits: Limits): void {
   }
 }
 
+/**
+ * The playlist, the schedule, the layout or a tag of a display change went away between the
+ * check and the write. The database refuses in each case; the answer is the same as for an
+ * unknown id.
+ */
+const ASSIGNMENT_GONE = {
+  display_assigned_playlist_fk: () => notFound('The playlist'),
+  display_assigned_playlist_guard: () => notFound('The playlist'),
+  display_assigned_schedule_fk: () => notFound('The schedule'),
+  display_assigned_layout_fk: () => notFound('The layout'),
+  ...UNKNOWN_TAG,
+} as const satisfies ConstraintAnswers;
+
 export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): void {
   const { db, config } = ctx;
 
@@ -307,8 +317,10 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     const patch = parseInput(DisplayPatchSchema, request.body, 'display');
-    try {
-      return await changeAsOperator(ctx, request, async (tx) => {
+    return changeAsOperator(
+      ctx,
+      request,
+      async (tx) => {
         const locked = await tx.query<{
           name: string;
           description: string | null;
@@ -446,28 +458,9 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
             detail: { fields: Object.keys(patch).sort(), ...assignments },
           },
         };
-      });
-    } catch (error) {
-      // The playlist, the schedule, the layout or a tag went away between the check above
-      // and the write. The database refuses in each case; the answer is the same as for an
-      // unknown id.
-      const constraint = violatedConstraint(error);
-      const pg = pgErrorCode(error);
-      if (
-        (pg === '23503' && constraint === STAGE_A_CONSTRAINTS.displayAssignedPlaylist) ||
-        (pg === '23001' && constraint === STAGE_A_CONSTRAINTS.assignedPlaylistDeleted)
-      ) {
-        throw notFound('The playlist');
-      }
-      if (pg === '23503' && constraint === STAGE_B_CONSTRAINTS.displayAssignedSchedule) {
-        throw notFound('The schedule');
-      }
-      if (pg === '23503' && constraint === STAGE_B_CONSTRAINTS.displayAssignedLayout) {
-        throw notFound('The layout');
-      }
-      if (isUnknownTag(error)) throw notFound('The tag');
-      throw error;
-    }
+      },
+      { constraints: ASSIGNMENT_GONE },
+    );
   });
 
   // D9: the operator claims a pairing code for one of the organisation's displays.

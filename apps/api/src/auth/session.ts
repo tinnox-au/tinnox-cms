@@ -9,7 +9,14 @@
  *   CSRF token in X-CSRF-Token.
  */
 import { HEADERS, OpaqueTokenSchema } from '@tinnox/contracts';
-import { poolAsTx, sessionByIdHash, sha256, type SessionLookup } from '@tinnox/db';
+import {
+  classifyDbError,
+  isCommitOutcomeUnknown,
+  poolAsTx,
+  sessionByIdHash,
+  sha256,
+  type SessionLookup,
+} from '@tinnox/db';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { AppContext } from '../context.ts';
 import { HttpError } from '../errors.ts';
@@ -76,9 +83,12 @@ const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 /**
  * Writes the `security.csrf_rejected` row of a refused request. Nothing changed, so it is a
- * transaction of its own (`recordRefusal`, ./refusal.ts; SCR-32, D2). Any failure is logged and
- * swallowed, a refusal of the row because the route's refusal statement does not state it
- * included (AUD-9): the refusal stands whether or not it could be recorded.
+ * transaction of its own (`recordRefusal`, ./refusal.ts; SCR-32, D2). An error the database
+ * raised while writing it, or a COMMIT of the row that did not confirm, is logged and swallowed:
+ * the refusal stands whether or not it could be recorded, and answering `commit_outcome_unknown`
+ * would say the refused change may have been saved. Anything else is rethrown (AUD-9, step 26):
+ * `changeOrg` refusing the row because the route's refusal statement does not state it is a
+ * programming error, and fails the request loudly instead of losing the row.
  */
 async function recordCsrfRejection(
   ctx: AppContext,
@@ -97,6 +107,7 @@ async function recordCsrfRejection(
       detail: { reason, method: request.method, route: request.routeOptions.url ?? null },
     });
   } catch (error) {
+    if (classifyDbError(error) === null && !isCommitOutcomeUnknown(error)) throw error;
     request.log.error({ err: error }, 'failed to record csrf rejection');
   }
 }

@@ -228,6 +228,19 @@ export function idempotencyKeyOf(request: FastifyRequest, action: string): strin
 }
 
 /**
+ * What the publish and push routes map `publication_idempotency` to (the constraints option of
+ * changeAsOperator): a concurrent request with the same Idempotency-Key created the publication
+ * first, a race the lock below should already prevent. The route catches it and runs its attempt
+ * once more, which returns the winner's publication.
+ */
+export class PublishRaceLost extends Error {
+  constructor() {
+    super('a concurrent request with the same Idempotency-Key published first');
+    this.name = 'PublishRaceLost';
+  }
+}
+
+/**
  * Serialises every attempt to publish to one display under one Idempotency-Key
  * until the transaction ends, so exactly one of them creates the publication.
  */
