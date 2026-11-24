@@ -30,10 +30,15 @@ import {
   pairingCreate,
   poolAsTx,
   type Autocommit,
-  type Pool,
 } from '../src/index.ts';
 import { resetTestDatabase, runMigrations, type MigrationResult } from '../src/migrate.ts';
-import { whileAuditFails, type AuditFaultOutcome, withOrg } from '../src/testing.ts';
+import {
+  whileAuditFails,
+  type AuditFaultOutcome,
+  withOrg,
+  type Pool,
+  databaseOn,
+} from '../src/testing.ts';
 import {
   appPool,
   createOrg,
@@ -184,7 +189,7 @@ beforeAll(async () => {
 
   migrator = await migratorClient();
   pool = appPool('tries the upgraded schema as the runtime role', 2);
-  db = poolAsTx(pool);
+  db = poolAsTx(databaseOn(pool));
   a = await createOrg(migrator, 'Upgrade A', { role: 'operator' });
   b = await createOrg(migrator, 'Upgrade B', { role: 'operator' });
   c = await createOrg(migrator, 'Upgrade C', { role: 'operator' });

@@ -11,7 +11,6 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   changeOrg,
   changePreOrg,
-  createPool,
   issueAuditStatement,
   issueWritePermit,
   membershipForCheck,
@@ -22,7 +21,6 @@ import {
   type AuditInput,
   type AuditStatement,
   type OrgTx,
-  type Pool,
   type WritePermit,
 } from '../src/index.ts';
 import {
@@ -39,6 +37,9 @@ import {
   watchAuditDebt,
   whileAuditFails,
   withOrg,
+  createPool,
+  type Pool,
+  databaseOn,
 } from '../src/testing.ts';
 import {
   appPool,
@@ -136,7 +137,7 @@ const rejection = async (work: Promise<unknown>): Promise<unknown> =>
 
 describe('changeOrg against the database (AG-3.1, SCR-34)', () => {
   it('commits the change and the audit row it returned, with the role the re-check read', async () => {
-    const role = await changeOrg(judged, org.orgId, permit(), async (tx, granted) => {
+    const role = await changeOrg(databaseOn(judged), org.orgId, permit(), async (tx, granted) => {
       const id = await newFolder(tx, 'Changed and audited');
       return { value: granted, audit: folderCreated(id) };
     });
@@ -150,7 +151,7 @@ describe('changeOrg against the database (AG-3.1, SCR-34)', () => {
   it('rolls the change back when its audit row cannot be written (CX-01)', async () => {
     const { result, refused } = await whileAuditFails(migratorUrl(), 'folder.create', () =>
       rejection(
-        changeOrg(judged, org.orgId, permit(), async (tx) => {
+        changeOrg(databaseOn(judged), org.orgId, permit(), async (tx) => {
           const id = await newFolder(tx, 'Audit fails');
           return { value: id, audit: folderCreated(id) };
         }),
@@ -163,7 +164,7 @@ describe('changeOrg against the database (AG-3.1, SCR-34)', () => {
 
   it('commits nothing of a change that recorded an action its route does not state', async () => {
     const error = await rejection(
-      changeOrg(judged, org.orgId, permit(), async (tx) => {
+      changeOrg(databaseOn(judged), org.orgId, permit(), async (tx) => {
         const id = await newFolder(tx, 'Unstated');
         return {
           value: id,
@@ -184,7 +185,7 @@ describe('changeOrg against the database (AG-3.1, SCR-34)', () => {
   it('refuses the change of a member of another organisation at the re-check, before it runs', async () => {
     let ran = false;
     await expect(
-      changeOrg(judged, other.orgId, permit(), () => {
+      changeOrg(databaseOn(judged), other.orgId, permit(), () => {
         ran = true;
         return Promise.resolve({ value: 1, audit: unaudited('nothing_changed') });
       }),
@@ -196,7 +197,7 @@ describe('changeOrg against the database (AG-3.1, SCR-34)', () => {
   // the test database sees it: the COMMIT fails, so every route an integration test runs is held.
   it('an unaudited() that is not true fails at COMMIT under the audit-debt guard', async () => {
     const error = await rejection(
-      changeOrg(judged, org.orgId, permit(), async (tx) => {
+      changeOrg(databaseOn(judged), org.orgId, permit(), async (tx) => {
         await newFolder(tx, 'Falsely unaudited');
         return { value: 1, audit: unaudited('nothing_changed') };
       }),
@@ -228,18 +229,23 @@ describe('changePreOrg against the database (AG-3.1)', () => {
     });
 
   it('writes the event with no organisation when none was entered, with the change', async () => {
-    const pairingId = await changePreOrg(judged, stating('pairing.create'), async (pre) => {
-      const created = await pairingCreate(pre, {
-        code: pairingCode(),
-        pollingTokenHash: hash(),
-        clientKey: 'change-test-client',
-        ttlSeconds: 600,
-        maxSessionsPerClient: 5,
-        windowSeconds: 600,
-      });
-      if (created.outcome !== 'created') throw new Error(`pairing not created: ${created.outcome}`);
-      return { value: created.pairingId, audit: pairingCreated(created.pairingId) };
-    });
+    const pairingId = await changePreOrg(
+      databaseOn(judged),
+      stating('pairing.create'),
+      async (pre) => {
+        const created = await pairingCreate(pre, {
+          code: pairingCode(),
+          pollingTokenHash: hash(),
+          clientKey: 'change-test-client',
+          ttlSeconds: 600,
+          maxSessionsPerClient: 5,
+          windowSeconds: 600,
+        });
+        if (created.outcome !== 'created')
+          throw new Error(`pairing not created: ${created.outcome}`);
+        return { value: created.pairingId, audit: pairingCreated(created.pairingId) };
+      },
+    );
     // A row with no organisation is visible to no application role: read as the administrator.
     const admin = new pg.Client({ connectionString: superuserUrl() });
     await admin.connect();
@@ -255,7 +261,7 @@ describe('changePreOrg against the database (AG-3.1)', () => {
   });
 
   it('writes the event for the organisation the change entered', async () => {
-    await changePreOrg(judged, stating('folder.create'), async (_pre, enterOrg) => {
+    await changePreOrg(databaseOn(judged), stating('folder.create'), async (_pre, enterOrg) => {
       const tx = await enterOrg(org.orgId);
       const id = await newFolder(tx, 'Entered and audited');
       return { value: id, audit: folderCreated(id) };
@@ -269,11 +275,15 @@ describe('changePreOrg against the database (AG-3.1)', () => {
   // Adoption plan step 20: the route's statement is held before the organisation is known too.
   it('commits nothing of a change that recorded an action its route does not state', async () => {
     const error = await rejection(
-      changePreOrg(judged, stating('alert_recipient.confirm'), async (_pre, enterOrg) => {
-        const tx = await enterOrg(org.orgId);
-        const id = await newFolder(tx, 'Entered and unstated');
-        return { value: id, audit: folderCreated(id) };
-      }),
+      changePreOrg(
+        databaseOn(judged),
+        stating('alert_recipient.confirm'),
+        async (_pre, enterOrg) => {
+          const tx = await enterOrg(org.orgId);
+          const id = await newFolder(tx, 'Entered and unstated');
+          return { value: id, audit: folderCreated(id) };
+        },
+      ),
     );
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toMatch(
@@ -531,7 +541,7 @@ describe('readOrg against the database (SCR-34)', () => {
   };
 
   it('reads the rows of its organisation, and of no other', async () => {
-    const seen = await readOrg(judged, org.orgId, async (tx) => {
+    const seen = await readOrg(databaseOn(judged), org.orgId, async (tx) => {
       const { rows } = await tx.query<{ id: string }>('SELECT id FROM display');
       return rows.map((row) => row.id);
     });
@@ -547,7 +557,7 @@ describe('readOrg against the database (SCR-34)', () => {
       'SELECT id FROM membership FOR SHARE',
     ]) {
       expect(
-        await refusedAs(readOrg(judged, org.orgId, (tx) => tx.query(statement))),
+        await refusedAs(readOrg(databaseOn(judged), org.orgId, (tx) => tx.query(statement))),
         statement,
       ).toBe(READ_ONLY);
     }
@@ -561,12 +571,12 @@ describe('readOrg against the database (SCR-34)', () => {
     for (let round = 0; round < 3; round += 1) {
       expect(
         await refusedAs(
-          readOrg(judged, org.orgId, (tx) =>
+          readOrg(databaseOn(judged), org.orgId, (tx) =>
             tx.query('SELECT sec.session_revoke_membership($1)', [org.membershipId]),
           ),
         ),
       ).toBe(READ_ONLY);
-      await changeOrg(judged, org.orgId, permit(), async (tx) => {
+      await changeOrg(databaseOn(judged), org.orgId, permit(), async (tx) => {
         const id = await newFolder(tx, `After a read ${String(round)}`);
         return { value: id, audit: folderCreated(id) };
       });

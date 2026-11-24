@@ -49,7 +49,7 @@ export async function recordRefusal(
     // Nothing to read again: the request is already refused, whatever the role is now.
     recheck: () => Promise.resolve(),
   });
-  await changeOrg(ctx.pool, session.orgId, permit, () =>
+  await changeOrg(ctx.db, session.orgId, permit, () =>
     Promise.resolve({ value: undefined, audit: event }),
   );
 }

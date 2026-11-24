@@ -76,12 +76,12 @@ function isNameTaken(error: unknown): boolean {
 }
 
 export function registerTagRoutes(app: FastifyInstance, ctx: AppContext): void {
-  const { pool } = ctx;
+  const { db } = ctx;
 
   app.get(ROUTES.tags, async (request): Promise<TagListResponse> => {
     const session = operatorOf(request);
     const query = parseInput(TagListQuerySchema, request.query, 'query');
-    return readOrg(pool, session.orgId, async (tx) => {
+    return readOrg(db, session.orgId, async (tx) => {
       const { rows } = await tx.query<TagRow>(
         `SELECT ${TAG_COLUMNS} FROM tag t
          WHERE t.org_id = app_org_id() AND ($1::text IS NULL OR t.scope = $1)

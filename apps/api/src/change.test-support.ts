@@ -3,8 +3,7 @@
  * auth/refusal.test.ts, auth/device.test.ts, jobs.test.ts): a pool that records what each
  * transaction is sent, and a request as a handler sees it. No database.
  */
-import type { Pool } from '@tinnox/db';
-import { testOrgId } from '@tinnox/db/testing';
+import { testOrgId, type Pool, databaseOn } from '@tinnox/db/testing';
 import type { FastifyRequest } from 'fastify';
 import type { Requirement } from './auth/permissions.ts';
 import type { OperatorSession } from './auth/session.ts';
@@ -87,4 +86,7 @@ export function requestTo(
 }
 
 export const contextOn = (pool: Pool): AppContext =>
-  ({ pool, now: () => new Date('2026-11-24T00:00:00.000Z') }) as unknown as AppContext;
+  ({
+    db: databaseOn(pool),
+    now: () => new Date('2026-11-24T00:00:00.000Z'),
+  }) as unknown as AppContext;

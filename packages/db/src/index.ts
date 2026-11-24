@@ -12,7 +12,30 @@
 // transaction they are given. A change runs on changeOrg or changePreOrg and returns its audit
 // rows; a read runs on readOrg. Tests reach the five through '@tinnox/db/testing'.
 // ./entries.test.ts fails when a new export of either module is missing here.
-export * from './pool.ts';
+//
+// ./pool.ts and ./database.ts are listed name by name too (adoption plan step 21): the API and
+// the alert job hold the database as the handle createDatabase returns (AppContext.db in the
+// API), which has no query and no connect, so createPool and the Pool and PoolClient types stay
+// out of this entry, and so do the functions that make a handle for a pool or read the pool
+// behind one. Tests reach a pool through '@tinnox/db/testing'.
+export {
+  assertConnectionRole,
+  readRuntimeRole,
+  RuntimeRoleError,
+  runtimeRoleProblems,
+  startupSettingsProblem,
+  type CreatePoolOptions,
+  type QueryResult,
+  type QueryResultRow,
+  type RuntimeRoleFacts,
+} from './pool.ts';
+export {
+  assertRuntimeRole,
+  createDatabase,
+  ping,
+  sessionLockConnection,
+  type Database,
+} from './database.ts';
 export {
   CommitOutcomeUnknownError,
   poolAsTx,

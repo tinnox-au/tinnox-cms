@@ -382,7 +382,7 @@ describe('roles enforced by the API', () => {
     it('answers 401 and keeps nothing when the member is signed out everywhere during an upload', async () => {
       const [m, editor] = await member('editor');
       const count = async (): Promise<number> =>
-        withOrg(t.ctx.pool, org.orgId, async (tx) => {
+        withOrg(t.pool, org.orgId, async (tx) => {
           const { rows } = await tx.query<{ n: string }>('SELECT count(*) AS n FROM media');
           return Number(rows[0]?.n ?? 0);
         });

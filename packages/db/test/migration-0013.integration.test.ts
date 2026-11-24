@@ -37,10 +37,9 @@ import {
   sha256,
   type Autocommit,
   type OrgId,
-  type Pool,
   type SessionCreateResult,
 } from '../src/index.ts';
-import { withOrg, withoutOrg } from '../src/testing.ts';
+import { withOrg, withoutOrg, type Pool, databaseOn } from '../src/testing.ts';
 import { resetTestDatabase, runMigrations, type MigrationResult } from '../src/migrate.ts';
 import {
   appPool,
@@ -241,7 +240,7 @@ beforeAll(async () => {
 
   migrator = await migratorClient();
   pool = appPool('tries the upgraded schema as the runtime role', 4);
-  db = poolAsTx(pool);
+  db = poolAsTx(databaseOn(pool));
   legacyA = await legacyOrg('Legacy A', 2);
   legacyB = await legacyOrg('Legacy B', 1);
   const [a0] = legacyA.memberIds;

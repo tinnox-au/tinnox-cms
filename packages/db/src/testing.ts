@@ -1,6 +1,8 @@
 // The '@tinnox/db/testing' entry: what only tests may use. Lint refuses the entry in every file
 // that is not a test (the db entries of eslint.config.js), so nothing here can reach the API, the
 // alert job or an offline tool.
+import { registerOwnHandle } from './database.ts';
+import type { MigratorPool } from './migrate.ts';
 import { mintOrgId } from './org-id.ts';
 import type { Pool } from './pool.ts';
 import { statementsOf } from './pre-org.ts';
@@ -24,6 +26,24 @@ export { removeAuditFault, whileAuditFails, type AuditFaultOutcome } from './aud
 
 // The audit rows of every organisation, for the scan after each integration test file (AG-3.4).
 export { auditRowsSince, auditScanMark, type StoredAuditRow } from './audit-rows.ts';
+
+// The pool behind the database (adoption plan step 21). The runtime entry hands out only the
+// handle of createDatabase, which has no query and no connect; a test that sends statements of
+// its own, or wraps the pool to inject a fault, makes the pool here and gives the code under
+// test the handle `databaseOn(pool)`.
+export { databaseOn } from './database.ts';
+export { createPool, type Pool, type PoolClient } from './pool.ts';
+
+/**
+ * Makes a wrapper of the pool connectMigrator returned (a Proxy that holds or fails a statement)
+ * its own Database, as connectMigrator makes the pool it returns: an offline tool passes the pool
+ * it holds to changePreOrg, and asDefiner compares it with the pool of its transaction, so the
+ * wrapper has to be both.
+ */
+export function wrappedMigratorPool<P extends MigratorPool>(wrapped: P): P {
+  registerOwnHandle(wrapped);
+  return wrapped;
+}
 
 // What the change API of ./change.ts is built on, which the runtime entry does not export
 // (adoption plan step 20, SCR-34): tests arrange their data in a transaction of their own,

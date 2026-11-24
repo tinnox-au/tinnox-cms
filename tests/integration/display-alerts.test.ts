@@ -767,7 +767,7 @@ describe('alert addresses and the member who added them (D22)', () => {
       id = inserted.rows[0]?.id ?? '';
     });
     // The link is known and in date: it is the missing adder that refuses it.
-    expect(await alertRecipientByTokenHash(poolAsTx(t.pool), sha256(token))).toEqual({
+    expect(await alertRecipientByTokenHash(poolAsTx(t.ctx.db), sha256(token))).toEqual({
       orgId: org.orgId,
       recipientId: id,
     });

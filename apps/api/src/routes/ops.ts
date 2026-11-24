@@ -27,7 +27,7 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
 
   app.get(ROUTES.readyz, async (_request, reply) => {
     const [database, storage, jobs, identityProvider, workerAge] = await Promise.all([
-      passes(() => ping(ctx.pool)),
+      passes(() => ping(ctx.db)),
       passes(() => ctx.storage.check()),
       passes(() => ctx.media.check()),
       ctx.idp.check(),

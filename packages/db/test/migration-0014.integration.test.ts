@@ -16,8 +16,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { alertRecipientByTokenHash, displayAlertOrgs, poolAsTx, type Pool } from '../src/index.ts';
-import { withOrg } from '../src/testing.ts';
+import { alertRecipientByTokenHash, displayAlertOrgs, poolAsTx } from '../src/index.ts';
+import { withOrg, type Pool, databaseOn } from '../src/testing.ts';
 import { resetTestDatabase, runMigrations, type MigrationResult } from '../src/migrate.ts';
 import { appPool, createOrg, migratorClient, migratorUrl, type TestOrg } from './support.ts';
 
@@ -152,7 +152,7 @@ describe('grants', () => {
 
 describe('sec.* functions', () => {
   it('list organisation ids for the alert check, and nothing else', async () => {
-    const ids = await displayAlertOrgs(poolAsTx(clients().pool));
+    const ids = await displayAlertOrgs(poolAsTx(databaseOn(clients().pool)));
     expect(ids).toEqual([a.orgId, b.orgId].sort());
   });
 
@@ -171,7 +171,7 @@ describe('sec.* functions', () => {
       [a.orgId, live, expired, a.membershipId],
     );
     await client.query('COMMIT');
-    const tx = poolAsTx(app);
+    const tx = poolAsTx(databaseOn(app));
     expect(await alertRecipientByTokenHash(tx, live)).toEqual({
       orgId: a.orgId,
       recipientId: inserted.rows[0]?.id,

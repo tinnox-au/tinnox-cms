@@ -299,7 +299,7 @@ const NO_TX_CAST = [
       `:matches(TSAsExpression, TSTypeAssertion) > .typeAnnotation TSTypeReference${TX}`,
     ].join(', '),
     message:
-      'Do not cast to a transaction handle (Tx, OrgTx, OrgReadTx, PreOrgTx, DefinerTx): the type says the handle is inside a transaction, so an audit row written on it commits with the change it records, and whether an organisation is set, so a tenant statement runs under row-level security. Use the tx that the callback of readOrg receives (an OrgReadTx) or of changeOrg (an OrgTx; an operator route calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts), or, before the organisation is known, the one the callback of changePreOrg receives (a PreOrgTx, for the sec.* wrappers) and the OrgTx its enterOrg returns, all from @tinnox/db. A test opens one with withOrg or inTx from @tinnox/db/testing. A refusal with no change to pair with is written with auditStandalone(pool, event).',
+      'Do not cast to a transaction handle (Tx, OrgTx, OrgReadTx, PreOrgTx, DefinerTx): the type says the handle is inside a transaction, so an audit row written on it commits with the change it records, and whether an organisation is set, so a tenant statement runs under row-level security. Use the tx that the callback of readOrg receives (an OrgReadTx) or of changeOrg (an OrgTx; an operator route calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts), or, before the organisation is known, the one the callback of changePreOrg receives (a PreOrgTx, for the sec.* wrappers) and the OrgTx its enterOrg returns, all from @tinnox/db. A test opens one with withOrg or inTx from @tinnox/db/testing. A refusal with no change to pair with is written with auditStandalone(ctx.db, event).',
   },
 ];
 // OTH-12: a SqlFragment says the text was written in the source (sql`...`, sqlParameter, joinSql
@@ -474,7 +474,7 @@ const NO_RAW_SEC = [
   {
     selector: stringMatching('/\\bsec\\.[a-z_]+\\s*\\(/'),
     message:
-      'Call sec.* through a typed wrapper in packages/db/src/sec.ts (exported from @tinnox/db); add the wrapper if it is missing. It names the function once, types what it returns (an organisation as an OrgId) and says which handle it takes: any handle for a lookup (poolAsTx(pool) or a tx), a PreOrgTx for a change before the organisation is known, an OrgTx for one that needs the organisation.',
+      'Call sec.* through a typed wrapper in packages/db/src/sec.ts (exported from @tinnox/db); add the wrapper if it is missing. It names the function once, types what it returns (an organisation as an OrgId) and says which handle it takes: any handle for a lookup (poolAsTx(ctx.db) or a tx), a PreOrgTx for a change before the organisation is known, an OrgTx for one that needs the organisation.',
   },
 ];
 
@@ -706,7 +706,7 @@ export const DB_ENTRIES = {
   migrate: {
     refusedIn: (dir) => dir.startsWith('apps/'),
     message:
-      '@tinnox/db/migrate is for the offline tools that connect as tinnox_migrator: the migration runner, the seed and provisioning under scripts/, and tests (AG-1.10). The API holds only the tinnox_app connection: use createPool, readOrg, changeOrg (through changeAsOperator in apps/api/src/auth/permissions.ts) and the typed sec.* wrappers from @tinnox/db. Work that needs the migrator is a script under scripts/, run from a controlled host.',
+      '@tinnox/db/migrate is for the offline tools that connect as tinnox_migrator: the migration runner, the seed and provisioning under scripts/, and tests (AG-1.10). The API holds only the tinnox_app connection, as the Database of createDatabase (AppContext.db): use readOrg, changeOrg (through changeAsOperator in apps/api/src/auth/permissions.ts) and the typed sec.* wrappers from @tinnox/db. Work that needs the migrator is a script under scripts/, run from a controlled host.',
   },
   // What only tests may use: refused in every file that is not a test.
   testing: {
@@ -1134,7 +1134,7 @@ function pgMessage(dir) {
     const offline = dir.startsWith('apps/')
       ? ''
       : ' (connectMigrator from @tinnox/db/migrate for an offline tool that needs tinnox_migrator)';
-    return `Only packages/db talks to PostgreSQL. Use createPool and the transaction openers of @tinnox/db (readOrg, changeOrg, changePreOrg)${offline}; ${why}`;
+    return `Only packages/db talks to PostgreSQL. Use createDatabase and the transaction openers of @tinnox/db (readOrg, changeOrg, changePreOrg)${offline}; ${why}`;
   }
   // packages/app-render is bundled for the browser too, but a package may not import an app, so
   // it gets the package sentence below.
@@ -1187,7 +1187,7 @@ const IMPORT_FACETS = [
         regex: '^@tinnox/db$',
         importNames: UNSCOPED_HELPERS,
         message:
-          'poolAsTx runs without an organisation (AG-2.2). Use readOrg(pool, orgId, fn) for a read, or changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts for an operator change (it runs changeOrg of @tinnox/db), where row-level security limits every statement to that organisation. If the organisation really is not known yet (a credential is still being resolved, or a sec.* wrapper works across every organisation), add this file to UNSCOPED_HELPER_FILES in eslint.config.js with its reason, and say why in the pull request.',
+          'poolAsTx runs without an organisation (AG-2.2). Use readOrg(ctx.db, orgId, fn) for a read, or changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts for an operator change (it runs changeOrg of @tinnox/db), where row-level security limits every statement to that organisation. If the organisation really is not known yet (a credential is still being resolved, or a sec.* wrapper works across every organisation), add this file to UNSCOPED_HELPER_FILES in eslint.config.js with its reason, and say why in the pull request.',
       },
     ],
   },
@@ -1201,7 +1201,7 @@ const IMPORT_FACETS = [
         regex: '^@tinnox/db$',
         importNames: PERMIT_MAKERS,
         message:
-          'Only what judges the caller of a change issues its WritePermit (SCR-34; the files of WRITE_PERMIT_ISSUERS in eslint.config.js). An operator route calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts and returns { value, audit }; it never holds the permit. A change with no operator behind it does not make a permit of its own either: a player route calls changeAsDevice(ctx, request, device, fn) with the device verifyDeviceCredential returned (apps/api/src/auth/device.ts), the alert check and the media pipeline call changeAsJob(pool, job, orgId, fn) (apps/api/src/jobs.ts), an offline tool calls changeOrgAsMigrator(pool, orgId, statement, fn) from @tinnox/db/migrate, and a refusal that changed nothing is written with recordRefusal(ctx, request, session, event) (apps/api/src/auth/refusal.ts). A caller of a kind none of these fits is decided in its pull request, as a new entry of WRITE_PERMIT_ISSUERS.',
+          'Only what judges the caller of a change issues its WritePermit (SCR-34; the files of WRITE_PERMIT_ISSUERS in eslint.config.js). An operator route calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts and returns { value, audit }; it never holds the permit. A change with no operator behind it does not make a permit of its own either: a player route calls changeAsDevice(ctx, request, device, fn) with the device verifyDeviceCredential returned (apps/api/src/auth/device.ts), the alert check and the media pipeline call changeAsJob(db, job, orgId, fn) (apps/api/src/jobs.ts), an offline tool calls changeOrgAsMigrator(pool, orgId, statement, fn) from @tinnox/db/migrate, and a refusal that changed nothing is written with recordRefusal(ctx, request, session, event) (apps/api/src/auth/refusal.ts). A caller of a kind none of these fits is decided in its pull request, as a new entry of WRITE_PERMIT_ISSUERS.',
       },
     ],
   },
@@ -1215,7 +1215,7 @@ const IMPORT_FACETS = [
         regex: '^@tinnox/db$',
         importNames: STATEMENT_MAKERS,
         message:
-          'Only the helpers that read a statement from its table make an AuditStatement (SCR-34; the files of STATEMENT_ISSUERS in eslint.config.js), so a change is never held to a statement its caller wrote. A route outside the operator table passes routeStatement(request) to changePreOrg, a job runs through changeAsJob(pool, job, orgId, fn) (jobStatement), a refusal through recordRefusal(ctx, request, session, event) (refusalStatement; all three in apps/api/src/route-audit.ts and its callers), and a provisioning command passes provisionStatement(command) from scripts/lib/provision.ts to changeOrgAsMigrator or changePreOrg. A new table of statements is decided in its pull request, as a new entry of STATEMENT_ISSUERS.',
+          'Only the helpers that read a statement from its table make an AuditStatement (SCR-34; the files of STATEMENT_ISSUERS in eslint.config.js), so a change is never held to a statement its caller wrote. A route outside the operator table passes routeStatement(request) to changePreOrg, a job runs through changeAsJob(db, job, orgId, fn) (jobStatement), a refusal through recordRefusal(ctx, request, session, event) (refusalStatement; all three in apps/api/src/route-audit.ts and its callers), and a provisioning command passes provisionStatement(command) from scripts/lib/provision.ts to changeOrgAsMigrator or changePreOrg. A new table of statements is decided in its pull request, as a new entry of STATEMENT_ISSUERS.',
       },
     ],
   },
@@ -1228,7 +1228,7 @@ const IMPORT_FACETS = [
       {
         regex: '(^|/)jobs\\.ts$',
         message:
-          'apps/api/src/jobs.ts is the entry of the jobs that run with no request (SCR-34): changeAsJob changes an organisation with no role check and no credential, so only the alert check and the media pipeline may import it (JOB_CHANGE_FILES in eslint.config.js). An operator route calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts, which checks the role again first; a player route calls changeAsDevice(ctx, request, device, fn) from apps/api/src/auth/device.ts; a read calls readOrg(pool, orgId, fn) from @tinnox/db. A new job gets its row in JOB_AUDIT (apps/api/src/route-audit.ts) and its file in JOB_CHANGE_FILES with its reason, in its pull request.',
+          'apps/api/src/jobs.ts is the entry of the jobs that run with no request (SCR-34): changeAsJob changes an organisation with no role check and no credential, so only the alert check and the media pipeline may import it (JOB_CHANGE_FILES in eslint.config.js). An operator route calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts, which checks the role again first; a player route calls changeAsDevice(ctx, request, device, fn) from apps/api/src/auth/device.ts; a read calls readOrg(ctx.db, orgId, fn) from @tinnox/db. A new job gets its row in JOB_AUDIT (apps/api/src/route-audit.ts) and its file in JOB_CHANGE_FILES with its reason, in its pull request.',
       },
     ],
   },
@@ -1243,7 +1243,7 @@ const IMPORT_FACETS = [
         regex: '^@tinnox/db$',
         importNames: PRE_ORG_OPENERS,
         message:
-          'changePreOrg is for a transaction that starts before the organisation is known (SCR-34): its enterOrg gives a handle that writes for any OrgId, with no permit and no role check. An operator change calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts, which checks the role again first, and returns { value, audit }; a read calls readOrg(pool, orgId, fn) from @tinnox/db. If this file really resolves a credential to its organisation inside the transaction, add it to PRE_ORG_CHANGE_FILES in eslint.config.js with its reason, and say why in the pull request.',
+          'changePreOrg is for a transaction that starts before the organisation is known (SCR-34): its enterOrg gives a handle that writes for any OrgId, with no permit and no role check. An operator change calls changeAsOperator(ctx, request, fn) from apps/api/src/auth/permissions.ts, which checks the role again first, and returns { value, audit }; a read calls readOrg(ctx.db, orgId, fn) from @tinnox/db. If this file really resolves a credential to its organisation inside the transaction, add it to PRE_ORG_CHANGE_FILES in eslint.config.js with its reason, and say why in the pull request.',
       },
     ],
   },

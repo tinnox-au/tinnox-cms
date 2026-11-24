@@ -14,6 +14,7 @@ import {
   type AuditStatement,
   type Change,
 } from './change.ts';
+import { registerOwnHandle, type Database } from './database.ts';
 import { errorField } from './error-field.ts';
 import { mintOrgId } from './org-id.ts';
 import type { Pool } from './pool.ts';
@@ -49,8 +50,12 @@ declare const migratorBrand: unique symbol;
  * pool where a MigratorPool is wanted. It does not stop a deliberate cast by itself: lint
  * refuses a cast to MigratorPool outside this file (NO_MIGRATOR_POOL_CAST in eslint.config.js),
  * and what that rule cannot see is left to review.
+ *
+ * It is its own `Database` (adoption plan step 21), so a tool passes it to changePreOrg as the
+ * API passes AppContext.db, and the tool keeps the pool itself, which it ends and which asDefiner
+ * compares with the pool of its transaction. A runtime pool is not one.
  */
-export type MigratorPool = Pool & { readonly [migratorBrand]: true };
+export type MigratorPool = Pool & Database & { readonly [migratorBrand]: true };
 
 /** The pools connectMigrator returned, for what must not run on any other. */
 const checked = new WeakSet<Pool>();
@@ -97,6 +102,7 @@ export async function connectMigrator(
     throw error;
   }
   checked.add(pool);
+  registerOwnHandle(pool);
   return pool as MigratorPool;
 }
 

@@ -74,7 +74,7 @@ export function registerAlertRecipientRoutes(app: FastifyInstance, ctx: AppConte
 
   app.get(ROUTES.alertRecipients, async (request): Promise<AlertRecipientListResponse> => {
     const session = operatorOf(request);
-    return readOrg(ctx.pool, session.orgId, async (tx) => {
+    return readOrg(ctx.db, session.orgId, async (tx) => {
       const { rows } = await tx.query<RecipientRow>(
         `SELECT ${RECIPIENT_COLUMNS} FROM alert_recipient
          WHERE org_id = app_org_id() ORDER BY created_at, id LIMIT $1`,
@@ -206,7 +206,7 @@ export function registerAlertConfirmRoute(app: FastifyInstance, ctx: AppContext)
       // every write does; nothing was confirmed or audited (SEC-3, BEH-3). The change is held
       // to the route's entry in OTHER_ROUTE_AUDIT: alert_recipient.confirm, or nothing.
       const statement = routeStatement(request);
-      const confirmed = await changePreOrg(ctx.pool, statement, async (pre, enterOrg) => {
+      const confirmed = await changePreOrg(ctx.db, statement, async (pre, enterOrg) => {
         const found = await alertRecipientByTokenHash(pre, tokenHash);
         // A link that matched nothing changed nothing, and answers the same 404 below.
         if (found === null) return { value: false, audit: unaudited('nothing_changed') };

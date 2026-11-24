@@ -9,7 +9,6 @@ import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
-  createPool,
   heartbeatLogPurge,
   loginStatePut,
   loginStateTake,
@@ -24,7 +23,6 @@ import {
   sessionRevoke,
   sessionRevokeUnaudited,
   type OrgTx,
-  type Pool,
 } from '../src/index.ts';
 import { readSchemaFacts, schemaInvariantProblems } from '../src/schema-invariants.ts';
 import {
@@ -39,6 +37,9 @@ import {
   withOrg,
   withoutOrg,
   withResolvedOrg,
+  createPool,
+  type Pool,
+  databaseOn,
 } from '../src/testing.ts';
 import {
   appPool,
@@ -227,7 +228,7 @@ describe('the audit-debt guard refuses a change with no audit row (D3)', () => {
 
   it('refuses a statement that commits on its own: the session revoked with no audit row', async () => {
     const idHash = await newSession();
-    const message = await refusalOf(sessionRevokeUnaudited(judged, idHash));
+    const message = await refusalOf(sessionRevokeUnaudited(databaseOn(judged), idHash));
     expect(message).toContain('changed public.session (UPDATE) as tinnox_app');
     // The same revocation with its audit row.
     await withoutOrg(judged, async (tx) => {
@@ -283,24 +284,24 @@ describe('what D3 exempts owes nothing', () => {
       ]);
     });
     // The purge of that history, in a statement of its own as housekeeping sends it.
-    expect(await heartbeatLogPurge(poolAsTx(judged), 3600)).toBeGreaterThanOrEqual(1);
+    expect(await heartbeatLogPurge(poolAsTx(databaseOn(judged)), 3600)).toBeGreaterThanOrEqual(1);
   });
 
   it('login state, put and taken', async () => {
     const stateHash = hash();
-    await loginStatePut(poolAsTx(judged), {
+    await loginStatePut(poolAsTx(databaseOn(judged)), {
       stateHash,
       codeVerifier: 'v'.repeat(43),
       nonce: 'n'.repeat(43),
       returnTo: null,
       ttlSeconds: 60,
     });
-    expect(await loginStateTake(poolAsTx(judged), stateHash)).not.toBeNull();
+    expect(await loginStateTake(poolAsTx(databaseOn(judged)), stateHash)).not.toBeNull();
   });
 
   it('session activity: last_seen_at alone', async () => {
     const idHash = await newSession();
-    expect(await sessionByIdHash(poolAsTx(judged), idHash, 3600)).not.toBeNull();
+    expect(await sessionByIdHash(poolAsTx(databaseOn(judged)), idHash, 3600)).not.toBeNull();
   });
 
   it('the wrong-attempt counter of a pairing poll, but not the attempt that locks the session', async () => {
@@ -328,8 +329,8 @@ describe('what D3 exempts owes nothing', () => {
       `UPDATE public.pairing_session SET created_at = now() - interval '2 hours' WHERE id = $1`,
       [pairing.id],
     );
-    expect(await sessionPurgeExpired(poolAsTx(judged))).toBeGreaterThanOrEqual(1);
-    expect(await pairingPurge(poolAsTx(judged), 3600)).toBeGreaterThanOrEqual(1);
+    expect(await sessionPurgeExpired(poolAsTx(databaseOn(judged)))).toBeGreaterThanOrEqual(1);
+    expect(await pairingPurge(poolAsTx(databaseOn(judged)), 3600)).toBeGreaterThanOrEqual(1);
   });
 });
 
@@ -564,11 +565,11 @@ describe('whom the guard judges', () => {
       async () => {
         // Another table is judged as ever.
         await refusalOf(withOrg(judged, org.orgId, (tx) => newFolder(tx, 'Still judged')));
-        return sessionRevokeUnaudited(judged, idHash);
+        return sessionRevokeUnaudited(databaseOn(judged), idHash);
       },
     );
     expect(ended).toBe(true);
-    await refusalOf(sessionRevokeUnaudited(judged, await newSession()));
+    await refusalOf(sessionRevokeUnaudited(databaseOn(judged), await newSession()));
     await expect(
       whileUnauditedAllowed(migratorUrl(), 'session', 'because', () => Promise.resolve()),
     ).rejects.toThrow(/needs the decision that leaves this path unaudited/);

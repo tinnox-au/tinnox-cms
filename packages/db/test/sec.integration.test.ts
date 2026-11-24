@@ -28,9 +28,15 @@ import {
   sessionRevokeUnaudited,
   sha256,
   type Autocommit,
-  type Pool,
 } from '../src/index.ts';
-import { auditScoped, auditUnscoped, withOrg, withoutOrg } from '../src/testing.ts';
+import {
+  auditScoped,
+  auditUnscoped,
+  withOrg,
+  withoutOrg,
+  type Pool,
+  databaseOn,
+} from '../src/testing.ts';
 import {
   appPool,
   asDefiner,
@@ -56,7 +62,7 @@ let b: TestOrg;
 
 beforeAll(async () => {
   pool = appPool('calls the sec.* functions directly, as the runtime role', 8);
-  db = poolAsTx(pool);
+  db = poolAsTx(databaseOn(pool));
   migrator = await migratorClient();
   a = await createOrg(migrator, 'Sec A');
   b = await createOrg(migrator, 'Sec B');
@@ -1074,7 +1080,7 @@ describe('audit helpers', () => {
 describe('the two writes outside a transaction (D2, CX-01)', () => {
   it('auditStandalone commits a refusal on its own, where no organisation can read it (D2)', async () => {
     const marker = `standalone-${randomUUID()}`;
-    await auditStandalone(pool, {
+    await auditStandalone(databaseOn(pool), {
       actorType: 'player',
       actorId: null,
       action: 'player.auth_rejected',
@@ -1113,7 +1119,7 @@ describe('the two writes outside a transaction (D2, CX-01)', () => {
     const marker = `standalone-${randomUUID()}`;
     // Defined outside the callback: lint reports the form it can read.
     const writeRefusal = (): Promise<void> =>
-      auditStandalone(pool, {
+      auditStandalone(databaseOn(pool), {
         actorType: 'anonymous',
         actorId: null,
         action: 'auth.login',
@@ -1151,10 +1157,10 @@ describe('the two writes outside a transaction (D2, CX-01)', () => {
     };
     const before = await auditRows();
     expect(await sessionByIdHash(db, idHash, 1800)).not.toBeNull();
-    expect(await sessionRevokeUnaudited(pool, idHash)).toBe(true);
+    expect(await sessionRevokeUnaudited(databaseOn(pool), idHash)).toBe(true);
     expect(await sessionByIdHash(db, idHash, 1800)).toBeNull();
-    expect(await sessionRevokeUnaudited(pool, idHash)).toBe(false);
-    expect(await sessionRevokeUnaudited(pool, hash())).toBe(false);
+    expect(await sessionRevokeUnaudited(databaseOn(pool), idHash)).toBe(false);
+    expect(await sessionRevokeUnaudited(databaseOn(pool), hash())).toBe(false);
     expect(await auditRows()).toBe(before);
   });
 });

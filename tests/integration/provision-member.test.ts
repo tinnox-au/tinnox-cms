@@ -25,6 +25,7 @@ import {
   whileAuditFails,
   withOrg,
   withoutOrg,
+  wrappedMigratorPool,
 } from '@tinnox/db/testing';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -246,7 +247,7 @@ async function removeMember(org: TestOrg, gone: TestOrg): Promise<void> {
 }
 
 /** The provisioning connection, with `before` awaited ahead of every statement; a rejection fails it. */
-function intercepted<P extends pg.Pool>(
+function intercepted<P extends MigratorPool>(
   real: P,
   before: (text: string, values: readonly unknown[] | undefined) => Promise<void>,
 ): P {
@@ -256,23 +257,26 @@ function intercepted<P extends pg.Pool>(
       ? (value as (...args: unknown[]) => unknown).bind(target)
       : value;
   };
-  return new Proxy(real, {
-    get(target, key) {
-      if (key !== 'connect') return bound(target, key);
-      return async () => {
-        const client = await target.connect();
-        return new Proxy(client, {
-          get(inner, name) {
-            if (name !== 'query') return bound(inner, name);
-            return async (text: string, values?: unknown[]) => {
-              await before(text, values);
-              return inner.query(text, values);
-            };
-          },
-        });
-      };
-    },
-  });
+  // The tool passes the wrapper to changePreOrg, as it would the pool connectMigrator returned.
+  return wrappedMigratorPool(
+    new Proxy(real, {
+      get(target, key) {
+        if (key !== 'connect') return bound(target, key);
+        return async () => {
+          const client = await target.connect();
+          return new Proxy(client, {
+            get(inner, name) {
+              if (name !== 'query') return bound(inner, name);
+              return async (text: string, values?: unknown[]) => {
+                await before(text, values);
+                return inner.query(text, values);
+              };
+            },
+          });
+        };
+      },
+    }),
+  );
 }
 
 describe('provision-member fulfil', () => {

@@ -107,7 +107,7 @@ const TESTS = [
 ] as const;
 
 const OFF_TRANSACTION =
-  /^Do not call query\(\) on .+: only a transaction handle with an organisation takes a statement \(the tx that the callback of readOrg or changeOrg receives, or that enterOrg returns inside changePreOrg\)\. .* Use readOrg\(pool, orgId, \(tx\) => tx\.query\(\.\.\.\)\) for a read, changeAsOperator\(ctx, request, fn\) from apps\/api\/src\/auth\/permissions\.ts for an operator change, a typed sec\.\* wrapper from @tinnox\/db .*, or ping\(pool\) for a liveness probe\. An offline tool that reads across organisations sends the statement on the handle asDefiner gives its work \(@tinnox\/db\/migrate\)\.$/;
+  /^Do not call query\(\) on .+: only a transaction handle with an organisation takes a statement \(the tx that the callback of readOrg or changeOrg receives, or that enterOrg returns inside changePreOrg\)\. .* Use readOrg\(ctx\.db, orgId, \(tx\) => tx\.query\(\.\.\.\)\) for a read, changeAsOperator\(ctx, request, fn\) from apps\/api\/src\/auth\/permissions\.ts for an operator change, a typed sec\.\* wrapper from @tinnox\/db .*, or ping\(ctx\.db\) for a liveness probe\. An offline tool that reads across organisations sends the statement on the handle asDefiner gives its work \(@tinnox\/db\/migrate\)\.$/;
 
 // The first case of each describe may be the one that loads eslint.config.js, which a busy CI
 // runner can stretch towards the unit project's 5 s default (GAP-1).
@@ -577,7 +577,7 @@ describe('casts to SqlFragment (OTH-12)', { timeout: 30_000 }, () => {
 describe('the unscoped helpers (AG-2.2)', { timeout: 30_000 }, () => {
   const unscoped = (name: string): RegExp =>
     new RegExp(
-      `^'${name}' import from '@tinnox/db' is restricted from being used by a pattern\\. poolAsTx runs without an organisation \\(AG-2\\.2\\)\\. Use readOrg\\(pool, orgId, fn\\) for a read, or changeAsOperator\\(ctx, request, fn\\) from apps/api/src/auth/permissions\\.ts for an operator change .* add this file to UNSCOPED_HELPER_FILES in eslint\\.config\\.js with its reason, and say why in the pull request\\.$`,
+      `^'${name}' import from '@tinnox/db' is restricted from being used by a pattern\\. poolAsTx runs without an organisation \\(AG-2\\.2\\)\\. Use readOrg\\(ctx\\.db, orgId, fn\\) for a read, or changeAsOperator\\(ctx, request, fn\\) from apps/api/src/auth/permissions\\.ts for an operator change .* add this file to UNSCOPED_HELPER_FILES in eslint\\.config\\.js with its reason, and say why in the pull request\\.$`,
     );
   // withoutOrg left this rule in step 20: @tinnox/db no longer exports it, and
   // tinnox/no-legacy-transaction refuses the name (scripts/lib/legacy-transaction-lint.test.ts).
@@ -766,7 +766,7 @@ describe('newOrgId (D25)', { timeout: 30_000 }, () => {
 
 describe('the entries of @tinnox/db (AG-1.10)', { timeout: 30_000 }, () => {
   const MIGRATE =
-    /^'@tinnox\/db\/migrate' import is restricted from being used by a pattern\. @tinnox\/db\/migrate is for the offline tools that connect as tinnox_migrator: .* The API holds only the tinnox_app connection: use createPool, readOrg, changeOrg \(through changeAsOperator in apps\/api\/src\/auth\/permissions\.ts\) and the typed sec\.\* wrappers from @tinnox\/db\./;
+    /^'@tinnox\/db\/migrate' import is restricted from being used by a pattern\. @tinnox\/db\/migrate is for the offline tools that connect as tinnox_migrator: .* The API holds only the tinnox_app connection, as the Database of createDatabase \(AppContext\.db\): use readOrg, changeOrg \(through changeAsOperator in apps\/api\/src\/auth\/permissions\.ts\) and the typed sec\.\* wrappers from @tinnox\/db\./;
   const TESTING =
     /^'@tinnox\/db\/testing' import is restricted from being used by a pattern\. @tinnox\/db\/testing is for test files only\. Outside a test, open the transaction with readOrg or changeOrg from @tinnox\/db \(an operator route calls changeAsOperator\(ctx, request, fn\) from apps\/api\/src\/auth\/permissions\.ts\), or with changePreOrg while a credential is still being resolved to its organisation \(the files of PRE_ORG_CHANGE_FILES in eslint\.config\.js\)\./;
   const importOf = (specifier: string) => `import { x } from '${specifier}';`;

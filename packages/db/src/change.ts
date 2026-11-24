@@ -55,7 +55,7 @@ import type {
   UnauditedReason,
 } from '@tinnox/contracts';
 import { auditRowsOn } from './audit-note.ts';
-import type { Pool } from './pool.ts';
+import { poolOfDatabase, type Database } from './database.ts';
 import { auditScoped, auditUnscoped, type AuditInput } from './sec.ts';
 import { isAuditedInSql, receiptOf, type AuditedInSql } from './sql-audit.ts';
 import { withOrg, withResolvedOrg, type OrgId, type OrgTx, type PreOrgTx, type Tx } from './tx.ts';
@@ -352,14 +352,14 @@ async function record<T>(
  * `changeOrgAsMigrator`).
  */
 export async function changeOrg<T, Granted>(
-  pool: Pool,
+  db: Database,
   orgId: OrgId,
   permit: WritePermit<Granted>,
   fn: (tx: OrgTx, granted: Granted) => Promise<Change<T>>,
 ): Promise<T> {
   const held = termsOf(permit);
   return withOrg(
-    pool,
+    poolOfDatabase(db),
     orgId,
     async (tx) => {
       const granted = await held.recheck(tx);
@@ -385,7 +385,7 @@ export async function changeOrg<T, Granted>(
  * `provisionStatement(command)` of scripts/lib/provision.ts. Only those make one (`AuditStatement`).
  */
 export async function changePreOrg<T>(
-  pool: Pool,
+  db: Database,
   statement: AuditStatement,
   fn: (tx: PreOrgTx, enterOrg: (orgId: OrgId) => Promise<OrgTx>) => Promise<Change<T>>,
 ): Promise<T> {
@@ -393,7 +393,7 @@ export async function changePreOrg<T>(
   // would otherwise run with no statement to be held to, or one it wrote itself.
   const held = termsOfStatement('changePreOrg', statement);
   return withResolvedOrg(
-    pool,
+    poolOfDatabase(db),
     async (pre, enterOrg) => {
       const entered: OrgTx[] = [];
       const change = await fn(pre, async (orgId) => {

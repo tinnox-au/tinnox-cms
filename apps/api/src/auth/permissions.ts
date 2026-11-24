@@ -566,7 +566,7 @@ export async function changeAsOperator<T>(
   const session = operatorOf(request);
   const permit = writePermit(request, session, options);
   try {
-    return await changeOrg(ctx.pool, session.orgId, permit, fn);
+    return await changeOrg(ctx.db, session.orgId, permit, fn);
   } catch (error) {
     throw await settle(ctx, request, session, error);
   }

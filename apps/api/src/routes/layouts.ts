@@ -205,12 +205,12 @@ const layoutInUse = (message: string, details?: { path: string; message: string 
   new HttpError(409, 'layout_in_use', message, details === undefined ? {} : { details });
 
 export function registerLayoutRoutes(app: FastifyInstance, ctx: AppContext): void {
-  const { pool } = ctx;
+  const { db } = ctx;
 
   // shortcut: no pagination, the list is capped at ABSOLUTE.maxListItems; page it when an organisation has more layouts than that.
   app.get(ROUTES.layouts, async (request): Promise<LayoutListResponse> => {
     const session = operatorOf(request);
-    return readOrg(pool, session.orgId, async (tx) => ({ items: await loadLayouts(tx, null) }));
+    return readOrg(db, session.orgId, async (tx) => ({ items: await loadLayouts(tx, null) }));
   });
 
   app.post(ROUTES.layouts, async (request, reply): Promise<LayoutDto> => {
@@ -232,7 +232,7 @@ export function registerLayoutRoutes(app: FastifyInstance, ctx: AppContext): voi
   app.get(ROUTES.layoutPattern, async (request): Promise<LayoutDto> => {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
-    return readOrg(pool, session.orgId, async (tx) => {
+    return readOrg(db, session.orgId, async (tx) => {
       const [dto] = await loadLayouts(tx, id);
       if (dto === undefined) throw notFound('The layout');
       return dto;

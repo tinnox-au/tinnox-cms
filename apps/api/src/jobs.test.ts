@@ -12,12 +12,13 @@ import {
   type AuditInput,
   type Change,
   type OrgTx,
-  type Pool,
+  type Database,
 } from '@tinnox/db';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import { DISPLAY, fakePool, ORG, SET_ORG } from './change.test-support.ts';
 import { changeAsJob } from './jobs.ts';
 import { JOB_AUDIT, jobStatement, type JobName } from './route-audit.ts';
+import { databaseOn } from '@tinnox/db/testing';
 
 const BY_THE_SYSTEM = { actorType: 'system', actorId: null, result: 'success' } as const;
 const OFFLINE_ALERT = {
@@ -40,7 +41,7 @@ const VALIDATED = {
 describe('a change by a job on changeOrg (SCR-34)', () => {
   it('runs the change for the organisation and writes the audit rows it returned, in order', async () => {
     const { pool, transactions } = fakePool();
-    const claimed = await changeAsJob(pool, 'display_alerts', ORG, async (tx) => {
+    const claimed = await changeAsJob(databaseOn(pool), 'display_alerts', ORG, async (tx) => {
       await tx.query('CLAIM TRANSITIONS');
       return { value: 2, audit: [OFFLINE_ALERT, ONLINE_ALERT] };
     });
@@ -60,7 +61,7 @@ describe('a change by a job on changeOrg (SCR-34)', () => {
 
   it('holds each job to its own row of JOB_AUDIT', async () => {
     const { pool, transactions } = fakePool();
-    await changeAsJob(pool, 'media_pipeline', ORG, () =>
+    await changeAsJob(databaseOn(pool), 'media_pipeline', ORG, () =>
       Promise.resolve({ value: 1, audit: VALIDATED }),
     );
     expect(transactions.at(-1)).toEqual([
@@ -71,7 +72,7 @@ describe('a change by a job on changeOrg (SCR-34)', () => {
     ]);
 
     await expect(
-      changeAsJob(pool, 'display_alerts', ORG, async (tx) => {
+      changeAsJob(databaseOn(pool), 'display_alerts', ORG, async (tx) => {
         await tx.query('UPDATE MEDIA');
         return { value: 1, audit: VALIDATED };
       }),
@@ -80,7 +81,7 @@ describe('a change by a job on changeOrg (SCR-34)', () => {
     );
     expect(transactions.at(-1)?.at(-1)).toBe('ROLLBACK');
     await expect(
-      changeAsJob(pool, 'media_pipeline', ORG, () =>
+      changeAsJob(databaseOn(pool), 'media_pipeline', ORG, () =>
         Promise.resolve({ value: 1, audit: OFFLINE_ALERT }),
       ),
     ).rejects.toThrow(
@@ -90,29 +91,31 @@ describe('a change by a job on changeOrg (SCR-34)', () => {
 
   it('commits a run that found nothing to do, and takes no reason a job does not state', async () => {
     const { pool, transactions } = fakePool();
-    await changeAsJob(pool, 'media_pipeline', ORG, () =>
+    await changeAsJob(databaseOn(pool), 'media_pipeline', ORG, () =>
       Promise.resolve({ value: false, audit: unaudited('nothing_changed') }),
     );
     expect(transactions).toEqual([['BEGIN', SET_ORG, 'COMMIT']]);
     await expect(
-      changeAsJob(pool, 'display_alerts', ORG, () =>
+      changeAsJob(databaseOn(pool), 'display_alerts', ORG, () =>
         Promise.resolve({ value: 0, audit: unaudited('telemetry') }),
       ),
     ).rejects.toThrow(/unaudited\('telemetry'\), but the row of display_alerts in JOB_AUDIT/);
     await expect(
-      changeAsJob(pool, 'display_alerts', ORG, () => Promise.resolve({ value: 0, audit: [] })),
+      changeAsJob(databaseOn(pool), 'display_alerts', ORG, () =>
+        Promise.resolve({ value: 0, audit: [] }),
+      ),
     ).rejects.toThrow(/^changeOrg: the change returned an empty list of audit events/);
   });
 
   it('lets the alert check alone close an episode without an e-mail and no audit row (step 20 ruling, CMS-36)', async () => {
     const { pool, transactions } = fakePool();
-    await changeAsJob(pool, 'display_alerts', ORG, async (tx) => {
+    await changeAsJob(databaseOn(pool), 'display_alerts', ORG, async (tx) => {
       await tx.query('DELETE DISPLAY ALERT');
       return { value: 1, audit: unaudited('alert_closed_silently') };
     });
     expect(transactions).toEqual([['BEGIN', SET_ORG, 'DELETE DISPLAY ALERT', 'COMMIT']]);
     await expect(
-      changeAsJob(pool, 'media_pipeline', ORG, () =>
+      changeAsJob(databaseOn(pool), 'media_pipeline', ORG, () =>
         Promise.resolve({ value: 1, audit: unaudited('alert_closed_silently') }),
       ),
     ).rejects.toThrow(
@@ -121,7 +124,7 @@ describe('a change by a job on changeOrg (SCR-34)', () => {
     // Nor does the alert check take the reasons of the pairing routes or the seed.
     for (const reason of ['pairing_expired_by_time', 'development_seed'] as const) {
       await expect(
-        changeAsJob(pool, 'display_alerts', ORG, () =>
+        changeAsJob(databaseOn(pool), 'display_alerts', ORG, () =>
           Promise.resolve({ value: 1, audit: unaudited(reason) }),
         ),
       ).rejects.toThrow(`unaudited('${reason}'), but the row of display_alerts in JOB_AUDIT`);
@@ -131,7 +134,7 @@ describe('a change by a job on changeOrg (SCR-34)', () => {
   it('refuses a job that has no row, before any statement', async () => {
     const { pool, transactions } = fakePool();
     await expect(
-      changeAsJob(pool, 'housekeeping' as never, ORG, () =>
+      changeAsJob(databaseOn(pool), 'housekeeping' as never, ORG, () =>
         Promise.resolve({ value: 1, audit: unaudited('nothing_changed') }),
       ),
     ).rejects.toThrow(
@@ -160,22 +163,22 @@ describe('a change by a job on changeOrg (SCR-34)', () => {
 // Never called: these lines are for the type checker.
 describe('the permit of a job comes from the entry of the jobs only (SCR-34)', () => {
   it('a job is named, and its change cannot run on changeOrg without the permit', () => {
-    const cases = async (pool: Pool): Promise<void> => {
+    const cases = async (db: Database): Promise<void> => {
       const change = (tx: OrgTx): Promise<Change<number>> =>
         tx.query('SELECT 1').then(() => ({ value: 1, audit: unaudited('nothing_changed') }));
-      await changeAsJob(pool, 'display_alerts', ORG, change);
+      await changeAsJob(db, 'display_alerts', ORG, change);
       // @ts-expect-error a job that changes an organisation has a row in JOB_AUDIT, and this has none
-      await changeAsJob(pool, 'housekeeping', ORG, change);
+      await changeAsJob(db, 'housekeeping', ORG, change);
       // @ts-expect-error a change by a job says which job: there is no form without its name
-      await changeAsJob(pool, ORG, change);
+      await changeAsJob(db, ORG, change);
       // @ts-expect-error changeOrg takes a permit, and a job file has none to give
-      await changeOrg(pool, ORG, change);
+      await changeOrg(db, ORG, change);
       // @ts-expect-error the name of a job is not a permit
-      await changeOrg(pool, ORG, 'display_alerts', change);
+      await changeOrg(db, ORG, 'display_alerts', change);
       // @ts-expect-error nor is its statement: only the entry of the jobs issues the permit
-      await changeOrg(pool, ORG, jobStatement('display_alerts'), change);
+      await changeOrg(db, ORG, jobStatement('display_alerts'), change);
       // @ts-expect-error a job changes { value, audit }, not a bare value
-      await changeAsJob(pool, 'media_pipeline', ORG, () => Promise.resolve(1));
+      await changeAsJob(db, 'media_pipeline', ORG, () => Promise.resolve(1));
     };
     expect(cases).toBeTypeOf('function');
     expectTypeOf(changeAsJob).parameter(1).toEqualTypeOf<'display_alerts' | 'media_pipeline'>();

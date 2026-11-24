@@ -28,6 +28,7 @@ import {
 import type { AppContext } from '../context.ts';
 import { changeAsDevice, verifyDeviceCredential, type VerifiedDevice } from './device.ts';
 import { changeAsOperator } from './permissions.ts';
+import { databaseOn } from '@tinnox/db/testing';
 
 const TOKEN_HASH = Buffer.alloc(32, 7);
 const REGISTRATION_ROUTE = `${PLAYER_PREFIX}/registration`;
@@ -43,7 +44,7 @@ const REVOKED_BY_THE_PLAYER = {
 } as const satisfies AuditInput;
 
 async function knownDevice(pool: ReturnType<typeof fakePool>['pool']): Promise<VerifiedDevice> {
-  const device = await verifyDeviceCredential(poolAsTx(pool), TOKEN_HASH);
+  const device = await verifyDeviceCredential(poolAsTx(databaseOn(pool)), TOKEN_HASH);
   if (device === null) throw new Error('the fake pool knows this credential');
   return device;
 }
@@ -65,7 +66,7 @@ describe('the device-credential check (SCR-34)', () => {
 
   it('gives nothing for an unknown or revoked credential, so there is nothing to change with', async () => {
     const { pool } = fakePool(false);
-    expect(await verifyDeviceCredential(poolAsTx(pool), TOKEN_HASH)).toBeNull();
+    expect(await verifyDeviceCredential(poolAsTx(databaseOn(pool)), TOKEN_HASH)).toBeNull();
   });
 });
 
@@ -177,9 +178,9 @@ describe('the permit of a device comes from the credential check only (SCR-34)',
       // @ts-expect-error a change by a device needs the device: there is no form without
       await changeAsDevice(ctx, request, change);
       // @ts-expect-error changeOrg takes a permit, and a player route has none to give
-      await changeOrg(ctx.pool, device.orgId, change);
+      await changeOrg(ctx.db, device.orgId, change);
       // @ts-expect-error the verified device is the proof for changeAsDevice, not a permit
-      await changeOrg(ctx.pool, device.orgId, device, change);
+      await changeOrg(ctx.db, device.orgId, device, change);
       // @ts-expect-error a device changes { value, audit }, not a bare value
       await changeAsDevice(ctx, request, device, () => Promise.resolve(1));
       // An operator's change takes no device: the role guard decides it.

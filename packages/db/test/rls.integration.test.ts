@@ -8,13 +8,18 @@ import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   assertRuntimeRole,
-  createPool,
   readRuntimeRole,
   RuntimeRoleError,
   runtimeRoleProblems,
-  type Pool,
 } from '../src/index.ts';
-import { withOrg, withoutOrg, withResolvedOrg } from '../src/testing.ts';
+import {
+  withOrg,
+  withoutOrg,
+  withResolvedOrg,
+  createPool,
+  type Pool,
+  databaseOn,
+} from '../src/testing.ts';
 import {
   actingAs,
   appPool,
@@ -433,7 +438,7 @@ describe("createPool's start-up settings cannot be replaced from the connection 
 
 describe('assertRuntimeRole reads the role from the catalogue (AG-1.3)', () => {
   it('accepts the runtime role of the test database', async () => {
-    await expect(assertRuntimeRole(pool)).resolves.toBeUndefined();
+    await expect(assertRuntimeRole(databaseOn(pool))).resolves.toBeUndefined();
   });
 
   it('refuses another login before it reads anything', async () => {
@@ -441,8 +446,10 @@ describe('assertRuntimeRole reads the role from the catalogue (AG-1.3)', () => {
     try {
       // createPool's session check refuses the checkout; the error is the same type, so an
       // entry point prints both alike.
-      await expect(assertRuntimeRole(wrong)).rejects.toThrow(RuntimeRoleError);
-      await expect(assertRuntimeRole(wrong)).rejects.toThrow(/logs in as tinnox_migrator/);
+      await expect(assertRuntimeRole(databaseOn(wrong))).rejects.toThrow(RuntimeRoleError);
+      await expect(assertRuntimeRole(databaseOn(wrong))).rejects.toThrow(
+        /logs in as tinnox_migrator/,
+      );
     } finally {
       await wrong.end();
     }

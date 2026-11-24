@@ -10,7 +10,7 @@ import { createHash } from 'node:crypto';
 import type { AuditAction, AuditEventOf } from '@tinnox/contracts';
 import { noteAuditRow } from './audit-note.ts';
 import { mintOrgId } from './org-id.ts';
-import type { Pool } from './pool.ts';
+import type { Database } from './database.ts';
 import { statementsOf } from './pre-org.ts';
 import { poolAsTx, type Autocommit, type OrgId, type OrgTx, type PreOrgTx } from './tx.ts';
 
@@ -228,8 +228,8 @@ export async function sessionRevoke(
  * other revocation uses `sessionRevoke` on the transaction that also writes the audit row. Returns
  * true when a live session was ended.
  */
-export async function sessionRevokeUnaudited(pool: Pool, idHash: Buffer): Promise<boolean> {
-  const { rows } = await poolAsTx(pool, {
+export async function sessionRevokeUnaudited(db: Database, idHash: Buffer): Promise<boolean> {
+  const { rows } = await poolAsTx(db, {
     opener: 'sessionRevokeUnaudited',
     instead:
       'End the session on the outer tx with sessionRevoke(tx, idHash), and write its audit row on the same tx.',
@@ -639,9 +639,9 @@ export type StandaloneAuditEvent =
  * or `changePreOrg` writes it with `auditScoped` or `auditUnscoped` on that change's
  * transaction.
  */
-export async function auditStandalone(pool: Pool, event: StandaloneAuditEvent): Promise<void> {
+export async function auditStandalone(db: Database, event: StandaloneAuditEvent): Promise<void> {
   await writeUnscoped(
-    poolAsTx(pool, {
+    poolAsTx(db, {
       opener: 'auditStandalone',
       instead:
         'Return the event from the outer change as { value, audit }: changeOrg and changePreOrg, and the wrappers built on them (changeAsOperator, changeAsDevice, changeAsJob, changeOrgAsMigrator), write it on that transaction.',

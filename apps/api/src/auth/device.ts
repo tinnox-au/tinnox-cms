@@ -41,7 +41,7 @@ export interface VerifiedDevice extends DeviceLookup {
 
 /**
  * The device of a credential, by the SHA-256 of its token; null for an unknown or revoked one.
- * `unscoped` is the handle for lookups before the organisation is known (`poolAsTx(pool)`).
+ * `unscoped` is the handle for lookups before the organisation is known (`poolAsTx(ctx.db)`).
  */
 export async function verifyDeviceCredential(
   unscoped: AnyScope,
@@ -83,5 +83,5 @@ export async function changeAsDevice<T>(
     // Nothing to read again (D8): the lookup that made `device` is the check.
     recheck: () => Promise.resolve(),
   });
-  return changeOrg(ctx.pool, device.orgId, permit, (tx) => fn(tx));
+  return changeOrg(ctx.db, device.orgId, permit, (tx) => fn(tx));
 }

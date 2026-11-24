@@ -7,7 +7,7 @@
  * loadLayouts, loadScheduleDto, loadPlaylistDto, loadFolder, loadTag, loadDisplay,
  * loadMediaRow) are held by the type checker where their read handlers call them.
  */
-import { readOrg, type OrgReadTx, type OrgTx, type Pool } from '@tinnox/db';
+import { readOrg, type OrgReadTx, type OrgTx, type Database } from '@tinnox/db';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import { ORG } from './change.test-support.ts';
 import type { AppContext } from './context.ts';
@@ -35,11 +35,11 @@ describe('the handle a read helper takes (SCR-34)', () => {
     expectTypeOf(loadStatusViews).parameter(0).toEqualTypeOf<OrgReadTx>();
     expectTypeOf(loadPushPlan).parameter(0).toEqualTypeOf<OrgReadTx>();
     expectTypeOf(findPublicationByKey).parameter(0).toEqualTypeOf<OrgReadTx>();
-    const reads = async (pool: Pool, ctx: AppContext): Promise<void> => {
-      await readOrg(pool, ORG, usedBytes);
-      await readOrg(pool, ORG, (tx) => loadStatusViews(tx, ctx, null));
-      await readOrg(pool, ORG, (tx) => loadPushPlan(tx, ctx));
-      await readOrg(pool, ORG, (tx) => findPublicationByKey(tx, 'a-display-id', 'a-key'));
+    const reads = async (db: Database, ctx: AppContext): Promise<void> => {
+      await readOrg(db, ORG, usedBytes);
+      await readOrg(db, ORG, (tx) => loadStatusViews(tx, ctx, null));
+      await readOrg(db, ORG, (tx) => loadPushPlan(tx, ctx));
+      await readOrg(db, ORG, (tx) => findPublicationByKey(tx, 'a-display-id', 'a-key'));
     };
     // Inside a change the same helpers take its handle.
     const inAChange = async (ctx: AppContext, write: OrgTx): Promise<void> => {
@@ -85,13 +85,13 @@ describe('the handle a read helper takes (SCR-34)', () => {
     expectTypeOf(lockDisplayForPublish).parameter(0).toEqualTypeOf<OrgTx>();
     expectTypeOf(createPublication).parameter(0).toEqualTypeOf<OrgTx>();
     expectTypeOf(replaceTags).parameter(0).toEqualTypeOf<OrgTx>();
-    const cases = async (pool: Pool): Promise<void> => {
+    const cases = async (db: Database): Promise<void> => {
       // @ts-expect-error an advisory lock for a publication belongs to the change that publishes
-      await readOrg(pool, ORG, (tx) => lockPublishKey(tx, 'a-display-id', 'a-key'));
+      await readOrg(db, ORG, (tx) => lockPublishKey(tx, 'a-display-id', 'a-key'));
       // @ts-expect-error FOR NO KEY UPDATE on the display
-      await readOrg(pool, ORG, (tx) => lockDisplayForPublish(tx, 'a-display-id'));
+      await readOrg(db, ORG, (tx) => lockDisplayForPublish(tx, 'a-display-id'));
       // @ts-expect-error a DELETE and an INSERT of tag links
-      await readOrg(pool, ORG, (tx) => replaceTags(tx, 'media', 'a-media-id', []));
+      await readOrg(db, ORG, (tx) => replaceTags(tx, 'media', 'a-media-id', []));
     };
     expect(cases).toBeTypeOf('function');
   });

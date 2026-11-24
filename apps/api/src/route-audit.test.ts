@@ -125,7 +125,7 @@ async function builtApp(): Promise<FastifyInstance> {
     OIDC_POST_LOGOUT_REDIRECT_URI: 'http://localhost:5173/',
   });
   // Registering the routes reads the configuration only; nothing else here is ever called.
-  const ctx = { config, pool: {}, now: () => new Date(0), rateLimitScale: 1 } as AppContext;
+  const ctx = { config, db: {}, now: () => new Date(0), rateLimitScale: 1 } as AppContext;
   return buildApp(ctx, { logger: false });
 }
 

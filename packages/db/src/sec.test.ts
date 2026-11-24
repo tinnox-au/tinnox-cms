@@ -12,13 +12,13 @@ import {
   sessionRevokeUnaudited,
   type AnyScope,
   type AuditInput,
+  type Database,
   type OrgId,
   type OrgTx,
-  type Pool,
   type PreOrgTx,
   type StandaloneAuditEvent,
 } from './index.ts';
-import { auditScoped, withoutOrg } from './testing.ts';
+import { auditScoped, withoutOrg, type Pool, databaseOn } from './testing.ts';
 import * as members from './members.ts';
 import * as sec from './sec.ts';
 
@@ -85,13 +85,14 @@ const NESTED_REVOKE = nested(
 );
 // Defined outside the callbacks below: lint reports the form it can read
 // (tinnox/no-nested-transaction), and these cases are the rest, which only the run-time guard sees.
-const writeRefusal = (pool: Pool): Promise<void> => auditStandalone(pool, refusal);
-const endSession = (pool: Pool): Promise<boolean> => sessionRevokeUnaudited(pool, Buffer.alloc(32));
+const writeRefusal = (pool: Pool): Promise<void> => auditStandalone(databaseOn(pool), refusal);
+const endSession = (pool: Pool): Promise<boolean> =>
+  sessionRevokeUnaudited(databaseOn(pool), Buffer.alloc(32));
 
 describe('auditStandalone (D2)', () => {
   it('writes the refusal as one unscoped statement on the pool, outside any transaction', async () => {
     const { pool, onPool, connectionsTaken } = recordingPool();
-    await auditStandalone(pool, refusal);
+    await auditStandalone(databaseOn(pool), refusal);
     expect(onPool).toEqual([
       {
         text: 'SELECT sec.audit_unscoped($1, $2, $3, $4, $5, $6, $7)',
@@ -111,7 +112,7 @@ describe('auditStandalone (D2)', () => {
 
   it('refuses a success event, an actor or object id, and any other action, at compile time', () => {
     // Never called: these lines are for the type checker.
-    const cases = async (pool: Pool, anyEvent: AuditInput): Promise<void> => {
+    const cases = async (db: Database, anyEvent: AuditInput): Promise<void> => {
       const success = { ...refusal, result: 'success' } as const;
       const withActor = { ...refusal, actorId: 'a-member-id' } as const;
       const withObject = { ...refusal, objectType: 'membership', objectId: 'a-member-id' } as const;
@@ -124,19 +125,19 @@ describe('auditStandalone (D2)', () => {
         result: 'failure',
       } as const;
       // @ts-expect-error a success records a change: it is written on the Tx of that change
-      await auditStandalone(pool, success);
+      await auditStandalone(db, success);
       // @ts-expect-error a standalone refusal has no actor id
-      await auditStandalone(pool, withActor);
+      await auditStandalone(db, withActor);
       // @ts-expect-error a standalone refusal has no object
-      await auditStandalone(pool, withObject);
+      await auditStandalone(db, withObject);
       // @ts-expect-error only auth.login and player.auth_rejected are in the union
-      await auditStandalone(pool, anotherAction);
+      await auditStandalone(db, anotherAction);
       // @ts-expect-error a refused sign-in comes from nobody: the actor is anonymous
-      await auditStandalone(pool, asOperator);
+      await auditStandalone(db, asOperator);
       // @ts-expect-error a rejected device credential is denied, never a failure
-      await auditStandalone(pool, failedCredential);
+      await auditStandalone(db, failedCredential);
       // @ts-expect-error the open AuditInput is for auditScoped and auditUnscoped only
-      await auditStandalone(pool, anyEvent);
+      await auditStandalone(db, anyEvent);
     };
     expect(cases).toBeTypeOf('function');
 
@@ -267,12 +268,12 @@ describe('sessionRevokeUnaudited (CX-01 residual)', () => {
   it('ends the session in one statement on the pool and says whether one was live', async () => {
     const idHash = Buffer.alloc(32, 7);
     const live = recordingPool([{ '?column?': 1 }]);
-    expect(await sessionRevokeUnaudited(live.pool, idHash)).toBe(true);
+    expect(await sessionRevokeUnaudited(databaseOn(live.pool), idHash)).toBe(true);
     expect(live.onPool).toEqual([
       { text: 'SELECT 1 FROM sec.session_revoke($1)', values: [idHash] },
     ]);
     expect(live.connectionsTaken()).toBe(0);
-    expect(await sessionRevokeUnaudited(recordingPool().pool, idHash)).toBe(false);
+    expect(await sessionRevokeUnaudited(databaseOn(recordingPool().pool), idHash)).toBe(false);
   });
 
   it('is refused while a transaction is open on the same path, with the revocation to use on the outer tx (U-3)', async () => {
@@ -335,8 +336,8 @@ describe('the handle each wrapper takes (D2, CX-01, AG-2.1, AG-2.2)', () => {
     >();
   });
 
-  it('only the two named exceptions take the pool itself', () => {
-    expectTypeOf<Taking<Wrappers, Pool>>().toEqualTypeOf<
+  it('only the two named exceptions take the database itself', () => {
+    expectTypeOf<Taking<Wrappers, Database>>().toEqualTypeOf<
       'auditStandalone' | 'sessionRevokeUnaudited'
     >();
   });
@@ -374,8 +375,8 @@ describe('the handle each wrapper takes (D2, CX-01, AG-2.1, AG-2.2)', () => {
 
   it('the handle of poolAsTx serves a lookup, and no wrapper that changes data (D2)', () => {
     // Never called: these lines are for the type checker.
-    const cases = async (pool: Pool): Promise<void> => {
-      const autocommit = poolAsTx(pool);
+    const cases = async (db: Database): Promise<void> => {
+      const autocommit = poolAsTx(db);
       await sec.deviceByTokenHash(autocommit, Buffer.alloc(32));
       // @ts-expect-error a change before the organisation is known takes a PreOrgTx
       await sec.sessionRevoke(autocommit, Buffer.alloc(32));
@@ -417,7 +418,7 @@ describe('the organisation a lookup names is an OrgId (AG-2.3)', () => {
   it('the value is the org_id the function returned', async () => {
     const ORG = '00000000-0000-4000-8000-000000000001';
     const { pool } = recordingPool([{ registration_id: 'r', org_id: ORG, display_id: 'd' }]);
-    expect(await sec.deviceByTokenHash(poolAsTx(pool), Buffer.alloc(32))).toEqual({
+    expect(await sec.deviceByTokenHash(poolAsTx(databaseOn(pool)), Buffer.alloc(32))).toEqual({
       registrationId: 'r',
       orgId: ORG,
       displayId: 'd',

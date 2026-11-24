@@ -72,17 +72,18 @@ The API's `dev`, `start` and `alerts:once` scripts pass no `--env-file`. The ent
 
 Form: `postgres://<role>:<password>@127.0.0.1:<POSTGRES_HOST_PORT>/<database>`.
 
-Roles: `tinnox_migrator` owns the schema. `tinnox_app` is `NOSUPERUSER NOBYPASSRLS`, owns nothing, has a 15 s statement timeout. `tinnox_definer` cannot log in, has `BYPASSRLS`, and owns only the functions in schema `sec`. Both API entry points (`main.ts`, `alerts-once.ts`) call `assertConnectionRole(DATABASE_URL, 'tinnox_app')` on the configuration and then `await assertRuntimeRole(pool)`, which reads the session and the role from the catalogue (not superuser, no `BYPASSRLS`, `REPLICATION`, `CREATEROLE` or `CREATEDB`, a member of no role, owning nothing) and makes them exit non-zero before they listen or run. The same call needs the database to answer within the pool's 5 s connect timeout, so a database that is down at start-up is an exit 1, not a degraded start (operations checklist section 8). `createPool` also refuses, on every new connection, a session that does not log in and act as `tinnox_app`.
+Roles: `tinnox_migrator` owns the schema. `tinnox_app` is `NOSUPERUSER NOBYPASSRLS`, owns nothing, has a 15 s statement timeout. `tinnox_definer` cannot log in, has `BYPASSRLS`, and owns only the functions in schema `sec`. Both API entry points (`main.ts`, `alerts-once.ts`) call `assertConnectionRole(DATABASE_URL, 'tinnox_app')` on the configuration and then `await assertRuntimeRole(db)` on the `Database` of `createDatabase`, which reads the session and the role from the catalogue (not superuser, no `BYPASSRLS`, `REPLICATION`, `CREATEROLE` or `CREATEDB`, a member of no role, owning nothing) and makes them exit non-zero before they listen or run. The same call needs the database to answer within the pool's 5 s connect timeout, so a database that is down at start-up is an exit 1, not a degraded start (operations checklist section 8). The pool behind it (`createPool`, which `@tinnox/db` does not export) also refuses, on every new connection, a session that does not log in and act as `tinnox_app`.
 
 ### Tenant context: `@tinnox/db`
 
 ```ts
-createPool(options: { connectionString: string; applicationName?: string; max?: number; statementTimeoutMs?: number }): Pool
-readOrg<T>(pool: Pool, orgId: OrgId, fn: (tx: OrgReadTx) => Promise<T>): Promise<T>   // BEGIN READ ONLY
-changeOrg<T, G>(pool: Pool, orgId: OrgId, permit: WritePermit<G>, fn: (tx: OrgTx, granted: G) => Promise<Change<T>>): Promise<T>
-changePreOrg<T>(pool: Pool, statement: AuditStatement, fn: (tx: PreOrgTx, enterOrg: (orgId: OrgId) => Promise<OrgTx>) => Promise<Change<T>>): Promise<T>
+createDatabase(options: { connectionString: string; applicationName?: string; max?: number; statementTimeoutMs?: number }): Database
+interface Database { end(): Promise<void> }   // marked; the API's AppContext.db: no query(), no connect()
+readOrg<T>(db: Database, orgId: OrgId, fn: (tx: OrgReadTx) => Promise<T>): Promise<T>   // BEGIN READ ONLY
+changeOrg<T, G>(db: Database, orgId: OrgId, permit: WritePermit<G>, fn: (tx: OrgTx, granted: G) => Promise<Change<T>>): Promise<T>
+changePreOrg<T>(db: Database, statement: AuditStatement, fn: (tx: PreOrgTx, enterOrg: (orgId: OrgId) => Promise<OrgTx>) => Promise<Change<T>>): Promise<T>
 interface Change<T> { value: T; audit: Audit }   // the change returns its audit events; changeOrg and changePreOrg write them before COMMIT
-poolAsTx(pool: Pool): Autocommit    // single-statement sec.* lookups; each statement commits on its own
+poolAsTx(db: Database): Autocommit    // single-statement sec.* lookups; each statement commits on its own
 type OrgId = string & { /* marked */ }  // an organisation the database named; only the sec.* lookups return one
 interface Autocommit { query<R>(text: string, values?: readonly unknown[]): Promise<QueryResult<R>> }
 interface OrgReadTx extends Autocommit {}  // marked; the READ ONLY transaction of readOrg
@@ -90,17 +91,18 @@ interface OrgTx extends OrgReadTx {}    // marked; a transaction with the organi
 interface PreOrgTx {}                   // marked; a transaction before the organisation is known: no query()
 type Tx = OrgTx | PreOrgTx
 assertConnectionRole(connectionString: string, expectedRole: string): void
-assertRuntimeRole(pool: Pool): Promise<void>   // rejects with RuntimeRoleError, problems listed
-ping(pool: Pool): Promise<void>                // the liveness probe of /readyz
+assertRuntimeRole(db: Database): Promise<void>   // rejects with RuntimeRoleError, problems listed
+ping(db: Database): Promise<void>                // the liveness probe of /readyz
+sessionLockConnection(db: Database): Promise<PoolClient>   // the alert check's session lock only, until step 22
 sql`...`, sqlParameter(position), joinSql(parts, separator): SqlFragment   // fixed SQL text put together at run time
 sha256(value: string | Uint8Array): Buffer
 ```
 
-The package has three entries. `@tinnox/db` is the runtime API above. `@tinnox/db/migrate` holds what only an offline tool that connects as `tinnox_migrator` may use: `connectMigrator`, `MigratorPool`, `runMigrations`, `resetTestDatabase`, `asDefiner(pool, tx, work)`, the one place that switches to `tinnox_definer` (provisioning's reads across organisations: `work` sends them on the handle it is given, and a row it reads has its `org_id` typed `OrgId`), and `newOrgId()`, for an organisation that is being created (org-create and the seed only; lint refuses it in every other script). `@tinnox/db/testing` holds what only tests may use (`inTx`, `testOrgId` to name a test's organisation, `withNoOrgSet` to send a statement where no organisation is set, the openers `withOrg`, `withoutOrg` and `withResolvedOrg`, and the audit writers `auditScoped` and `auditUnscoped`; `changeOrg` runs on `withOrg`, `changePreOrg` on `withResolvedOrg`, and both write a change's events with the audit writers). Lint refuses the migrator entry in the API's source and the testing entry in every file that is not a test.
+The package has three entries. `@tinnox/db` is the runtime API above. `@tinnox/db/migrate` holds what only an offline tool that connects as `tinnox_migrator` may use: `connectMigrator`, `MigratorPool` (also its own `Database`, which a tool passes to `changePreOrg`), `runMigrations`, `resetTestDatabase`, `asDefiner(pool, tx, work)`, the one place that switches to `tinnox_definer` (provisioning's reads across organisations: `work` sends them on the handle it is given, and a row it reads has its `org_id` typed `OrgId`), and `newOrgId()`, for an organisation that is being created (org-create and the seed only; lint refuses it in every other script). `@tinnox/db/testing` holds what only tests may use (`createPool` and `databaseOn(pool)`, for a pool of the test's own and its `Database`, `inTx`, `testOrgId` to name a test's organisation, `withNoOrgSet` to send a statement where no organisation is set, the openers `withOrg`, `withoutOrg` and `withResolvedOrg`, and the audit writers `auditScoped` and `auditUnscoped`; `changeOrg` runs on `withOrg`, `changePreOrg` on `withResolvedOrg`, and both write a change's events with the audit writers). Lint refuses the migrator entry in the API's source and the testing entry in every file that is not a test.
 
 Lint also holds how the API and the scripts reach the database (`eslint.config.js`; `scripts/lib/db-access-lint.test.ts` runs each rule against fixture text):
 
-- `tinnox/no-query-off-transaction`: `query()` is called only on an `OrgTx` (or, in an offline tool, on the handle `asDefiner` gives its work). A statement on the pool, a pooled client or a `poolAsTx` handle is an error; use `readOrg` for a read, `changeAsOperator` (`apps/api/src/auth/permissions.ts`) for an operator change, a typed `sec.*` wrapper, or `ping(pool)`. The alert check's session lock is the one listed exception (`QUERY_OFF_TRANSACTION`).
+- `tinnox/no-query-off-transaction`: `query()` is called only on an `OrgTx` (or, in an offline tool, on the handle `asDefiner` gives its work). A statement on the pool, a pooled client or a `poolAsTx` handle is an error; use `readOrg` for a read, `changeAsOperator` (`apps/api/src/auth/permissions.ts`) for an operator change, a typed `sec.*` wrapper, or `ping(ctx.db)`. The alert check's session lock is the one listed exception (`QUERY_OFF_TRANSACTION`).
 - `sec.*` SQL is written only in `packages/db/src/sec.ts`; add a wrapper there.
 - `poolAsTx` may be imported only by the files of `UNSCOPED_HELPER_FILES`, each with its reason.
 - Nothing makes an `OrgId` or a transaction handle by a cast, a type predicate or a type argument of a call such as the row type of `query()` (`NO_ORG_ID_FORGERY`, `NO_TX_CAST`); `packages/db/src/org-id.ts` is the one file that makes an `OrgId`.
@@ -114,7 +116,7 @@ Inside `withOrg` write `org_id` explicitly or use `app_org_id()`: `INSERT INTO p
 
 ### Lookups before the organisation is known (schema `sec`, wrappers in `@tinnox/db`)
 
-The wrappers that change data and the two audit writers take a transaction handle, so the change and its audit row commit together, and each names the kind it needs: `sessionCreate`, `sessionRevoke`, `pairingCreate`, `pairingPoll`, `pairingComplete` and `auditUnscoped` take a `PreOrgTx` (inside `changePreOrg`, or `withoutOrg` or `withResolvedOrg` in a test); `pairingClaim`, `pairingCancelClaims`, `sessionRevokeMembership`, `auditScoped`, `lockOrgMembership` and `membershipForCheck` take an `OrgTx` (inside `changeOrg` or `withOrg`, or after `enterOrg`). The other kind of handle, a pool, or the handle of `poolAsTx(pool)`, is a type error there. The lookups, the login state and the purges take any handle, so `poolAsTx(pool)` or a transaction of either kind will do. A lookup that resolves a credential, a job or a confirmation link returns its organisation as an `OrgId` (`membershipByOidcSub`, which takes whatever subject the caller names, returns a plain string). Two functions take the pool and write in a statement of their own: `auditStandalone(pool, event)`, for a refused or failed sign-in and a rejected device credential only (its event type has no `success`), and `sessionRevokeUnaudited(pool, idHash)`, for the sign-out fallback only. Called while a transaction is open, both are refused like any second transaction, and the message names what to do on the outer transaction instead: return the event from the outer change, and `sessionRevoke`. Nothing casts to a transaction handle (lint refuses it); a test opens a transaction with `withoutOrg`, or `inTx` from `@tinnox/db/testing`.
+The wrappers that change data and the two audit writers take a transaction handle, so the change and its audit row commit together, and each names the kind it needs: `sessionCreate`, `sessionRevoke`, `pairingCreate`, `pairingPoll`, `pairingComplete` and `auditUnscoped` take a `PreOrgTx` (inside `changePreOrg`, or `withoutOrg` or `withResolvedOrg` in a test); `pairingClaim`, `pairingCancelClaims`, `sessionRevokeMembership`, `auditScoped`, `lockOrgMembership` and `membershipForCheck` take an `OrgTx` (inside `changeOrg` or `withOrg`, or after `enterOrg`). The other kind of handle, a pool, the `Database`, or the handle of `poolAsTx(db)`, is a type error there. The lookups, the login state and the purges take any handle, so `poolAsTx(ctx.db)` or a transaction of either kind will do. A lookup that resolves a credential, a job or a confirmation link returns its organisation as an `OrgId` (`membershipByOidcSub`, which takes whatever subject the caller names, returns a plain string). Two functions take the database and write in a statement of their own: `auditStandalone(db, event)`, for a refused or failed sign-in and a rejected device credential only (its event type has no `success`), and `sessionRevokeUnaudited(db, idHash)`, for the sign-out fallback only. Called while a transaction is open, both are refused like any second transaction, and the message names what to do on the outer transaction instead: return the event from the outer change, and `sessionRevoke`. Nothing casts to a transaction handle (lint refuses it); a test opens a transaction with `withoutOrg`, or `inTx` from `@tinnox/db/testing`.
 
 ```ts
 membershipByOidcSub(tx, oidcSub): Promise<{ membershipId, orgId, role, orgName } | null>
@@ -136,8 +138,8 @@ pairingPurge(tx, olderThanSeconds): Promise<number>
 deviceByTokenHash(tx, tokenHash): Promise<{ registrationId, orgId, displayId } | null>         // null when revoked
 auditScoped(tx /* withOrg */, event): Promise<void>                                             // @tinnox/db/testing only
 auditUnscoped(tx, event): Promise<void>                                                         // org_id NULL; @tinnox/db/testing only
-auditStandalone(pool, event): Promise<void>                                                     // org_id NULL, refusals only
-sessionRevokeUnaudited(pool, idHash): Promise<boolean>                                          // sign-out fallback only
+auditStandalone(db, event): Promise<void>                                                       // org_id NULL, refusals only
+sessionRevokeUnaudited(db, idHash): Promise<boolean>                                            // sign-out fallback only
 ```
 
 Hashes are `sha256(rawValue)` Buffers. Raw session ids, polling tokens and device tokens are never stored.

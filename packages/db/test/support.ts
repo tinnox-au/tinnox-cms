@@ -3,8 +3,8 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
-import { createPool, violatedConstraint, type OrgId, type Pool } from '../src/index.ts';
-import { testOrgId, unjudgedSql } from '../src/testing.ts';
+import { violatedConstraint, type OrgId } from '../src/index.ts';
+import { testOrgId, unjudgedSql, createPool, type Pool } from '../src/testing.ts';
 
 // The helper that opens a real transaction for the wrappers and the audit writer that take a
 // `PreOrgTx` (D2), the one that names a test's organisation, and the one that lets a test send

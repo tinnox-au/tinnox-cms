@@ -65,7 +65,7 @@ export async function readSession(
   if (typeof raw !== 'string' || !OpaqueTokenSchema.safeParse(raw).success) return null;
   const idHash = sha256(raw);
   const session = await sessionByIdHash(
-    poolAsTx(ctx.pool),
+    poolAsTx(ctx.db),
     idHash,
     ctx.config.sessionIdleTimeoutSeconds,
   );

@@ -171,7 +171,7 @@ function toPublishResponse(row: PublicationRow, replayed: boolean): PublishRespo
 }
 
 export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): void {
-  const { pool, config } = ctx;
+  const { db, config } = ctx;
   const limits = config.limits;
 
   /**
@@ -180,7 +180,7 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
    */
   app.get(ROUTES.playlists, async (request): Promise<PlaylistListResponse> => {
     const session = operatorOf(request);
-    return readOrg(pool, session.orgId, async (tx) => {
+    return readOrg(db, session.orgId, async (tx) => {
       const { rows } = await tx.query<SummaryRow>(
         `SELECT p.id, p.name, p.description, p.created_at, p.updated_at,
                 COALESCE(s.item_count, 0) AS item_count,
@@ -272,7 +272,7 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
   app.get(ROUTES.playlistPattern, async (request): Promise<PlaylistDto> => {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
-    return readOrg(pool, session.orgId, async (tx) => {
+    return readOrg(db, session.orgId, async (tx) => {
       const dto = await loadPlaylistDto(tx, id);
       if (dto === null) throw notFound('The playlist');
       return dto;

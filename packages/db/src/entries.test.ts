@@ -100,6 +100,8 @@ describe('the entries of @tinnox/db (AG-1.10)', () => {
       'auditScanMark',
       'auditScoped',
       'auditUnscoped',
+      'createPool',
+      'databaseOn',
       'ensureAuditDebtGuard',
       'inTx',
       'installAuditDebtGuard',
@@ -114,9 +116,16 @@ describe('the entries of @tinnox/db (AG-1.10)', () => {
       'withOrg',
       'withResolvedOrg',
       'withoutOrg',
+      'wrappedMigratorPool',
     ]);
     expect(Object.keys(root)).toEqual(
-      expect.arrayContaining(['createPool', 'ping', 'readOrg', 'sql', 'deviceByRegistrationId']),
+      expect.arrayContaining([
+        'createDatabase',
+        'ping',
+        'readOrg',
+        'sql',
+        'deviceByRegistrationId',
+      ]),
     );
   });
 
@@ -247,6 +256,29 @@ describe('the entries of @tinnox/db (AG-1.10)', () => {
   it('the runtime entry has no MigratorPool type either (checked by npm run typecheck)', () => {
     // @ts-expect-error MigratorPool is exported from '@tinnox/db/migrate' only.
     expectTypeOf<root.MigratorPool>().toBeAny();
-    expectTypeOf<migrate.MigratorPool>().toExtend<root.Pool>();
+    expectTypeOf<migrate.MigratorPool>().toExtend<testing.Pool>();
+    // A tool passes its pool to changePreOrg as the API passes AppContext.db (step 21).
+    expectTypeOf<migrate.MigratorPool>().toExtend<root.Database>();
+  });
+
+  // Adoption plan step 21: the API holds the database as the handle of createDatabase, which has
+  // no query and no connect. The pool, its maker and what reads the pool behind a handle are
+  // not in the runtime entry; tests reach a pool through the testing entry.
+  it('the runtime entry hands out the database handle, not the pool (step 21)', () => {
+    const fromRoot = Object.keys(root);
+    for (const name of ['createPool', 'databaseOn', 'poolOfDatabase', 'registerOwnHandle']) {
+      expect(
+        fromRoot,
+        `${name} must not be exported by the runtime entry: the API and the alert job hold the Database that createDatabase(options) returns (AppContext.db), and a test makes its pool with createPool and its handle with databaseOn from @tinnox/db/testing`,
+      ).not.toContain(name);
+    }
+    expect(fromRoot).toEqual(
+      expect.arrayContaining(['createDatabase', 'ping', 'assertRuntimeRole']),
+    );
+    expect(Object.keys(testing)).toEqual(expect.arrayContaining(['createPool', 'databaseOn']));
+    // @ts-expect-error The Pool type is exported from '@tinnox/db/testing' only.
+    expectTypeOf<root.Pool>().toBeAny();
+    // @ts-expect-error So is PoolClient.
+    expectTypeOf<root.PoolClient>().toBeAny();
   });
 });

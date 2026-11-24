@@ -220,11 +220,11 @@ function assertCanvasWithinLimits(canvas: Canvas, limits: Limits): void {
 }
 
 export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): void {
-  const { pool, config } = ctx;
+  const { db, config } = ctx;
 
   app.get(ROUTES.sites, async (request): Promise<SiteListResponse> => {
     const session = operatorOf(request);
-    return readOrg(pool, session.orgId, async (tx) => {
+    return readOrg(db, session.orgId, async (tx) => {
       const { rows } = await tx.query<{ id: string; name: string; timezone: string }>(
         'SELECT id, name, timezone FROM site WHERE org_id = app_org_id() ORDER BY name, id',
       );
@@ -234,7 +234,7 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
 
   app.get(ROUTES.displays, async (request): Promise<DisplayListResponse> => {
     const session = operatorOf(request);
-    return readOrg(pool, session.orgId, async (tx) => {
+    return readOrg(db, session.orgId, async (tx) => {
       const { rows } = await tx.query<DisplayRow>(`${DISPLAY_SELECT} ORDER BY d.created_at, d.id`);
       return { items: rows.map(toDisplayDto) };
     });
@@ -290,7 +290,7 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
   app.get(ROUTES.displayPattern, async (request): Promise<DisplayDto> => {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
-    return readOrg(pool, session.orgId, async (tx) => {
+    return readOrg(db, session.orgId, async (tx) => {
       const row = await loadDisplay(tx, id);
       if (row === null) throw notFound('The screen');
       return toDisplayDto(row);
@@ -617,7 +617,7 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
   app.get(ROUTES.displayStatusPattern, async (request): Promise<DeliveryStatusView> => {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
-    return readOrg(pool, session.orgId, async (tx) => {
+    return readOrg(db, session.orgId, async (tx) => {
       const [view] = await loadStatusViews(tx, ctx, id);
       if (view === undefined) throw notFound('The screen');
       return view;
@@ -627,7 +627,7 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
   // The same view for every display, in the order of the display list, in one query.
   app.get(ROUTES.displaysStatus, async (request): Promise<DeliveryStatusListResponse> => {
     const session = operatorOf(request);
-    return readOrg(pool, session.orgId, async (tx) => ({
+    return readOrg(db, session.orgId, async (tx) => ({
       items: await loadStatusViews(tx, ctx, null),
     }));
   });

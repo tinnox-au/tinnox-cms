@@ -224,7 +224,7 @@ describe('heartbeat history stays bounded whatever the player sends', () => {
     expect((await send(pf, body(fresh.id, 1))).status).toBe(200);
 
     const result = await runHousekeeping({
-      pool: t.pool,
+      db: t.ctx.db,
       storage: t.ctx.storage,
       media: t.ctx.media,
       limits: t.config.limits,

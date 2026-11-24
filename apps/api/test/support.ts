@@ -34,16 +34,16 @@ import {
   type ScheduleDto,
   type ScheduleEventInput,
 } from '@tinnox/contracts';
+import { mediaProcessingJobs, poolAsTx, sessionCreate, sha256, type OrgId } from '@tinnox/db';
 import {
+  testOrgId,
+  unjudgedSql,
+  withOrg,
+  withoutOrg,
   createPool,
-  mediaProcessingJobs,
-  poolAsTx,
-  sessionCreate,
-  sha256,
-  type OrgId,
   type Pool,
-} from '@tinnox/db';
-import { testOrgId, unjudgedSql, withOrg, withoutOrg } from '@tinnox/db/testing';
+  databaseOn,
+} from '@tinnox/db/testing';
 import { createDeliveryRegistry } from '@tinnox/delivery';
 import { LocalObjectStorage } from '@tinnox/storage';
 import type { FastifyInstance } from 'fastify';
@@ -142,7 +142,10 @@ export interface TestApp {
   readonly app: FastifyInstance;
   readonly ctx: AppContext;
   readonly config: AppConfig;
-  /** The application's own pool: every route, the media pipeline and the alert check use it. */
+  /**
+   * The application's own pool: every route, the media pipeline and the alert check use it,
+   * through `ctx.db`, the handle `databaseOn(pool)` of @tinnox/db/testing gave it.
+   */
   readonly pool: Pool;
   /**
    * A second pool as tinnox_app, for SQL a test writes itself: arranging rows no route makes,
@@ -208,6 +211,8 @@ export async function startTestApp(
     max: 12,
   });
   const pool = options.wrapPool?.(created) ?? created;
+  // What the API holds in place of the pool (AppContext.db), as createDatabase gives main.ts.
+  const db = databaseOn(pool);
   const testSqlPool = createPool({
     connectionString: config.databaseUrl,
     applicationName: unjudgedSql(
@@ -219,7 +224,7 @@ export async function startTestApp(
   const silent = { info: () => undefined, warn: () => undefined, error: () => undefined };
   const media = new MediaPipeline({
     jobsDir,
-    pool,
+    db,
     storage,
     limits: config.limits,
     logger: silent,
@@ -235,7 +240,7 @@ export async function startTestApp(
   };
   const ctx: AppContext = {
     config,
-    pool,
+    db,
     storage,
     delivery: createDeliveryRegistry({
       browser: {
@@ -820,7 +825,7 @@ export async function settleStrayMediaJobs(pool: Pool): Promise<number> {
   let settled = 0;
   for (;;) {
     // Through the typed wrapper: the organisation it names is what withOrg takes.
-    const jobs = await mediaProcessingJobs(poolAsTx(pool), 5000);
+    const jobs = await mediaProcessingJobs(poolAsTx(databaseOn(pool)), 5000);
     if (jobs.length === 0) return settled;
     const byOrg = new Map<OrgId, string[]>();
     for (const job of jobs) byOrg.set(job.orgId, [...(byOrg.get(job.orgId) ?? []), job.mediaId]);
@@ -965,7 +970,7 @@ export function checkAlerts(
   const mail = overrides.mail ?? t.ctx.mail;
   if (mail === null) throw new Error('this test app has no mailer');
   return runDisplayAlerts({
-    pool: t.pool,
+    db: t.ctx.db,
     now: t.ctx.now(),
     mail,
     portalOrigin: t.config.portalOrigin,

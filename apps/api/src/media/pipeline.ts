@@ -54,8 +54,8 @@ import {
   poolAsTx,
   readOrg,
   unaudited,
+  type Database,
   type MediaProcessingJob,
-  type Pool,
 } from '@tinnox/db';
 import { newObjectKey, type ObjectStorage } from '@tinnox/storage';
 import { changeAsJob } from '../jobs.ts';
@@ -100,7 +100,7 @@ export interface ReceivedUpload {
 
 export interface MediaPipelineOptions {
   readonly jobsDir: string;
-  readonly pool: Pool;
+  readonly db: Database;
   readonly storage: ObjectStorage;
   readonly limits: Limits;
   readonly logger: PipelineLogger;
@@ -151,7 +151,7 @@ function cleanDetail(text: string | null): string | null {
 export class MediaPipeline {
   readonly #inbox: string;
   readonly #outbox: string;
-  readonly #pool: Pool;
+  readonly #db: Database;
   readonly #storage: ObjectStorage;
   readonly #limits: Limits;
   readonly #log: PipelineLogger;
@@ -169,7 +169,7 @@ export class MediaPipeline {
   constructor(options: MediaPipelineOptions) {
     this.#inbox = join(options.jobsDir, 'inbox');
     this.#outbox = join(options.jobsDir, 'outbox');
-    this.#pool = options.pool;
+    this.#db = options.db;
     this.#storage = options.storage;
     this.#limits = options.limits;
     this.#log = options.logger;
@@ -356,7 +356,7 @@ export class MediaPipeline {
 
   /** The oldest `limit` jobs still waiting for validation, in every organisation. */
   async #pending(limit: number): Promise<MediaProcessingJob[]> {
-    return mediaProcessingJobs(poolAsTx(this.#pool), limit);
+    return mediaProcessingJobs(poolAsTx(this.#db), limit);
   }
 
   async #scan(): Promise<void> {
@@ -558,7 +558,7 @@ export class MediaPipeline {
       await this.#fail(job, result.errorCode, cleanDetail(result.errorDetail));
       return;
     }
-    const row = await readOrg(this.#pool, job.orgId, async (tx) => {
+    const row = await readOrg(this.#db, job.orgId, async (tx) => {
       const { rows } = await tx.query<{
         status: string;
         bytes: string | null;
@@ -633,7 +633,7 @@ export class MediaPipeline {
     // its bytes. At worst an unreferenced object stays (review round 3, SCX-03).
     let keep = false;
     try {
-      keep = await changeAsJob(this.#pool, 'media_pipeline', job.orgId, async (tx) => {
+      keep = await changeAsJob(this.#db, 'media_pipeline', job.orgId, async (tx) => {
         const done = await tx.query(
           `UPDATE media
            SET status = 'ready', kind = $2, mime_type = $3, bytes = $4, sha256 = $5,
@@ -689,7 +689,7 @@ export class MediaPipeline {
   }
 
   async #fail(job: MediaProcessingJob, code: MediaErrorCode, detail: string | null): Promise<void> {
-    await changeAsJob(this.#pool, 'media_pipeline', job.orgId, async (tx) => {
+    await changeAsJob(this.#db, 'media_pipeline', job.orgId, async (tx) => {
       const done = await tx.query(
         `UPDATE media SET status = 'failed', error_code = $2, error_detail = $3
          WHERE id = $1 AND org_id = app_org_id() AND status = 'processing'`,

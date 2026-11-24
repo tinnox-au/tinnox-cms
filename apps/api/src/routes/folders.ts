@@ -54,11 +54,11 @@ function isNameTaken(error: unknown): boolean {
 }
 
 export function registerFolderRoutes(app: FastifyInstance, ctx: AppContext): void {
-  const { pool } = ctx;
+  const { db } = ctx;
 
   app.get(ROUTES.folders, async (request): Promise<FolderListResponse> => {
     const session = operatorOf(request);
-    return readOrg(pool, session.orgId, async (tx) => {
+    return readOrg(db, session.orgId, async (tx) => {
       const { rows } = await tx.query<FolderRow>(
         `SELECT ${FOLDER_COLUMNS} FROM folder f
          WHERE f.org_id = app_org_id()

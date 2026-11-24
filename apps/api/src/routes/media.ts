@@ -59,7 +59,7 @@ function megabytes(bytes: number): string {
 }
 
 export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void {
-  const { pool, config } = ctx;
+  const { db, config } = ctx;
   const limits = config.limits;
 
   /** The audit row of an upload refused before any row was written, in its own transaction. */
@@ -82,7 +82,7 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
 
   app.get(ROUTES.media, async (request): Promise<MediaListResponse> => {
     const session = operatorOf(request);
-    return readOrg(pool, session.orgId, async (tx) => {
+    return readOrg(db, session.orgId, async (tx) => {
       const { rows } = await tx.query<MediaRow>(
         `SELECT ${MEDIA_COLUMNS} FROM media m
          WHERE m.org_id = app_org_id() AND m.deleted_at IS NULL
@@ -108,7 +108,7 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
         );
       }
 
-      const used = await readOrg(pool, session.orgId, usedBytes);
+      const used = await readOrg(db, session.orgId, usedBytes);
       const remaining = limits.maxOrgStorageBytes - used;
       if (remaining <= 0) {
         await recordUploadRefusal(request, session, 'denied', { reason: 'storage_quota_exceeded' });
@@ -277,7 +277,7 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
   app.get(ROUTES.mediaItemPattern, async (request): Promise<MediaDto> => {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
-    return readOrg(pool, session.orgId, async (tx) => {
+    return readOrg(db, session.orgId, async (tx) => {
       const row = await loadMediaRow(tx, id);
       if (row === null) throw notFound('The media item');
       return toMediaDto(row);
@@ -413,7 +413,7 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
   app.get(ROUTES.mediaUsagePattern, async (request): Promise<MediaUsageResponse> => {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
-    return readOrg(pool, session.orgId, async (tx) => {
+    return readOrg(db, session.orgId, async (tx) => {
       const media = await tx.query(
         'SELECT 1 FROM media WHERE id = $1 AND org_id = app_org_id() AND deleted_at IS NULL',
         [id],
@@ -454,7 +454,7 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
   ): Promise<FastifyReply> {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
-    const row = await readOrg(pool, session.orgId, async (tx) => {
+    const row = await readOrg(db, session.orgId, async (tx) => {
       const { rows } = await tx.query<{
         id: string;
         status: string;

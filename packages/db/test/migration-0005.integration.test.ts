@@ -24,8 +24,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { OrgId, Pool } from '../src/index.ts';
-import { withOrg } from '../src/testing.ts';
+import type { OrgId } from '../src/index.ts';
+import { withOrg, type Pool } from '../src/testing.ts';
 import { resetTestDatabase, runMigrations, type MigrationResult } from '../src/migrate.ts';
 import { appPool, migratorClient, migratorUrl, testOrgId } from './support.ts';
 

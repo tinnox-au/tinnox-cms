@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import pg from 'pg';
+import { poolOfDatabase, type Database } from './database.ts';
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from './pool.ts';
 import { keepStatements } from './pre-org.ts';
 import { rememberPool } from './tx-pool.ts';
@@ -308,14 +309,14 @@ export async function withOrg<T>(
  * the route decided the read.
  */
 export async function readOrg<T>(
-  pool: Pool,
+  db: Database,
   orgId: OrgId,
   fn: (tx: OrgReadTx) => Promise<T>,
 ): Promise<T> {
   requireOrgId('readOrg', orgId);
   return run(
     'readOrg',
-    pool,
+    poolOfDatabase(db),
     async (client) => {
       await client.query("SELECT set_config('app.org_id', $1, true)", [orgId]);
     },
@@ -392,20 +393,22 @@ export interface StandaloneCaller {
 }
 
 /**
- * Adapts a pool for single-statement sec.* calls (each statement is its own transaction). So a
- * statement sent while a transaction is open on the same asynchronous path is refused, like
+ * Adapts the database for single-statement sec.* calls (each statement is its own transaction).
+ * So a statement sent while a transaction is open on the same asynchronous path is refused, like
  * any other second transaction (U-3). The handle is an `Autocommit`, never a `Tx`: an audit
  * writer or a wrapper that changes data does not accept it.
  */
-export function poolAsTx(pool: Pool, caller?: StandaloneCaller): Autocommit {
+export function poolAsTx(db: Database, caller?: StandaloneCaller): Autocommit {
   return {
     query: async <R extends QueryResultRow = QueryResultRow>(
       text: string,
       values?: readonly unknown[],
     ) => {
-      if (caller === undefined) refuseNested('poolAsTx(pool).query');
+      if (caller === undefined) refuseNested('poolAsTx(db).query');
       else refuseNested(caller.opener, caller.instead);
-      return pool.query<R>(text, values === undefined ? undefined : [...values]);
+      // Read at the statement, as the pool itself was: a route takes this handle when it is
+      // registered, before anything is sent.
+      return poolOfDatabase(db).query<R>(text, values === undefined ? undefined : [...values]);
     },
   };
 }

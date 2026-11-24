@@ -14,10 +14,11 @@ import {
   errorField,
   poolAsTx,
   readOrg,
+  sessionLockConnection,
   unaudited,
   type AuditInput,
   type Change,
-  type Pool,
+  type Database,
   type OrgTx,
 } from '@tinnox/db';
 import { offlineDue } from '@tinnox/domain';
@@ -27,7 +28,7 @@ import type { MailMessage, Mailer } from './mail.ts';
 const LOCK_KEY = 'tinnox.display_alerts';
 
 export interface DisplayAlertDeps {
-  readonly pool: Pool;
+  readonly db: Database;
   readonly now: Date;
   readonly mail: Mailer;
   readonly portalOrigin: string;
@@ -80,7 +81,7 @@ export async function runDisplayAlerts(deps: DisplayAlertDeps): Promise<DisplayA
   const counts = { offline: 0, online: 0, closed: 0, failed: 0 };
   // A dedicated connection with no transaction open: the pool's transaction timeouts do not
   // apply while the run holds the lock, and a dropped connection releases it.
-  const client = await deps.pool.connect();
+  const client = await sessionLockConnection(deps.db);
   let broken: Error | undefined;
   const onLost = (error: Error): void => {
     broken = error;
@@ -93,7 +94,7 @@ export async function runDisplayAlerts(deps: DisplayAlertDeps): Promise<DisplayA
     );
     if (locked.rows[0]?.ok !== true) return { skipped: true, ...counts };
     try {
-      for (const orgId of await displayAlertOrgs(poolAsTx(deps.pool))) {
+      for (const orgId of await displayAlertOrgs(poolAsTx(deps.db))) {
         // The lock went with its connection, so another runner may already be running: claim
         // nothing more, but still send what this run claimed (delivery is at most once).
         if (broken !== undefined) {
@@ -104,7 +105,7 @@ export async function runDisplayAlerts(deps: DisplayAlertDeps): Promise<DisplayA
         if (deps.shouldStop?.() === true) break;
         let outcome: OrgOutcome;
         try {
-          outcome = await changeAsJob(deps.pool, 'display_alerts', orgId, (tx) =>
+          outcome = await changeAsJob(deps.db, 'display_alerts', orgId, (tx) =>
             claimTransitions(tx, deps),
           );
         } catch (error) {
@@ -123,7 +124,7 @@ export async function runDisplayAlerts(deps: DisplayAlertDeps): Promise<DisplayA
           try {
             // An address removed since the claim gets nothing; one already handed to the
             // server cannot be recalled.
-            const live = await readOrg(deps.pool, orgId, (tx) =>
+            const live = await readOrg(deps.db, orgId, (tx) =>
               tx.query(
                 `SELECT 1 FROM alert_recipient
                  WHERE org_id = app_org_id() AND email = $1 AND confirmed_at IS NOT NULL`,

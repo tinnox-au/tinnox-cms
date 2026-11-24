@@ -329,7 +329,7 @@ describe('casts to MigratorPool (SEC-1, D4)', () => {
 
 describe('casts to a transaction handle (D2, CX-01, AG-2.1)', { timeout: 30_000 }, () => {
   const TX_CAST =
-    /^Do not cast to a transaction handle \(Tx, OrgTx, OrgReadTx, PreOrgTx, DefinerTx\): .*Use the tx that the callback of readOrg receives \(an OrgReadTx\) or of changeOrg \(an OrgTx; an operator route calls changeAsOperator\(ctx, request, fn\) from apps\/api\/src\/auth\/permissions\.ts\), or, before the organisation is known, the one the callback of changePreOrg receives \(a PreOrgTx, for the sec\.\* wrappers\) and the OrgTx its enterOrg returns, all from @tinnox\/db\. A test opens one with withOrg or inTx from @tinnox\/db\/testing\. .*auditStandalone\(pool, event\)\.$/;
+    /^Do not cast to a transaction handle \(Tx, OrgTx, OrgReadTx, PreOrgTx, DefinerTx\): .*Use the tx that the callback of readOrg receives \(an OrgReadTx\) or of changeOrg \(an OrgTx; an operator route calls changeAsOperator\(ctx, request, fn\) from apps\/api\/src\/auth\/permissions\.ts\), or, before the organisation is known, the one the callback of changePreOrg receives \(a PreOrgTx, for the sec\.\* wrappers\) and the OrgTx its enterOrg returns, all from @tinnox\/db\. A test opens one with withOrg or inTx from @tinnox\/db\/testing\. .*auditStandalone\(ctx\.db, event\)\.$/;
 
   it.each([
     ['a plain cast', 'export const tx = poolAsTx(pool) as Tx;'],

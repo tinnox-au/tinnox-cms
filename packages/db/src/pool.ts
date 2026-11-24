@@ -35,6 +35,9 @@ export interface CreatePoolOptions {
  * Creates a connection pool for the runtime role tinnox_app (DATABASE_URL), and for nothing
  * else. The offline tools (migration runner and test reset, seed, provisioning) connect as
  * tinnox_migrator through connectMigrator (migrate.ts), never through this.
+ * Not in the runtime entry (./index.ts; adoption plan step 21): the API and the alert job hold
+ * the pool behind the handle of createDatabase (./database.ts), and tests take it from
+ * '@tinnox/db/testing'.
  * int8 values (bigint ids, seq, bytes) are returned as strings by pg; convert deliberately.
  *
  * Every connection is checked before the pool hands it out (poteto adoption plan, AG-1.2):
@@ -75,16 +78,6 @@ export function createPool(options: CreatePoolOptions): Pool {
   // pg removes it from the pool and the next query gets a fresh connection.
   pool.on('error', () => undefined);
   return pool;
-}
-
-/**
- * A liveness probe (the API's /readyz): resolves when a pooled connection answers one statement
- * that reads no table, and rejects when no connection can be had or the server does not answer.
- * The one statement the API sends on the pool itself; everything else goes through a transaction
- * or a typed sec.* wrapper (tinnox/no-query-off-transaction).
- */
-export async function ping(pool: Pool): Promise<void> {
-  await pool.query('SELECT 1');
 }
 
 // The connection parameters createPool sends itself. `options` carries `-c name=value` for any
@@ -303,36 +296,6 @@ export async function readRuntimeRole(client: pg.ClientBase): Promise<RuntimeRol
     memberOf: row.member_of,
     owns: row.owns,
   };
-}
-
-/**
- * Start-up check of both entry points (apps/api/src/main.ts, apps/api/src/alerts-once.ts;
- * poteto adoption plan AG-1.3): resolves when the pool's session is tinnox_app as
- * infra/postgres/init/01-roles.sh makes it, not superuser, no BYPASSRLS, REPLICATION,
- * CREATEROLE or CREATEDB, a member of no role and owning nothing, read from the catalogue; otherwise rejects with a RuntimeRoleError that
- * lists every problem, and the caller exits before it listens or runs.
- *
- * It and createPool's per-connection check differ on purpose. createPool's compares the
- * session's names on every new connection: one cheap query, so no connection is ever served as
- * another login. It cannot see the role's attributes: a role still named tinnox_app that an
- * administrator made superuser, gave BYPASSRLS or REPLICATION, granted another role or made an owner would
- * pass it, and with it every row-level policy would be skipped or could be turned off. Those
- * attributes change only by an administrator's hand, so reading them once at start-up, where a
- * refusal is seen at once, is enough, and costs one catalogue query that no connection pays.
- * The integration tests read the same attributes of the test database
- * (packages/db/test/catalogue.integration.test.ts); this reads the database the process uses.
- */
-export async function assertRuntimeRole(pool: Pool): Promise<void> {
-  // The checkout runs createPool's session check first, when the connection is new.
-  const client = await pool.connect();
-  let facts: RuntimeRoleFacts;
-  try {
-    facts = await readRuntimeRole(client);
-  } finally {
-    client.release();
-  }
-  const problems = runtimeRoleProblems(facts);
-  if (problems.length > 0) throw new RuntimeRoleError(problems);
 }
 
 /** Throws unless the connection string's user is exactly `expectedRole`. Guards against running the API as the migrator. */

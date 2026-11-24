@@ -247,12 +247,12 @@ async function cancelInvitesOf(
 }
 
 export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): void {
-  const { pool } = ctx;
+  const { db } = ctx;
   const writeLimit = { config: { rateLimit: perMinute(ctx, 30) } };
 
   app.get(ROUTES.members, async (request): Promise<MemberListResponse> => {
     const session = operatorOf(request);
-    return readOrg(pool, session.orgId, async (tx) => {
+    return readOrg(db, session.orgId, async (tx) => {
       // shortcut: at most ABSOLUTE.maxListItems members are listed; page the list if an organisation gets near it.
       const { rows } = await tx.query<MemberRow>(
         `SELECT ${MEMBER_COLUMNS} FROM membership
@@ -267,7 +267,7 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): voi
 
   app.get(ROUTES.memberNames, async (request): Promise<MemberNameListResponse> => {
     const session = operatorOf(request);
-    return readOrg(pool, session.orgId, async (tx) => {
+    return readOrg(db, session.orgId, async (tx) => {
       // shortcut: at most ABSOLUTE.maxListItems names are returned (a later one shows as "Person");
       // page the list if an organisation gets near it.
       const { rows } = await tx.query<{
@@ -488,7 +488,7 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): voi
   // Pending invites, expired ones included until TINNOX's daily run closes them.
   app.get(ROUTES.invites, async (request): Promise<InviteListResponse> => {
     const session = operatorOf(request);
-    return readOrg(pool, session.orgId, async (tx) => {
+    return readOrg(db, session.orgId, async (tx) => {
       const { rows } = await tx.query<InviteRow>(
         `SELECT ${INVITE_COLUMNS} FROM member_invite
          WHERE org_id = app_org_id() AND status = 'pending'

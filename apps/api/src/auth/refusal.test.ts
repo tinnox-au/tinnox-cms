@@ -198,9 +198,9 @@ describe('the permit of a refusal allows the audit row of a refusal and nothing 
       // @ts-expect-error and no fifth argument either
       await recordRefusal(ctx, request, SESSION, CSRF_REJECTED, change);
       // @ts-expect-error the refusal's permit never leaves recordRefusal: changeOrg still wants one
-      await changeOrg(ctx.pool, ORG, change);
+      await changeOrg(ctx.db, ORG, change);
       // @ts-expect-error a session is not a permit
-      await changeOrg(ctx.pool, ORG, SESSION, change);
+      await changeOrg(ctx.db, ORG, SESSION, change);
       // A write goes through the role guard, which reads the role again first.
       await changeAsOperator(ctx, request, change);
     };
