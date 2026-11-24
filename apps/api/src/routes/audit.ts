@@ -37,7 +37,8 @@ export function registerAuditRoutes(app: FastifyInstance, ctx: AppContext): void
   app.get(ROUTES.audit, async (request): Promise<AuditListResponse> => {
     const session = operatorOf(request);
     const query = parseInput(AuditListQuerySchema, request.query, 'query');
-    // The guard has already refused an unknown role.
+    // The guard has already refused an unknown role, so this cannot happen (the one reason this
+    // route file may import forbidden: ROUTE_REFUSAL_IMPORTERS in eslint.config.js).
     const role = parseRole(session.role);
     if (role === null) throw forbidden();
     const fullLog = can(role, 'audit.read');

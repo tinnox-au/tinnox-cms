@@ -55,6 +55,11 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { changeAsDevice, verifyDeviceCredential, type VerifiedDevice } from '../auth/device.ts';
 import { AuthFailureGuard, clientKeyOf } from '../auth/failure-guard.ts';
+import {
+  mediaUrlExpired,
+  mediaUrlInvalid,
+  reportForOtherDisplay,
+} from '../auth/player-refusals.ts';
 import { perMinute, type AppContext } from '../context.ts';
 import {
   contentRectOf,
@@ -62,7 +67,7 @@ import {
   reportedStateOf,
   type DeliveryRow,
 } from '../display-state.ts';
-import { HttpError, notFound, parseInput } from '../errors.ts';
+import { found, HttpError, notFound, parseInput } from '../errors.ts';
 import { serveObject } from '../media/serve.ts';
 import { routeStatement } from '../route-audit.ts';
 import {
@@ -167,7 +172,7 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
   async function authenticate(request: FastifyRequest): Promise<VerifiedDevice> {
     const token = bearerToken(request);
     if (token === null) {
-      throw new HttpError(401, 'unauthenticated', 'A device credential is required.', {
+      throw new HttpError('unauthenticated', 'A device credential is required.', {
         headers: { 'www-authenticate': 'Bearer' },
       });
     }
@@ -175,7 +180,6 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
     const credential = tokenHash.toString('base64url');
     if (failures.isBlocked(request.ip, credential)) {
       throw new HttpError(
-        429,
         'rate_limited',
         'Too many requests with invalid device credentials. Wait and try again.',
         { headers: { 'retry-after': String(failures.retryAfterSeconds(request.ip)) } },
@@ -190,7 +194,6 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
         );
       }
       throw new HttpError(
-        401,
         'device_revoked',
         'This device credential is not valid. It may have been revoked; pair the player again.',
         { headers: { 'www-authenticate': 'Bearer error="invalid_token"' } },
@@ -252,7 +255,6 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
         });
         if (result.outcome === 'rate_limited') {
           throw new HttpError(
-            429,
             'rate_limited',
             'Too many pairing codes were requested from this network. Wait a few minutes and try again.',
             {
@@ -271,11 +273,7 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
           pollIntervalMs: PAIRING_POLL_INTERVAL_MS,
         };
       }
-      throw new HttpError(
-        503,
-        'service_unavailable',
-        'A pairing code could not be created. Try again.',
-      );
+      throw new HttpError('service_unavailable', 'A pairing code could not be created. Try again.');
     },
   );
 
@@ -527,13 +525,12 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
       });
       if (found === null) {
         throw new HttpError(
-          404,
           'not_found',
           'That publication is not the current publication of this display. Fetch the manifest again.',
         );
       }
       if (wanted.some((assetId) => !found.has(assetId))) {
-        throw new HttpError(404, 'not_found', 'An asset is not part of that publication.');
+        throw new HttpError('not_found', 'An asset is not part of that publication.');
       }
       const expiresAtSeconds = Math.floor(ctx.now().getTime() / 1000) + limits.mediaUrlTtlSeconds;
       const expiresAt = new Date(expiresAtSeconds * 1000).toISOString();
@@ -563,11 +560,9 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
     local(ROUTES.playerMediaPattern),
     { config: { rateLimit: perMinute(ctx, 900) } },
     async (request, reply) => {
-      const forbidden = (): HttpError =>
-        new HttpError(403, 'url_signature_invalid', 'This media address is not valid.');
       const params = z.object({ assetId: MediaIdSchema }).strict().safeParse(request.params);
       const query = MediaUrlQuerySchema.safeParse(request.query);
-      if (!params.success || !query.success) throw forbidden();
+      if (!params.success || !query.success) throw mediaUrlInvalid();
       const claims = {
         registrationId: query.data.reg,
         publicationId: query.data.pub,
@@ -580,18 +575,12 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
         query.data.sig,
         Math.floor(ctx.now().getTime() / 1000),
       );
-      if (check === 'bad_signature') throw forbidden();
-      if (check === 'expired') {
-        throw new HttpError(
-          403,
-          'url_expired',
-          'This media address has expired. Request a new one.',
-        );
-      }
+      if (check === 'bad_signature') throw mediaUrlInvalid();
+      if (check === 'expired') throw mediaUrlExpired();
 
       const device = await deviceByRegistrationId(unscoped, claims.registrationId);
       if (device === null) {
-        throw new HttpError(401, 'device_revoked', 'This device registration is no longer valid.');
+        throw new HttpError('device_revoked', 'This device registration is no longer valid.');
       }
 
       const asset = await readOrg(db, device.orgId, async (tx) => {
@@ -647,20 +636,19 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
           'SELECT route FROM display WHERE id = $1 AND org_id = app_org_id()',
           [device.displayId],
         );
-        const display = displays.rows[0];
-        if (display === undefined) throw notFound('The display');
+        const display = found(displays.rows[0], 'The display');
 
         // The display's delivery route validates and normalises the untrusted report.
         const normalized = ctx.delivery.get(display.route).normalizeStatus(request.body);
         if (!normalized.ok) {
-          throw new HttpError(400, 'validation_failed', 'The report is not valid.', {
+          throw new HttpError('validation_failed', 'The report is not valid.', {
             details: [{ path: 'report', message: normalized.message.slice(0, 500) }],
           });
         }
         const report = normalized.report;
 
         if (report.displayId !== device.displayId) {
-          throw new HttpError(403, 'forbidden', 'This credential cannot report for that display.');
+          throw reportForOtherDisplay();
         }
         const named = new Set<string>();
         if (report.downloadedPublicationId !== null) named.add(report.downloadedPublicationId);
@@ -682,7 +670,6 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
         });
         if (rejection !== null) {
           throw new HttpError(
-            409,
             'conflict',
             'The report names a publication that was not published to this display.',
           );

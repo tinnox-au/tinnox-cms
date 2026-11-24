@@ -24,6 +24,8 @@ import {
   LayoutDtoSchema,
   ScheduleDtoSchema,
   type AppContent,
+  type ApiError,
+  type ApiErrorCode,
   type AuditAction,
   type AppDto,
   type LayoutDto,
@@ -57,6 +59,7 @@ import { LocalObjectStorage } from '@tinnox/storage';
 import type { FastifyInstance } from 'fastify';
 import pg from 'pg';
 import sharp from 'sharp';
+import { expect } from 'vitest';
 import { runDisplayAlerts, type DisplayAlertDeps, type DisplayAlertResult } from '../src/alerts.ts';
 import { buildApp } from '../src/app.ts';
 import { IdentityProviderError, type IdentityProvider } from '../src/auth/oidc.ts';
@@ -65,18 +68,25 @@ import { loadConfig, RUNTIME_ENV_NAMES, type AppConfig } from '../src/config.ts'
 import type { AppContext } from '../src/context.ts';
 import type { MailMessage, Mailer } from '../src/mail.ts';
 import { MediaPipeline } from '../src/media/pipeline.ts';
+import { buildMediaUrl } from '../src/security.ts';
 import {
   actionsOf,
   declaredRouteAudit,
   OFF_ROUTE_AUDIT,
   OTHER_ROUTE_AUDIT,
 } from '../src/route-audit.ts';
+import { installResponseContractCheck } from './response-contract.ts';
 
 // Tests outside apps/api reach this harness only as '@tinnox/api/test-support', so the types they
 // need are re-exported here. RUNTIME_ENV_NAMES is deliberately not: the e2e stack takes it from
 // the light entry '@tinnox/api/test-support/runtime-env' (./runtime-env.ts), so that the
 // stackless layout checks never load this file (CHK-9).
 export type { IdentityProvider };
+export {
+  installResponseContractCheck,
+  routesCheckedForContract,
+  takeResponseContractMismatches,
+} from './response-contract.ts';
 
 /**
  * What the route `${METHOD} ${pattern}` says a request to it can audit (src/route-audit.ts and
@@ -108,6 +118,108 @@ export function declaredAudits(): {
 /** What writes `action` outside the routes (a job, provisioning, a migration), or undefined. */
 export function offRouteWriter(action: AuditAction): string | undefined {
   return OFF_ROUTE_AUDIT[action];
+}
+
+/**
+ * Every route the application registers, as `${METHOD} ${pattern}` (HEAD read as GET, OPTIONS
+ * left out): the keys of ROUTE_PERMISSIONS and OTHER_ROUTE_AUDIT. The start-up checks on Fastify's
+ * onRoute hook (createRouteCheck, createRouteAuditCheck) refuse to start when a registered route
+ * is missing from them or a key matches no route, so these are the registered routes; `app`
+ * confirms each one is served.
+ */
+export function registeredRoutes(app: FastifyInstance): string[] {
+  const routes = [...Object.keys(ROUTE_PERMISSIONS), ...Object.keys(OTHER_ROUTE_AUDIT)];
+  for (const route of routes) {
+    const [method = '', url = ''] = route.split(' ');
+    if (!app.hasRoute({ method, url })) {
+      throw new Error(`${route} has a row in the route tables but is not served`);
+    }
+  }
+  return routes;
+}
+
+/**
+ * The status each error code is answered with, written out here as the tests' own oracle. Since
+ * step 28 of the adoption plan the API takes the status of an HttpError from STATUS_OF
+ * (packages/contracts/src/errors.ts); this copy stays separate so that a wrong entry there fails
+ * the tests that use expectError instead of moving them with it, for the codes those tests assert.
+ * The unit test in packages/contracts/src/contracts.test.ts holds the whole of STATUS_OF to a
+ * literal table, every code included. No route answers
+ * `pairing_expired`: a poll of an expired pairing answers 200 with `{ status: 'expired' }`.
+ */
+export const ERROR_STATUS = Object.freeze({
+  bad_request: 400,
+  validation_failed: 400,
+  pairing_code_invalid: 400,
+  unauthenticated: 401,
+  device_revoked: 401,
+  forbidden: 403,
+  csrf_failed: 403,
+  origin_not_allowed: 403,
+  url_expired: 403,
+  url_signature_invalid: 403,
+  not_found: 404,
+  conflict: 409,
+  idempotency_conflict: 409,
+  media_not_ready: 409,
+  media_in_use: 409,
+  playlist_in_use: 409,
+  app_in_use: 409,
+  schedule_in_use: 409,
+  layout_in_use: 409,
+  last_owner: 409,
+  payload_too_large: 413,
+  storage_quota_exceeded: 413,
+  unsupported_media_type: 415,
+  range_not_satisfiable: 416,
+  publication_rejected: 422,
+  rate_limited: 429,
+  pairing_locked: 429,
+  internal_error: 500,
+  commit_outcome_unknown: 500,
+  service_unavailable: 503,
+  mail_not_configured: 503,
+  confirmation_not_sent: 503,
+} satisfies Record<Exclude<ApiErrorCode, 'pairing_expired'>, number>);
+export type AnsweredErrorCode = keyof typeof ERROR_STATUS;
+
+/**
+ * Asserts that `response` is the error `code`, with the status that code is answered with, and
+ * returns the error envelope. A test asserts the exact answer, never a range or "not 401": those
+ * pass on a crash or a rate limit (RCX-03; the lint is NO_RANGE_STATUS in eslint.config.js).
+ */
+export async function expectError(
+  response: Response,
+  code: AnsweredErrorCode,
+): Promise<ApiError['error']> {
+  const text = await response.text();
+  const what = `${response.status} ${text.slice(0, 300)}`;
+  expect(response.status, what).toBe(ERROR_STATUS[code]);
+  const body = JSON.parse(text) as ApiError;
+  expect(body.error.code, what).toBe(code);
+  return body.error;
+}
+
+/**
+ * A media address signed with the application's own secret, on its own listener: what
+ * POST /player/media-urls would hand out for these claims, valid for a minute from now.
+ */
+export function signedMediaUrl(
+  t: TestApp,
+  claims: {
+    readonly registrationId: string;
+    readonly publicationId: string;
+    readonly assetId: string;
+  },
+): string {
+  const expiresAtSeconds = Math.floor(t.ctx.now().getTime() / 1000) + 60;
+  const url = new URL(
+    buildMediaUrl(t.config.apiPublicOrigin, t.config.mediaUrlHmacSecret, {
+      ...claims,
+      expiresAtSeconds,
+    }),
+  );
+  return `${t.url}${url.pathname}${url.search}`;
 }
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
@@ -178,6 +290,8 @@ export interface TestAppOptions {
   readonly wrapPool?: (pool: Pool) => Pool;
   /** Replaces the recording mailer; null is a server without SMTP. */
   readonly mail?: Mailer | null;
+  /** Replaces the identity provider, which otherwise refuses every sign-in and has no sign-out address. */
+  readonly identityProvider?: IdentityProvider;
 }
 
 export async function startTestApp(
@@ -258,13 +372,15 @@ export async function startTestApp(
         maxVideoHeightPx: config.limits.maxVideoHeightPx,
       },
     }),
-    idp: noIdentityProvider,
+    idp: options.identityProvider ?? noIdentityProvider,
     media,
     mail: options.mail === undefined ? recording : options.mail,
     now,
     rateLimitScale,
   };
   const app = await buildApp(ctx, { logger: false });
+  // Every answer of every test is parsed with the schema its client parses it with (UTX-01).
+  installResponseContractCheck(app, registeredRoutes(app));
   await app.listen({ host: '127.0.0.1', port: 0 });
   const address = app.server.address() as AddressInfo;
   return {
@@ -879,7 +995,8 @@ export function losingCommitAnswers(pool: Pool, marker: RegExp): Pool {
           get(real, name) {
             if (name !== 'query') return bound(real, name);
             return async (text: string, values?: unknown[]) => {
-              if (text === 'BEGIN') marked = false;
+              // 'BEGIN' or 'BEGIN READ ONLY': a mark never carries over from an earlier transaction.
+              if (text.startsWith('BEGIN')) marked = false;
               if (marker.test(text)) marked = true;
               const result = await real.query(text, values);
               if (text === 'COMMIT' && marked) {
@@ -978,10 +1095,13 @@ export function statementHolds(): StatementHolds {
   };
 }
 
-/** Runs the e-mail alert check once at the app's clock, sending through `ctx.mail` unless given another. */
+/**
+ * Runs the e-mail alert check once at the app's clock, sending through `ctx.mail` unless given
+ * another, and logging nowhere unless given a logger.
+ */
 export function checkAlerts(
   t: TestApp,
-  overrides: Partial<Pick<DisplayAlertDeps, 'mail' | 'shouldStop'>> = {},
+  overrides: Partial<Pick<DisplayAlertDeps, 'mail' | 'shouldStop' | 'logger'>> = {},
 ): Promise<DisplayAlertResult> {
   const mail = overrides.mail ?? t.ctx.mail;
   if (mail === null) throw new Error('this test app has no mailer');
@@ -990,7 +1110,7 @@ export function checkAlerts(
     now: t.ctx.now(),
     mail,
     portalOrigin: t.config.portalOrigin,
-    logger: { error: () => undefined },
+    logger: overrides.logger ?? { error: () => undefined },
     shouldStop: overrides.shouldStop,
   });
 }

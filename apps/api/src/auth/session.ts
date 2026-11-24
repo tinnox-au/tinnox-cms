@@ -9,7 +9,7 @@
  *   CSRF token in X-CSRF-Token.
  */
 import { HEADERS, OpaqueTokenSchema } from '@tinnox/contracts';
-import { poolAsTx, sessionByIdHash, sha256, type SessionLookup } from '@tinnox/db';
+import { poolAsTx, sessionByIdHash, settle, sha256, type SessionLookup } from '@tinnox/db';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { AppContext } from '../context.ts';
 import { HttpError } from '../errors.ts';
@@ -76,9 +76,12 @@ const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 /**
  * Writes the `security.csrf_rejected` row of a refused request. Nothing changed, so it is a
- * transaction of its own (`recordRefusal`, ./refusal.ts; SCR-32, D2). Any failure is logged and
- * swallowed, a refusal of the row because the route's refusal statement does not state it
- * included (AUD-9): the refusal stands whether or not it could be recorded.
+ * transaction of its own (`recordRefusal`, ./refusal.ts; SCR-32, D2). An error the database
+ * raised while writing it, or a COMMIT of the row that did not confirm, is logged and swallowed:
+ * the refusal stands whether or not it could be recorded, and answering `commit_outcome_unknown`
+ * would say the refused change may have been saved. Anything else is rethrown (AUD-9, step 26):
+ * `changeOrg` refusing the row because the route's refusal statement does not state it is a
+ * programming error, and fails the request loudly instead of losing the row.
  */
 async function recordCsrfRejection(
   ctx: AppContext,
@@ -86,8 +89,8 @@ async function recordCsrfRejection(
   session: OperatorSession,
   reason: string,
 ): Promise<void> {
-  try {
-    await recordRefusal(ctx, request, session, {
+  const ended = await settle(
+    recordRefusal(ctx, request, session, {
       actorType: 'operator',
       actorId: session.membershipId,
       action: 'security.csrf_rejected',
@@ -95,9 +98,19 @@ async function recordCsrfRejection(
       objectId: null,
       result: 'denied',
       detail: { reason, method: request.method, route: request.routeOptions.url ?? null },
-    });
-  } catch (error) {
-    request.log.error({ err: error }, 'failed to record csrf rejection');
+    }),
+  );
+  switch (ended.end) {
+    case 'committed':
+      return;
+    case 'rolled_back':
+      // AUD-9: only what the database raised is logged and dropped.
+      if (ended.failure === null) throw ended.error;
+      request.log.error({ err: ended.error }, 'failed to record csrf rejection');
+      return;
+    case 'unknown':
+      request.log.error({ err: ended.unconfirmed }, 'failed to record csrf rejection');
+      return;
   }
 }
 
@@ -109,14 +122,13 @@ export function requireOperator(ctx: AppContext) {
   return async function requireOperatorHook(request: FastifyRequest): Promise<void> {
     const session = await readSession(ctx, request);
     if (session === null) {
-      throw new HttpError(401, 'unauthenticated', 'Sign in to continue.');
+      throw new HttpError('unauthenticated', 'Sign in to continue.');
     }
     if (!SAFE_METHODS.has(request.method)) {
       const originHeader = request.headers.origin;
       if (typeof originHeader !== 'string' || originHeader !== ctx.config.portalOrigin) {
         await recordCsrfRejection(ctx, request, session, 'origin');
         throw new HttpError(
-          403,
           'origin_not_allowed',
           'This request did not come from the TINNOX portal.',
         );
@@ -125,7 +137,6 @@ export function requireOperator(ctx: AppContext) {
       if (typeof fetchSite === 'string' && fetchSite !== 'same-origin' && fetchSite !== 'none') {
         await recordCsrfRejection(ctx, request, session, 'fetch_site');
         throw new HttpError(
-          403,
           'origin_not_allowed',
           'This request did not come from the TINNOX portal.',
         );
@@ -134,7 +145,6 @@ export function requireOperator(ctx: AppContext) {
       if (typeof token !== 'string' || !safeEqual(token, session.csrfToken)) {
         await recordCsrfRejection(ctx, request, session, 'token');
         throw new HttpError(
-          403,
           'csrf_failed',
           'The security token is missing or out of date. Reload the page and try again.',
         );
@@ -148,7 +158,7 @@ export function requireOperator(ctx: AppContext) {
 export function operatorOf(request: FastifyRequest): OperatorSession {
   if (request.operator === null) {
     // A route was registered without the hook: fail closed.
-    throw new HttpError(401, 'unauthenticated', 'Sign in to continue.');
+    throw new HttpError('unauthenticated', 'Sign in to continue.');
   }
   return request.operator;
 }

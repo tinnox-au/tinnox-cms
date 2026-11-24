@@ -33,6 +33,7 @@ import {
   PlaylistReplaceSchema,
   ROUTES,
   ScheduleRuleSchema,
+  STATUS_OF,
   WorkingHoursSchema,
   apiError,
   ApiErrorSchema,
@@ -1182,5 +1183,49 @@ describe('limits', () => {
       /heartbeatStaleAfterSeconds/,
     );
     expect(() => limitsFromEnv({ LIMIT_MIN_IMAGE_ITEM_DURATION_MS: '9999999' })).toThrow();
+  });
+});
+
+// The API answers an HttpError with the status STATUS_OF names (step 28 of the adoption plan). The
+// integration tests' ERROR_STATUS catches a wrong entry only for the codes some test asserts with
+// expectError; this table, written out here, pins every code without a database (TST-12 of the
+// group C review).
+describe('the status of each error code', () => {
+  it('answers every code with the status the error contract names (TST-12)', () => {
+    expect(STATUS_OF).toEqual({
+      bad_request: 400,
+      validation_failed: 400,
+      pairing_code_invalid: 400,
+      pairing_expired: 400,
+      unauthenticated: 401,
+      device_revoked: 401,
+      forbidden: 403,
+      csrf_failed: 403,
+      origin_not_allowed: 403,
+      url_expired: 403,
+      url_signature_invalid: 403,
+      not_found: 404,
+      conflict: 409,
+      idempotency_conflict: 409,
+      media_not_ready: 409,
+      media_in_use: 409,
+      playlist_in_use: 409,
+      app_in_use: 409,
+      schedule_in_use: 409,
+      layout_in_use: 409,
+      last_owner: 409,
+      payload_too_large: 413,
+      storage_quota_exceeded: 413,
+      unsupported_media_type: 415,
+      range_not_satisfiable: 416,
+      publication_rejected: 422,
+      rate_limited: 429,
+      pairing_locked: 429,
+      internal_error: 500,
+      commit_outcome_unknown: 500,
+      service_unavailable: 503,
+      mail_not_configured: 503,
+      confirmation_not_sent: 503,
+    });
   });
 });

@@ -240,7 +240,10 @@ test('player shows a pairing code; the operator claims it; the player registers'
 
   // The code is single use: a second claim of the same code is refused.
   const again = await operator.api.claim(displayId, code);
-  expect(again.status()).toBeGreaterThanOrEqual(400);
+  expect(again.status()).toBe(400);
+  expect(((await again.json()) as { error: { code: string } }).error.code).toBe(
+    'pairing_code_invalid',
+  );
 
   const view = await operator.api.waitForStatus(
     displayId,

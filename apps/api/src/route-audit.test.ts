@@ -4,6 +4,7 @@
  * whole. No database: the application is built and never listens.
  */
 import { AUDIT_ACTIONS, ROUTES, type AuditAction } from '@tinnox/contracts';
+import { responseContractGaps } from '@tinnox/contracts/responses';
 import { issueAuditStatement, termsOfStatement, type AuditStatement } from '@tinnox/db';
 import type { FastifyInstance, RouteOptions } from 'fastify';
 import { describe, expect, expectTypeOf, it } from 'vitest';
@@ -144,6 +145,15 @@ describe('the audit statements of the application', { timeout: 30_000 }, () => {
     } finally {
       await app.close();
     }
+  });
+
+  // The same routes, held to the other table keyed by them: what each answers (UTX-01). The
+  // integration harness checks it again against the started application, and parses every answer
+  // with it (apps/api/test/response-contract.ts); this finds a missing row without a database.
+  it('gives every route it registers a response contract, and every contract its route (UTX-01)', () => {
+    expect(
+      responseContractGaps([...Object.keys(ROUTE_PERMISSIONS), ...Object.keys(OTHER_ROUTE_AUDIT)]),
+    ).toEqual([]);
   });
 
   // D3: which routes write no audit row, and why. A change here is a decision.

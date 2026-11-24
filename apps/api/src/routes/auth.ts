@@ -28,6 +28,7 @@ import {
 import {
   auditStandalone,
   changePreOrg,
+  classifyDbError,
   loginStatePut,
   loginStateTake,
   poolAsTx,
@@ -52,7 +53,7 @@ import {
   sessionCookieOptions,
 } from '../auth/session.ts';
 import { perMinute, type AppContext } from '../context.ts';
-import { HttpError, parseInput, pgErrorCode } from '../errors.ts';
+import { HttpError, parseInput } from '../errors.ts';
 import { routeStatement } from '../route-audit.ts';
 import { randomToken } from '../security.ts';
 
@@ -288,10 +289,16 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
           },
         );
       } catch (error) {
-        // A member change held the member row past lock_timeout: nothing was committed, the
-        // transaction's audit row included, so the failed sign-in is recorded on its own.
-        if (pgErrorCode(error) === '55P03') {
-          request.log.warn({ pgCode: '55P03' }, 'sign-in waited too long for the member row');
+        // A member change held the member row past lock_timeout, or another transient failure
+        // (a deadlock, a serialization failure, a statement timeout) ended the transaction:
+        // nothing was committed, the transaction's audit row included, so the failed sign-in is
+        // recorded on its own (step 26: the classifier's transient kind, not one SQLSTATE).
+        const failure = classifyDbError(error);
+        if (failure?.kind === 'transient') {
+          request.log.warn(
+            { pgCode: failure.sqlstate },
+            'sign-in ended by a lock wait or another transient failure',
+          );
           await auditStandalone(ctx.db, {
             actorType: 'anonymous',
             actorId: null,
@@ -428,7 +435,7 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
         throw error;
       }
       if (revoked === null) {
-        throw new HttpError(401, 'unauthenticated', 'Sign in to continue.');
+        throw new HttpError('unauthenticated', 'Sign in to continue.');
       }
       // The portal should navigate to this URL so the identity provider's own session ends too.
       return { redirectTo: await ctx.idp.endSessionUrl(revoked.idToken) };

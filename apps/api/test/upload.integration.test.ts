@@ -15,6 +15,7 @@ import {
   asMigratorIn,
   createDisplay,
   createOrg,
+  expectError,
   isRoleCheck,
   listDir,
   losingCommitAnswers,
@@ -746,7 +747,13 @@ describe('upload limits and validation results', () => {
     try {
       const owner = await signIn(lossy, org);
       const bytes = await pngBytes();
-      expect((await uploadBytes(owner, bytes)).status).toBe(500);
+      // The upload is told that it may have been saved, and not to send it again (D9).
+      const answer = await uploadBytes(owner, bytes);
+      expect(answer.headers.get('retry-after')).toBeNull();
+      expect(answer.headers.get('cache-control')).toBe('no-store');
+      expect((await expectError(answer, 'commit_outcome_unknown')).message).toBe(
+        'The change may have been saved, but the server could not confirm it. Reload to check before you try again.',
+      );
       const sha256 = createHash('sha256').update(bytes).digest('hex');
       const row = await withOrg(t.pool, org.orgId, async (tx) => {
         const { rows } = await tx.query<{ id: string; status: string }>(
@@ -775,6 +782,97 @@ describe('upload limits and validation results', () => {
         return rows[0]?.status;
       });
       expect(ready).toBe('ready');
+    } finally {
+      await lossy.close();
+    }
+  });
+
+  it('keeps the refusal of an upload whose refusal row lost the answer to its COMMIT, not commit_outcome_unknown: nothing of the upload was saved (SEC-1 of the group C review)', async () => {
+    const before = await mediaCount();
+    const emptyFileRefusals = async (): Promise<{ result: string }[]> =>
+      withOrg(t.pool, org.orgId, async (tx) => {
+        const { rows } = await tx.query<{ result: string }>(
+          `SELECT result FROM audit_event
+           WHERE action = 'media.upload' AND detail->>'reason' = 'empty_file'`,
+        );
+        return rows;
+      });
+    const refusedBefore = (await emptyFileRefusals()).length;
+    // The marker is the refusal's audit row, the only audit row this app writes: signIn writes
+    // the session on the test's own pool.
+    const lossy = await startTestApp(
+      {
+        LIMIT_MAX_UPLOAD_BYTES: String(UPLOAD_LIMIT),
+        LIMIT_MAX_ORG_STORAGE_BYTES: String(QUOTA),
+      },
+      1000,
+      { wrapPool: (pool) => losingCommitAnswers(pool, /INSERT INTO audit_event/) },
+    );
+    try {
+      const owner = await signIn(lossy, org);
+      const answer = await uploadBytes(owner, Buffer.alloc(0), 'empty.png');
+      expect((await expectError(answer, 'bad_request')).message).toBe('The file is empty.');
+      // The refusal row did commit; only its answer was lost.
+      const refusals = await emptyFileRefusals();
+      expect(refusals).toHaveLength(refusedBefore + 1);
+      expect(refusals.every((row) => row.result === 'failure')).toBe(true);
+      expect(await mediaCount()).toBe(before);
+      expect(await listDir(join(lossy.jobsDir, 'inbox'))).toEqual([]);
+    } finally {
+      await lossy.close();
+    }
+  });
+
+  it('answers a POST whose only lost COMMIT was a read with internal_error, not commit_outcome_unknown: a read-only transaction changed nothing (step 24, D9)', async () => {
+    const before = await mediaCount();
+    // The marker is the upload's quota read (usedBytes on readOrg, before the body is read).
+    // Its COMMIT is the only one lost: the request fails before any write transaction starts.
+    const lossy = await startTestApp(
+      {
+        LIMIT_MAX_UPLOAD_BYTES: String(UPLOAD_LIMIT),
+        LIMIT_MAX_ORG_STORAGE_BYTES: String(QUOTA),
+      },
+      1000,
+      {
+        wrapPool: (pool) =>
+          losingCommitAnswers(
+            pool,
+            /SELECT coalesce\(sum\(bytes\), 0\)::bigint AS used FROM media/,
+          ),
+      },
+    );
+    try {
+      const owner = await signIn(lossy, org);
+      const answer = await uploadBytes(owner, await pngBytes());
+      expect(answer.headers.get('retry-after')).toBeNull();
+      expect(answer.headers.get('cache-control')).toBe('no-store');
+      expect((await expectError(answer, 'internal_error')).message).toBe(
+        'Something went wrong. Try again.',
+      );
+      // Nothing was stored: no row and no received bytes.
+      expect(await mediaCount()).toBe(before);
+      expect(await listDir(join(lossy.jobsDir, 'inbox'))).toEqual([]);
+    } finally {
+      await lossy.close();
+    }
+  });
+
+  it('answers a GET whose COMMIT answer was lost with internal_error (step 24, D9)', async () => {
+    const { media } = await uploadPng();
+    // The marker is the media item's own read (loadMediaRow in routes/media.ts), on readOrg.
+    const lossy = await startTestApp({}, 1000, {
+      wrapPool: (pool) =>
+        losingCommitAnswers(pool, /WHERE m\.id = \$1 AND m\.org_id = app_org_id\(\)/),
+    });
+    try {
+      const owner = await signIn(lossy, org);
+      const answer = await owner.fetch(`/api/media/${media.id}`);
+      expect(answer.headers.get('retry-after')).toBeNull();
+      expect((await expectError(answer, 'internal_error')).message).toBe(
+        'Something went wrong. Try again.',
+      );
+      // The same read through an app whose connections lose nothing answers as before.
+      expect((await operator.fetch(`/api/media/${media.id}`)).status).toBe(200);
     } finally {
       await lossy.close();
     }

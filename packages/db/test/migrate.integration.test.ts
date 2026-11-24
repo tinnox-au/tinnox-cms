@@ -96,6 +96,22 @@ describe('migration history is checked before anything is applied', () => {
     expect(await probeRows()).toBe(0);
   });
 
+  it('reports a file the server refused at COMMIT as rolled back, with no history row (step 24)', async () => {
+    // A deferred constraint is checked at COMMIT, after the runner's own checks passed; the
+    // temporary table goes with the transaction either way.
+    const error = await runWith(async (directory) => {
+      await writeFile(
+        join(directory, '9999_probe.sql'),
+        `CREATE TEMP TABLE runner_commit_probe (n integer UNIQUE DEFERRABLE INITIALLY DEFERRED) ON COMMIT DROP;
+         INSERT INTO runner_commit_probe VALUES (1), (1);\n`,
+      );
+    });
+    expect(error).toMatch(
+      /^migration 9999_probe\.sql failed at COMMIT and was rolled back: duplicate key value violates unique constraint "runner_commit_probe_n_key"/,
+    );
+    expect(await probeRows()).toBe(0);
+  });
+
   it('still applies a new migration that follows the applied ones, once', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'tinnox-migrate-'));
     try {

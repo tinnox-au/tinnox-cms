@@ -4,32 +4,26 @@
  * (decision D6); the tag routes themselves are in routes/tags.ts.
  */
 import type { TagScope } from '@tinnox/contracts';
-import { sql, STAGE_A_CONSTRAINTS, violatedConstraint, type OrgTx } from '@tinnox/db';
+import { sql, type OrgTx } from '@tinnox/db';
+import type { ConstraintAnswers } from './auth/permissions.ts';
 import { bigintToNumber } from './db-helpers.ts';
-import { notFound, pgErrorCode } from './errors.ts';
+import { notFound } from './errors.ts';
 
 /** The join table of each scope. Fixed text: nothing here comes from a request. */
 const TAG_JOIN = {
-  media: {
-    table: sql`media_tag`,
-    target: sql`media_id`,
-    tagForeignKey: STAGE_A_CONSTRAINTS.mediaTagTag,
-  },
-  display: {
-    table: sql`display_tag`,
-    target: sql`display_id`,
-    tagForeignKey: STAGE_A_CONSTRAINTS.displayTagTag,
-  },
+  media: { table: sql`media_tag`, target: sql`media_id` },
+  display: { table: sql`display_tag`, target: sql`display_id` },
 } as const satisfies Record<TagScope, unknown>;
 
-/** True when the error says a tag put on something does not exist in this organisation and scope. */
-export function isUnknownTag(error: unknown): boolean {
-  if (pgErrorCode(error) !== '23503') return false;
-  const constraint = violatedConstraint(error);
-  return (
-    constraint === TAG_JOIN.media.tagForeignKey || constraint === TAG_JOIN.display.tagForeignKey
-  );
-}
+/**
+ * For the constraints option of the change that calls replaceTags: a tag put on something that
+ * no longer exists in this organisation and scope (it was deleted after the check below) answers
+ * as an unknown tag. Both scopes' keys, as the one check both routes shared did before step 26.
+ */
+export const UNKNOWN_TAG = {
+  media_tag_tag_fk: () => notFound('The tag'),
+  display_tag_tag_fk: () => notFound('The tag'),
+} as const satisfies ConstraintAnswers;
 
 /**
  * Makes `tagIds` the complete set of tags of one media item or one display, in

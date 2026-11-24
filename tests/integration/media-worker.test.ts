@@ -15,6 +15,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   createDisplay,
   createOrg,
+  expectError,
   fixturesDir,
   imageMetadata,
   repoRoot,
@@ -278,25 +279,13 @@ describe('upload validation by the isolated worker', () => {
         },
       });
 
-    for (const [what, ids, code] of [
-      ['failed media', [ready.id, failed.id], 'media_failed'],
-      ['media still being checked', [ready.id, pending.id], 'media_not_ready'],
-    ] as const) {
-      const saved = await save([...ids]);
-      if (saved.status === 200) {
-        const refused = await publish();
-        expect(refused.status, what).toBe(422);
-        const body = (await refused.json()) as {
-          error: { code: string; details?: { code?: string }[] };
-        };
-        expect(body.error.code).toBe('publication_rejected');
-        expect(JSON.stringify(body.error.details ?? [])).toContain(code);
-      } else {
-        // Refusing to put unready media into a draft at all is also a safe answer.
-        expect(saved.status, what).toBeGreaterThanOrEqual(400);
-        expect(saved.status).toBeLessThan(500);
-      }
-    }
+    // Failed media cannot even go into a draft; media still being checked can, but the draft
+    // does not publish (validatePlaylist in packages/domain, draft and publish modes).
+    const refusedSave = await expectError(await save([ready.id, failed.id]), 'validation_failed');
+    expect(JSON.stringify(refusedSave.details ?? [])).toContain('media_failed');
+    expect((await save([ready.id, pending.id])).status).toBe(200);
+    const refused = await expectError(await publish(), 'publication_rejected');
+    expect(JSON.stringify(refused.details ?? [])).toContain('media_not_ready');
     const status = (await (await operator.fetch(`/api/displays/${display.id}/status`)).json()) as {
       desired: unknown;
     };

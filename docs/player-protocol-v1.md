@@ -391,7 +391,7 @@ A later LED route (a dedicated player over HDMI, or controller-native playback) 
 
 | HTTP | `error.code` | Where | Player action |
 |---|---|---|---|
-| 400 | `validation_failed`, `bad_request` | any | Bug in the player or a corrupted request; log it, do not retry unchanged |
+| 400 | `validation_failed`, `bad_request` | any | Bug in the player or a corrupted request; log it, do not retry unchanged (`bad_request` can also come with a framework 4xx such as 406) |
 | 401 | `unauthenticated` | credentialed routes | No or malformed credential; pair |
 | 401 | `device_revoked` | credentialed routes, media | Stop syncing, clear cache and registration, show the pairing screen |
 | 403 | `forbidden` | heartbeat | The report names another display; local state is corrupt, reset |
@@ -403,7 +403,7 @@ A later LED route (a dedicated player over HDMI, or controller-native playback) 
 | 413 | `payload_too_large` | heartbeat | Shorten the error list |
 | 416 | `range_not_satisfiable` | media | Restart the download from byte 0 |
 | 429 | `rate_limited` | any | Wait for `Retry-After`, then continue |
-| 5xx | `internal_error`, `service_unavailable` | any | Keep playing from cache; retry with backoff |
+| 5xx | `internal_error`, `service_unavailable`, `commit_outcome_unknown` | any | Keep playing from cache; retry with backoff (`commit_outcome_unknown` answers only a POST or DELETE, never a GET (a GET answers `internal_error` whatever it did, including `GET /player/pairing/{id}`, which writes) or `POST /player/media-urls` (a read-only transaction, which answers `internal_error`). The write may have been applied, and a repeat is harmless: the browser player takes a new, higher `seq` for every heartbeat attempt, so a repeated heartbeat is a newer report and is accepted (a repeat that reuses the same `seq` is ignored as `stale_seq`); a repeated `POST /player/pairing` starts a new pairing session; and `DELETE /player/registration` is sent once, as best effort, and the browser player ignores the answer and resets locally, so it never repeats it. A client that does repeat it gets `401 device_revoked` if the first attempt was applied) |
 
 `Retry-After` is delay-seconds or an HTTP-date (RFC 9110). The browser player waits at least
 that long and at least its ordinary backoff. A value above 10 minutes is read as 10 minutes

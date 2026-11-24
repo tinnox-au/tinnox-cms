@@ -29,27 +29,20 @@ import {
   type PublishResponse,
   type Transition,
 } from '@tinnox/contracts';
-import {
-  readOrg,
-  STAGE_A_CONSTRAINTS,
-  unaudited,
-  violatedConstraint,
-  type Change,
-  type OrgReadTx,
-} from '@tinnox/db';
+import { readOrg, unaudited, type OrgReadTx } from '@tinnox/db';
 import { isAppDraftItem, validatePlaylist } from '@tinnox/domain';
 import type { FastifyInstance } from 'fastify';
 import { APP_COLUMNS, toAppDto, type AppRow } from '../app-rows.ts';
-import { changeAsOperator } from '../auth/permissions.ts';
+import { changeAsOperator, type ConstraintAnswers } from '../auth/permissions.ts';
 import { operatorOf } from '../auth/session.ts';
 import { perMinute, type AppContext } from '../context.ts';
 import { accept, bigintToNumber, iso, refuse, type Decision } from '../db-helpers.ts';
-import { HttpError, notFound, parseInput, pgErrorCode } from '../errors.ts';
+import { found, HttpError, notFound, parseInput } from '../errors.ts';
 import { MEDIA_COLUMNS, toMediaDto, type MediaRow } from '../media/rows.ts';
 import {
   auditRejectedPublication,
+  changeOncePerKey,
   createPublication,
-  findPublicationByKey,
   idempotencyKeyOf,
   issueDetails,
   itemRefs,
@@ -57,11 +50,36 @@ import {
   loadMediaRecords,
   loadPlaylistDrafts,
   lockDisplayForPublish,
-  lockPublishKey,
   planDraft,
   publicationRejected,
   type PublicationRow,
 } from '../publishing.ts';
+
+/** A file or an app of a playlist being saved was deleted between the check and the write. */
+const itemDeletedMeanwhile = (): HttpError =>
+  new HttpError(
+    'conflict',
+    'A file or app in this playlist was deleted meanwhile. Reload and try again.',
+  );
+const ITEM_GONE = {
+  playlist_item_media_id_org_id_fkey: itemDeletedMeanwhile,
+  playlist_item_app_fk: itemDeletedMeanwhile,
+} as const satisfies ConstraintAnswers;
+
+/**
+ * A publish: a file of the playlist, or the playlist the display is given, went away between
+ * the plan and the write. A concurrent request with the same key that won is answered by
+ * `changeOncePerKey`, which runs the publish again and returns the winner's publication.
+ */
+const publishChangedMeanwhile = (): HttpError =>
+  new HttpError(
+    'conflict',
+    'A file, app or screen used by this playlist changed meanwhile. Try again.',
+  );
+const PUBLISH_RACES = {
+  publication_asset_media_id_org_id_fkey: publishChangedMeanwhile,
+  display_assigned_playlist_fk: publishChangedMeanwhile,
+} as const satisfies ConstraintAnswers;
 
 interface PlaylistRow {
   id: string;
@@ -273,8 +291,7 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     return readOrg(db, session.orgId, async (tx) => {
-      const dto = await loadPlaylistDto(tx, id);
-      if (dto === null) throw notFound('The playlist');
+      const dto = found(await loadPlaylistDto(tx, id), 'The playlist');
       return dto;
     });
   });
@@ -286,8 +303,10 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     const input = parseInput(PlaylistReplaceSchema, request.body, 'playlist');
-    try {
-      return await changeAsOperator(ctx, request, async (tx) => {
+    return changeAsOperator(
+      ctx,
+      request,
+      async (tx) => {
         const locked = await tx.query(
           `SELECT 1 FROM playlist
            WHERE id = $1 AND org_id = app_org_id() AND deleted_at IS NULL FOR UPDATE`,
@@ -302,14 +321,9 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
           mode: 'draft',
         });
         if (issues.length > 0) {
-          throw new HttpError(
-            400,
-            'validation_failed',
-            'The playlist has items that cannot be saved.',
-            {
-              details: issueDetails(issues),
-            },
-          );
+          throw new HttpError('validation_failed', 'The playlist has items that cannot be saved.', {
+            details: issueDetails(issues),
+          });
         }
 
         await tx.query(
@@ -366,17 +380,9 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
             },
           },
         };
-      });
-    } catch (error) {
-      if (pgErrorCode(error) === '23503') {
-        throw new HttpError(
-          409,
-          'conflict',
-          'A file or app in this playlist was deleted meanwhile. Reload and try again.',
-        );
-      }
-      throw error;
-    }
+      },
+      { constraints: ITEM_GONE },
+    );
   });
 
   /**
@@ -400,8 +406,7 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
            WHERE id = $1 AND org_id = app_org_id() AND deleted_at IS NULL FOR SHARE`,
           [id],
         );
-        const original = source.rows[0];
-        if (original === undefined) throw notFound('The playlist');
+        const original = found(source.rows[0], 'The playlist');
         const inserted = await tx.query<{ id: string }>(
           `INSERT INTO playlist (org_id, name, description, transition, shuffle)
            VALUES (app_org_id(), $1, $2, $3, $4)
@@ -456,9 +461,11 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     const inUse = (message: string, details?: { path: string; message: string }[]): HttpError =>
-      new HttpError(409, 'playlist_in_use', message, details === undefined ? {} : { details });
-    try {
-      await changeAsOperator(ctx, request, async (tx) => {
+      new HttpError('playlist_in_use', message, details === undefined ? {} : { details });
+    await changeAsOperator(
+      ctx,
+      request,
+      async (tx) => {
         const locked = await tx.query(
           `SELECT 1 FROM playlist
            WHERE id = $1 AND org_id = app_org_id() AND deleted_at IS NULL FOR UPDATE`,
@@ -527,27 +534,26 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
             detail: { itemCount: removed.rowCount ?? 0 },
           },
         };
-      });
-    } catch (error) {
-      // A display was given this playlist, or a schedule or a layout took it, between
-      // the checks above and the delete; the database guard refuses.
-      if (
-        pgErrorCode(error) === '23001' &&
-        violatedConstraint(error) === STAGE_A_CONSTRAINTS.playlistStillAssigned
-      ) {
-        throw inUse(
-          'This playlist has just been assigned to a screen or added to a schedule or a layout. Try again.',
-        );
-      }
-      throw error;
-    }
+      },
+      {
+        // A display was given this playlist, or a schedule or a layout took it, between
+        // the checks above and the delete; the database guard refuses.
+        constraints: {
+          playlist_delete_guard: () =>
+            inUse(
+              'This playlist has just been assigned to a screen or added to a schedule or a layout. Try again.',
+            ),
+        },
+      },
+    );
     return reply.code(204).send();
   });
 
   /**
    * Publish. Idempotency: the key is unique per display. Concurrent requests with
    * the same key are serialised by a transaction-level advisory lock, so exactly
-   * one creates the publication and the others return it with `replayed: true`.
+   * one creates the publication and the others return it with `replayed: true`
+   * (`changeOncePerKey`, ../publishing.ts).
    *
    * Publishing a playlist to a display also assigns it to that display, in the
    * same transaction (decision P2-05), so "assigned" never lags behind what an
@@ -569,113 +575,89 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
       // A refusal is a decision, not a throw: a rejected publication is an attempt, so its audit
       // row commits with the decision (D3), and the refusal is thrown once the transaction has
       // committed.
-      const attempt = async (): Promise<PublishOutcome> => {
-        const decision = await changeAsOperator(
-          ctx,
-          request,
-          async (tx): Promise<Change<Decision<PublishOutcome>>> => {
-            // After the role check, which every attempt repeats first.
-            await lockPublishKey(tx, displayId, key);
-            const previous = await findPublicationByKey(tx, displayId, key);
-            if (previous !== null) {
-              // A push of a schedule or a layout records its default or main-zone playlist;
-              // one that can play other playlists (a `schedule` block, or `zones`) is not
-              // what publishing this playlist made.
-              const container =
-                typeof previous.manifest === 'object' &&
-                previous.manifest !== null &&
-                ('schedule' in previous.manifest || 'zones' in previous.manifest);
-              if (previous.playlist_id !== playlistId || container) {
-                // Refused before anything was written; no audit row, as before this move (a 409
-                // business-rule refusal).
-                return {
-                  value: refuse(
-                    new HttpError(
-                      409,
-                      'idempotency_conflict',
-                      'This Idempotency-Key was already used to publish a different playlist to this screen.',
-                    ),
-                  ),
-                  audit: unaudited('nothing_changed'),
-                };
-              }
-              return {
-                value: accept({ response: toPublishResponse(previous, true), created: false }),
-                audit: unaudited('idempotent_replay'),
-              };
-            }
-
-            const display = await lockDisplayForPublish(tx, displayId);
-            if (display === null) throw notFound('The screen');
-            const playlist = (await loadPlaylistDrafts(tx, [playlistId], true)).get(playlistId);
-            if (playlist === undefined) throw notFound('The playlist');
-            const refs = itemRefs(playlist.items);
-            const mediaById = await loadMediaRecords(tx, refs.mediaIds, true);
-            const appsById = await loadAppRecords(tx, refs.appIds, true);
-
-            const plan = planDraft(ctx, display, playlist, mediaById, appsById);
-            if (!plan.ok) {
-              return {
-                value: refuse(publicationRejected(plan.issues)),
-                audit: auditRejectedPublication({
-                  membershipId: session.membershipId,
-                  playlistId,
-                  scheduleId: null,
-                  layoutId: null,
-                  displayId,
-                  issues: plan.issues,
-                  via: 'publish',
-                }),
-              };
-            }
-
-            const made = await createPublication(tx, ctx, {
-              display,
-              playlistId,
-              scheduleId: null,
-              layoutId: null,
-              draft: plan.draft,
-              idempotencyKey: key,
-              membershipId: session.membershipId,
-              via: 'publish',
-            });
-            // With a schedule or a layout assigned the playlist column is null, so the row matches.
-            await tx.query(
-              `UPDATE display
-               SET assigned_playlist_id = $2::uuid, assigned_schedule_id = NULL,
-                   assigned_layout_id = NULL
-               WHERE id = $1 AND org_id = app_org_id()
-                 AND assigned_playlist_id IS DISTINCT FROM $2::uuid`,
-              [displayId, playlistId],
-            );
+      const decision = await changeOncePerKey<Decision<PublishOutcome>>(ctx, request, {
+        displayId,
+        key,
+        constraints: PUBLISH_RACES,
+        replay: (previous) => {
+          // A push of a schedule or a layout records its default or main-zone playlist;
+          // one that can play other playlists (a `schedule` block, or `zones`) is not
+          // what publishing this playlist made.
+          const container =
+            typeof previous.manifest === 'object' &&
+            previous.manifest !== null &&
+            ('schedule' in previous.manifest || 'zones' in previous.manifest);
+          if (previous.playlist_id !== playlistId || container) {
+            // Refused before anything was written; no audit row, as before this move (a 409
+            // business-rule refusal).
             return {
-              value: accept({ response: toPublishResponse(made.value, false), created: true }),
-              audit: made.audit,
+              value: refuse(
+                new HttpError(
+                  'idempotency_conflict',
+                  'This Idempotency-Key was already used to publish a different playlist to this screen.',
+                ),
+              ),
+              audit: unaudited('nothing_changed'),
             };
-          },
-        );
-        if (!decision.ok) throw decision.error;
-        return decision.value;
-      };
-
-      let outcome;
-      try {
-        outcome = await attempt();
-      } catch (error) {
-        const pg = pgErrorCode(error);
-        if (pg === '23505') {
-          // Lost a race the advisory lock should already prevent; the winner's row is returned.
-          outcome = await attempt();
-        } else if (pg === '23503') {
-          throw new HttpError(
-            409,
-            'conflict',
-            'A file, app or screen used by this playlist changed meanwhile. Try again.',
+          }
+          return {
+            value: accept({ response: toPublishResponse(previous, true), created: false }),
+            audit: unaudited('idempotent_replay'),
+          };
+        },
+        publish: async (tx) => {
+          const display = found(await lockDisplayForPublish(tx, displayId), 'The screen');
+          const playlist = found(
+            (await loadPlaylistDrafts(tx, [playlistId], true)).get(playlistId),
+            'The playlist',
           );
-        } else {
-          throw error;
-        }
-      }
+          const refs = itemRefs(playlist.items);
+          const mediaById = await loadMediaRecords(tx, refs.mediaIds, true);
+          const appsById = await loadAppRecords(tx, refs.appIds, true);
+
+          const plan = planDraft(ctx, display, playlist, mediaById, appsById);
+          if (!plan.ok) {
+            return {
+              value: refuse(publicationRejected(plan.issues)),
+              audit: auditRejectedPublication({
+                membershipId: session.membershipId,
+                playlistId,
+                scheduleId: null,
+                layoutId: null,
+                displayId,
+                issues: plan.issues,
+                via: 'publish',
+              }),
+            };
+          }
+
+          const made = await createPublication(tx, ctx, {
+            display,
+            playlistId,
+            scheduleId: null,
+            layoutId: null,
+            draft: plan.draft,
+            idempotencyKey: key,
+            membershipId: session.membershipId,
+            via: 'publish',
+          });
+          // With a schedule or a layout assigned the playlist column is null, so the row matches.
+          await tx.query(
+            `UPDATE display
+             SET assigned_playlist_id = $2::uuid, assigned_schedule_id = NULL,
+                 assigned_layout_id = NULL
+             WHERE id = $1 AND org_id = app_org_id()
+               AND assigned_playlist_id IS DISTINCT FROM $2::uuid`,
+            [displayId, playlistId],
+          );
+          return {
+            value: accept({ response: toPublishResponse(made.value, false), created: true }),
+            audit: made.audit,
+          };
+        },
+      });
+      if (!decision.ok) throw decision.error;
+      const outcome = decision.value;
       void reply.code(outcome.created ? 201 : 200);
       return outcome.response;
     },

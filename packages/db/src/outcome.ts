@@ -1,0 +1,137 @@
+/**
+ * What a failed statement means (adoption plan section 2.3, step 25): one classifier over the
+ * errors PostgreSQL raises, so that callers stop reading SQLSTATE codes and constraint names
+ * themselves (step 26 moves them here). A COMMIT that did not confirm is not one of these: its
+ * error is CommitOutcomeUnknownError (./commit-outcome.ts), which this classifier does not class.
+ *
+ * And how a change ended (step 27): settle() turns the promise of one transaction into one of
+ * three outcomes, so a caller with work outside the database handles the third.
+ */
+import pg from 'pg';
+import { unconfirmedCommit, type CommitOutcomeUnknownError } from './commit-outcome.ts';
+import { CONSTRAINTS, isConstraintName, type ConstraintName } from './constraints.ts';
+
+/** SQLSTATE lock_not_available: a lock wait ran past `lock_timeout`. */
+const LOCK_NOT_AVAILABLE = '55P03';
+
+/** SQLSTATEs after which the same statement may succeed if sent again in a new transaction. */
+const TRANSIENT = [
+  '40001', // serialization_failure
+  '40P01', // deadlock_detected
+  LOCK_NOT_AVAILABLE, // 55P03: lock_timeout ran out
+  '57014', // query_canceled: statement_timeout ran out
+] as const;
+export type TransientSqlstate = (typeof TRANSIENT)[number];
+
+/** SQLSTATE insufficient_privilege: a grant, or row-level security's WITH CHECK, refused. */
+const INSUFFICIENT_PRIVILEGE = '42501';
+
+/**
+ * What the database said, closed so that a `switch` with a `never` default sees every kind:
+ * - `constraint`: a name of the registry (./constraints.ts), raised with its registered SQLSTATE;
+ *   the one kind a caller maps to an answer of its own.
+ * - `unmapped_constraint`: any other integrity violation (class 23): a constraint not in the
+ *   registry, a registered one raised with another SQLSTATE, or one with no name (NOT NULL, a
+ *   guard that names none). It stays a 500, logged by SQLSTATE and name.
+ * - `denied`: 42501; a grant or row-level security refused the statement.
+ * - `transient`: a serialization failure, a deadlock, a lock or statement timeout.
+ * - `other`: any other server error; `sqlstate` is null when the error carries no valid code.
+ */
+export type DbFailure =
+  | { readonly kind: 'constraint'; readonly name: ConstraintName }
+  | {
+      readonly kind: 'unmapped_constraint';
+      readonly sqlstate: string;
+      readonly name: string | null;
+    }
+  | { readonly kind: 'denied' }
+  | { readonly kind: 'transient'; readonly sqlstate: TransientSqlstate }
+  | { readonly kind: 'other'; readonly sqlstate: string | null };
+
+const isTransient = (sqlstate: string): sqlstate is TransientSqlstate =>
+  TRANSIENT.some((code) => code === sqlstate);
+
+/**
+ * What `error` says about the database, or null when it is not an error the server raised: a
+ * lost connection, a pool timeout, CommitOutcomeUnknownError, an HttpError, anything else. Only
+ * pg's DatabaseError counts, never an object that merely has a `code`: Node's own errors carry
+ * five-letter codes too (EPIPE). A refusal at COMMIT (a deferred constraint, a serialization
+ * failure) reaches the caller as the server's own error (./commit-outcome.ts) and is classed
+ * like any other.
+ */
+export function classifyDbError(error: unknown): DbFailure | null {
+  if (!(error instanceof pg.DatabaseError)) return null;
+  const code: unknown = error.code;
+  const sqlstate = typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) ? code : null;
+  if (sqlstate === null) return { kind: 'other', sqlstate: null };
+  if (sqlstate.startsWith('23')) {
+    const name =
+      typeof error.constraint === 'string' && error.constraint !== '' ? error.constraint : null;
+    if (name !== null && isConstraintName(name) && CONSTRAINTS[name].sqlstate === sqlstate) {
+      return { kind: 'constraint', name };
+    }
+    return { kind: 'unmapped_constraint', sqlstate, name };
+  }
+  if (sqlstate === INSUFFICIENT_PRIVILEGE) return { kind: 'denied' };
+  if (isTransient(sqlstate)) return { kind: 'transient', sqlstate };
+  return { kind: 'other', sqlstate };
+}
+
+/** The failure of a statement that waited for a lock longer than `lock_timeout`. */
+export type LockTimeout = Extract<DbFailure, { kind: 'transient' }> & {
+  readonly sqlstate: typeof LOCK_NOT_AVAILABLE;
+};
+
+/**
+ * True when classifyDbError found the server's lock_not_available (55P03): a statement waited
+ * for a lock longer than `lock_timeout`. The one transient failure the API answers on its own
+ * (503 with Retry-After, lockTimeoutAsUnavailable in apps/api/src/auth/permissions.ts) and the
+ * migration runner reports as a busy advisory lock (./migrate.ts), so neither reads the SQLSTATE
+ * itself (step 26).
+ */
+export function isLockTimeout(failure: DbFailure | null): failure is LockTimeout {
+  return failure?.kind === 'transient' && failure.sqlstate === LOCK_NOT_AVAILABLE;
+}
+
+/**
+ * How one transaction ended, closed so that a `switch` over `end` sees every outcome (lint
+ * fails a switch that leaves one out: switch-exhaustiveness-check):
+ * - `committed`: COMMIT confirmed; `value` is what the transaction returned.
+ * - `rolled_back`: nothing of it is in the database. `error` is what it failed with, for the
+ *   caller to rethrow, and `failure` what classifyDbError makes of it.
+ * - `unknown`: COMMIT was sent and not confirmed, so the change may be in the database or not.
+ *   `unconfirmed` is the error to rethrow: the API answers it 500 `commit_outcome_unknown` (D9).
+ *
+ * The two failing arms name their error differently on purpose: code that has not told them
+ * apart reads neither, so "it threw, undo" does not compile.
+ */
+export type TxEnd<T> =
+  | { readonly end: 'committed'; readonly value: T }
+  | { readonly end: 'rolled_back'; readonly error: unknown; readonly failure: DbFailure | null }
+  | { readonly end: 'unknown'; readonly unconfirmed: CommitOutcomeUnknownError };
+
+/**
+ * Waits for `work`, the promise of ONE transaction (changeOrg, changePreOrg, or a wrapper of
+ * one: changeAsOperator, changeAsJob, changeAsDevice, changeOrgAsMigrator), and says how it
+ * ended. Never rejects.
+ *
+ * For a caller that does something outside that transaction once it has ended (SCX-03, adoption
+ * plan section 2.3): work outside the database is undone only in `rolled_back` (delete stored
+ * bytes), done only in `committed` (send an e-mail), and in `unknown` neither: keep what the
+ * rows may own, send nothing, and rethrow `unconfirmed`. Lint refuses the hand-written form, a
+ * catch that tests for CommitOutcomeUnknownError (eslint.config.js, NO_COMMIT_OUTCOME_TEST).
+ *
+ * `rolled_back` is every failure but an unconfirmed COMMIT, and that holds only while nothing
+ * in `work` runs after its COMMIT: a promise that goes on after a commit (a second transaction,
+ * a send) would report a later failure as a rollback of the first. A wrapper's own record of a
+ * refusal, written after the rollback, is fine: nothing had committed.
+ */
+export async function settle<T>(work: Promise<T>): Promise<TxEnd<T>> {
+  try {
+    return { end: 'committed', value: await work };
+  } catch (error) {
+    const unconfirmed = unconfirmedCommit(error);
+    if (unconfirmed !== null) return { end: 'unknown', unconfirmed };
+    return { end: 'rolled_back', error, failure: classifyDbError(error) };
+  }
+}

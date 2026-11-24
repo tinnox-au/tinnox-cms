@@ -217,10 +217,16 @@ describe('operator session, CSRF and origin checks', () => {
           'origin_not_allowed',
         );
       }
-      // With both, the request gets past the checks: whatever it answers, it is not 401 or 403.
+      // With both, the request gets past the checks to the handler, which refuses the empty
+      // request on its own terms: no valid body, no such id, or not multipart. Named exactly, so a
+      // crash or a rate limit fails here too (RCX-03; CHK-4 of the group C review).
       if (path !== LOGOUT[1]) {
         const passed = await send({ origin: PORTAL_ORIGIN, 'x-csrf-token': operator.csrfToken });
-        expect([401, 403], what).not.toContain(passed.status);
+        const { code } = ((await passed.json()) as { error: { code: string } }).error;
+        expect(
+          ['400 validation_failed', '404 not_found', '415 unsupported_media_type'],
+          what,
+        ).toContain(`${passed.status} ${code}`);
       }
     }
     // The session survived every refused request, the refused sign-out included.
@@ -342,13 +348,10 @@ describe('operator session, CSRF and origin checks', () => {
       expect(response.headers.get('set-cookie') ?? '').not.toMatch(
         /tinnox_session=[A-Za-z0-9_-]{20,}/,
       );
-      if (response.status >= 300 && response.status < 400) {
-        const location = response.headers.get('location') ?? '';
-        expect(location.startsWith(`${PORTAL_ORIGIN}/`)).toBe(true);
-        expect(location).toContain('authError=');
-      } else {
-        expect(response.status).toBeGreaterThanOrEqual(400);
-      }
+      // Every refusal sends the browser back to the portal with the reason (failureRedirect in
+      // apps/api/src/routes/auth.ts): none of these started here, so the reason is the state.
+      expect(response.status, query).toBe(303);
+      expect(response.headers.get('location')).toBe(`${PORTAL_ORIGIN}/?authError=state`);
     }
     // The return path cannot send the browser to another site.
     const open = await fetch(`${t.url}/api/auth/login?returnTo=//attacker.example`, {

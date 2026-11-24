@@ -1,7 +1,8 @@
 /**
- * Every operator route under every role (CMS-13, DEC-35). The oracle is written here, from
- * the decision, and not read from the API's route table: a wrong table would otherwise test
- * itself (docs/portal-v2/stage-c.md 15, choice 17).
+ * Every operator route under every role (CMS-13, DEC-35). The oracle, `allowed` in routes.ts
+ * (shared with the Editor pass of cross-org.test.ts), is written from the decision and not read
+ * from the API's route table: a wrong table would otherwise test itself
+ * (docs/portal-v2/stage-c.md 15, choice 17).
  *
  * - A Viewer may only read, except the people list, the invites and the alert addresses.
  * - An Editor may do everything except the people, invite and alert address routes; the names
@@ -10,51 +11,26 @@
  * - An Admin and an Owner may do everything; the rank rule is tested in
  *   apps/api/test/members.integration.test.ts.
  *
- * A refusal by role is decided before any lookup, so it is the same 403 for an unknown id and
- * for the caller's own objects.
+ * A refusal by role is decided before any lookup, so it is the same 403 for an unknown id, for
+ * the caller's own objects and for another organisation's (DEC-35, D1).
  */
 import { randomUUID } from 'node:crypto';
 import { ROLES, type Role } from '@tinnox/contracts';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { OPERATOR_ROUTE_PATTERNS } from './routes.ts';
+import { allowed, OPERATOR_ROUTE_PATTERNS } from './routes.ts';
 import {
   addMember,
   createDisplay,
   createOrg,
   createPlaylist,
+  ERROR_STATUS,
   signIn,
   startTestApp,
+  type AnsweredErrorCode,
   type Operator,
   type TestApp,
   type TestOrg,
 } from './support.ts';
-
-/** The people, invite and alert address routes an Editor may not use. */
-const MEMBER_MANAGEMENT = new Set([
-  'GET /api/alert-recipients',
-  'POST /api/alert-recipients',
-  'DELETE /api/alert-recipients/:id',
-  'GET /api/members',
-  'PATCH /api/members/:id',
-  'POST /api/members/:id/remove',
-  'POST /api/members/:id/sign-out',
-  'GET /api/invites',
-  'POST /api/invites',
-  'POST /api/invites/:id/cancel',
-]);
-
-function allowed(role: Role, method: string, pattern: string): boolean {
-  const route = `${method} ${pattern}`;
-  switch (role) {
-    case 'owner':
-    case 'admin':
-      return true;
-    case 'editor':
-      return !MEMBER_MANAGEMENT.has(route);
-    case 'viewer':
-      return method === 'GET' && !MEMBER_MANAGEMENT.has(route);
-  }
-}
 
 interface ErrorBody {
   readonly error: { readonly code: string; readonly message: string; readonly details?: unknown };
@@ -75,10 +51,33 @@ async function refusal(
 
 /**
  * What an allowed probe (empty body, random id) may answer: the handler ran, past the role
- * guard. A 429 is answered in onRequest, before the guard, and a 5xx is a failure: neither
- * proves access.
+ * guard. Each refusal is the exact pair of status and code (RCX-03; plan section 1.7): the
+ * status alone would also take a 400 or 404 from somewhere else. A 429 is answered in onRequest,
+ * before the guard, and a 5xx is a failure: neither proves access.
  */
-const ALLOWED_STATUSES = new Set([200, 400, 404, 415]);
+const ALLOWED_REFUSALS: readonly AnsweredErrorCode[] = [
+  'validation_failed',
+  'not_found',
+  'unsupported_media_type',
+];
+
+/** `200`, or `<status> <code>` of the error the answer carries. */
+async function allowedAnswer(response: Response): Promise<string> {
+  if (response.status === 200) {
+    await response.body?.cancel();
+    return '200';
+  }
+  const text = await response.text();
+  try {
+    return `${String(response.status)} ${(JSON.parse(text) as ErrorBody).error.code}`;
+  } catch {
+    return `${String(response.status)} ${text.slice(0, 100)}`;
+  }
+}
+const ALLOWED_ANSWERS = new Set([
+  '200',
+  ...ALLOWED_REFUSALS.map((code) => `${String(ERROR_STATUS[code])} ${code}`),
+]);
 
 const FORBIDDEN = {
   status: 403,
@@ -93,6 +92,8 @@ describe('the role-by-route matrix', () => {
   const operators = new Map<Role, Operator>();
   let ownDisplayId: string;
   let ownPlaylistId: string;
+  let foreignDisplayId: string;
+  let foreignPlaylistId: string;
 
   beforeAll(async () => {
     t = await startTestApp();
@@ -104,6 +105,10 @@ describe('the role-by-route matrix', () => {
     }
     ownDisplayId = (await createDisplay(owner, org, 'Matrix screen')).id;
     ownPlaylistId = await createPlaylist(owner, 'Matrix playlist');
+    const other = await createOrg('Roles matrix, another organisation');
+    const otherOwner = await signIn(t, other);
+    foreignDisplayId = (await createDisplay(otherOwner, other, 'Foreign screen')).id;
+    foreignPlaylistId = await createPlaylist(otherOwner, 'Foreign playlist');
   });
   afterAll(async () => {
     await t.close();
@@ -126,10 +131,10 @@ describe('the role-by-route matrix', () => {
       const what = `${method} ${pattern}`;
       const response = await operator(role).fetch(pattern.replace(':id', id), { method });
       if (allowed(role, method, pattern)) {
-        if (!ALLOWED_STATUSES.has(response.status)) {
-          wrong.push(`${what}: ${response.status}, expected to be allowed`);
+        const answer = await allowedAnswer(response);
+        if (!ALLOWED_ANSWERS.has(answer)) {
+          wrong.push(`${what}: ${answer}, expected to be allowed`);
         }
-        await response.body?.cancel();
       } else {
         const answer = await refusal(response);
         if (JSON.stringify(answer) !== JSON.stringify(FORBIDDEN)) {
@@ -140,11 +145,17 @@ describe('the role-by-route matrix', () => {
     expect(wrong).toEqual([]);
   });
 
-  it('refuses a write with the same 403 for an unknown id and for the caller’s own objects', async () => {
+  it('refuses a write with the same 403 for an unknown id, the caller’s own objects and another organisation’s (D1)', async () => {
     for (const role of ROLES) {
       for (const [method, pattern] of OPERATOR_ROUTE_PATTERNS) {
         if (!pattern.includes(':id') || allowed(role, method, pattern)) continue;
-        for (const id of [randomUUID(), ownDisplayId, ownPlaylistId]) {
+        for (const id of [
+          randomUUID(),
+          ownDisplayId,
+          ownPlaylistId,
+          foreignDisplayId,
+          foreignPlaylistId,
+        ]) {
           const response = await operator(role).fetch(pattern.replace(':id', id), { method });
           expect(await refusal(response), `${role} ${method} ${pattern} ${id}`).toEqual(FORBIDDEN);
         }

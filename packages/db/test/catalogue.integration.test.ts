@@ -36,7 +36,9 @@ import {
   type TableFacts,
 } from '../src/schema-invariants.ts';
 import { removeAuditDebtGuard, withOrg, type Pool } from '../src/testing.ts';
+import { CONSTRAINTS, type ConstraintEntry } from '../src/constraints.ts';
 import { MEMBER_REFERENCES } from './catalogue/member-references.ts';
+import { NEVER_MAPPED, UNNAMED_GUARDS } from './catalogue/never-mapped.ts';
 import { NULL_PASSING_CHECKS } from './catalogue/null-passing-checks.ts';
 import { SEC_FUNCTIONS } from './catalogue/sec-functions.ts';
 import {
@@ -52,6 +54,8 @@ const GRANTS_FILE = 'packages/db/test/catalogue/grants.json';
 const SEC_FILE = 'packages/db/test/catalogue/sec-functions.ts';
 const CHECKS_FILE = 'packages/db/test/catalogue/null-passing-checks.ts';
 const MEMBERS_FILE = 'packages/db/test/catalogue/member-references.ts';
+const REGISTRY_FILE = 'packages/db/src/constraints.ts';
+const NEVER_FILE = 'packages/db/test/catalogue/never-mapped.ts';
 const HERE = 'packages/db/test/catalogue.integration.test.ts';
 
 /** Every schema that is not PostgreSQL's own; `n` is a pg_namespace row. */
@@ -764,6 +768,332 @@ async function memberReferenceProblems(db: pg.Client): Promise<string[]> {
   ];
 }
 
+// --------------------------------------------------- constraint registry
+
+/** Something a write can violate under a name, as PostgreSQL reports it in the error. */
+interface NamedViolation {
+  readonly name: string;
+  readonly table: string;
+  readonly sqlstate: string;
+  /** What it is, for the message: "foreign key", "guard of trigger membership_guard", ... */
+  readonly what: string;
+  /** False for a CHECK: one is registered only when a caller maps it (see NEVER_FILE). */
+  readonly mappable: boolean;
+}
+
+/** One RAISE of a PL/pgSQL body: its SQLSTATE and the constraint it names, as written. */
+interface Raise {
+  readonly sqlstate: string;
+  /** The text after `CONSTRAINT =`: a quoted name's content, TG_NAME, or another expression. */
+  readonly constraint: { readonly literal: string } | { readonly expression: string } | null;
+}
+
+/** The condition names our RAISE statements use, and the SQLSTATE each stands for. */
+const CONDITIONS: Readonly<Record<string, string>> = {
+  check_violation: '23514',
+  exclusion_violation: '23P01',
+  foreign_key_violation: '23503',
+  insufficient_privilege: '42501',
+  integrity_constraint_violation: '23000',
+  invalid_parameter_value: '22023',
+  invalid_transaction_state: '25000',
+  not_null_violation: '23502',
+  raise_exception: 'P0001',
+  restrict_violation: '23001',
+  unique_violation: '23505',
+};
+
+/**
+ * Every PostgreSQL token that can hold a quote, a semicolon or the word RAISE: block and line
+ * comments, dollar-quoted strings, E'' strings (backslash escapes), plain strings and quoted
+ * identifiers. Read in one pass, in the order they appear: a comment may hold an apostrophe ("a
+ * member's role"), a literal two dashes, and E'it\'s' ends at its last quote, not its second.
+ */
+const TOKENS =
+  /\/\*[\s\S]*?\*\/|--[^\n]*|\$([A-Za-z_]\w*)?\$[\s\S]*?\$\1\$|(?<![\w$])[Ee]'(?:[^'\\]|\\[\s\S]|'')*'|'(?:[^']|'')*'|"(?:[^"]|"")*"/g;
+
+/** What a misread quote leaves behind: an unmatched quote or comment mark, outside every token. */
+const STRAY = /['"]|\$[A-Za-z_]*\$|\/\*|\*\//;
+
+/**
+ * A RAISE statement inside a string, which only a misread quote puts there: every form raisesOf
+ * reads, including a condition name (RAISE unique_violation USING ... or RAISE unique_violation;).
+ */
+const RAISE_IN_STRING =
+  /\bRAISE(?:\s+(?:EXCEPTION|SQLSTATE|USING)\b|\s+'|\s+[A-Za-z_]\w*\s+USING\b|\s+[A-Za-z_]\w*\s*;|\s*;)/i;
+
+/**
+ * The RAISE statements of a PL/pgSQL body that raise an error (not a notice), or one problem
+ * for a form this reader cannot resolve. Each string literal is read whole before the statement
+ * is split, so a message may contain a semicolon. The reader fails closed: where it may have
+ * misread the quoting, and so missed a RAISE, it says so rather than return fewer guards.
+ */
+function raisesOf(body: string): (Raise | { readonly problem: string })[] {
+  const literals: string[] = [];
+  const found: (Raise | { readonly problem: string })[] = [];
+  const unreadable = (what: string): { readonly problem: string } => ({
+    problem: `${what}, so this test (${HERE}) may miss a RAISE in it. Write the body with $$ quoting, plain '...' strings ('' for a quote) and unnested comments`,
+  });
+  const masked = body.replace(TOKENS, (text, tag: string | undefined) => {
+    if (text.startsWith('--')) return ' ';
+    if (text.startsWith('/*')) {
+      // PostgreSQL nests block comments; this reader does not.
+      if (text.slice(2).includes('/*')) found.push(unreadable('it has a nested block comment'));
+      return ' ';
+    }
+    if (text.startsWith('"')) return '"_"';
+    const content = text.startsWith('$')
+      ? text.slice(tag === undefined ? 2 : tag.length + 2, tag === undefined ? -2 : -tag.length - 2)
+      : /^[Ee]/.test(text)
+        ? text
+            .slice(2, -1)
+            .replace(/''/g, "'")
+            .replace(/\\([\s\S])/g, '$1')
+        : text.slice(1, -1).replace(/''/g, "'");
+    if (RAISE_IN_STRING.test(content)) {
+      found.push(unreadable(`a string holds a RAISE statement (${content.trim().slice(0, 60)})`));
+    }
+    return `'${literals.push(content) - 1}'`;
+  });
+  const stray = STRAY.exec(masked.replace(/'\d+'|"_"/g, ''))?.[0];
+  if (stray !== undefined) found.push(unreadable(`a ${stray} is left unmatched`));
+  const literal = (token: string): string | null => {
+    const index = /^'(\d+)'$/.exec(token)?.[1];
+    return index === undefined ? null : (literals[Number(index)] ?? null);
+  };
+  const unmasked = (text: string): string =>
+    text.replace(/'(\d+)'/g, (_, index: string) => `'${literals[Number(index)] ?? ''}'`);
+  const sqlstateOf = (token: string): string | { readonly problem: string } => {
+    const text = literal(token) ?? token;
+    if (/^[0-9A-Z]{5}$/.test(text)) return text;
+    return (
+      CONDITIONS[text.toLowerCase()] ?? {
+        problem: `condition name ${text} is not in CONDITIONS (${HERE}): add it with its SQLSTATE`,
+      }
+    );
+  };
+  for (const match of masked.matchAll(/\bRAISE\b([^;]*);/gi)) {
+    let rest = (match[1] ?? '').trim();
+    if (rest === '' || /^(DEBUG|LOG|INFO|NOTICE|WARNING)\b/i.test(rest)) continue;
+    rest = rest.replace(/^EXCEPTION\b\s*/i, '');
+    const [head = '', using = ''] = rest.split(/\bUSING\b/i);
+    // RAISE [EXCEPTION] condition_name | SQLSTATE 'xxxxx' | 'format', ... [USING ...]
+    const named = /^(?:SQLSTATE\s+('\d+')|([A-Za-z_]\w*))/i.exec(head.trim());
+    let sqlstate: string | { readonly problem: string } =
+      named?.[1] !== undefined || named?.[2] !== undefined
+        ? sqlstateOf(named[1] ?? named[2] ?? '')
+        : 'P0001';
+    const errcode = /\bERRCODE\s*(?::=|=)\s*('\d+'|[A-Za-z_]\w*)/i.exec(using)?.[1];
+    if (errcode !== undefined) sqlstate = sqlstateOf(errcode);
+    if (typeof sqlstate !== 'string') {
+      found.push(sqlstate);
+      continue;
+    }
+    // The option's expression runs to the next option, or to the end of the statement.
+    const constraint =
+      /\bCONSTRAINT\s*(?::=|=)\s*([\s\S]+?)\s*(?=,\s*[A-Za-z_]+\s*(?::=|=)|$)/i.exec(using)?.[1];
+    const text = constraint === undefined ? null : literal(constraint);
+    found.push({
+      sqlstate,
+      constraint:
+        constraint === undefined
+          ? null
+          : text !== null
+            ? { literal: text }
+            : { expression: unmasked(constraint) },
+    });
+  }
+  return found;
+}
+
+/**
+ * Every named thing a write can violate, from the catalogue: foreign keys, unique and primary
+ * keys, exclusion constraints, CHECKs, unique indexes that back no constraint, and the names
+ * PL/pgSQL guards raise with `USING CONSTRAINT` (not in pg_constraint, so read from the function
+ * bodies, the trigger's own name where a body says TG_NAME). Also the functions that raise an
+ * integrity violation with no name, and the RAISE forms this file cannot read.
+ */
+async function readNamedViolations(db: pg.Client): Promise<{
+  violations: NamedViolation[];
+  unnamed: { fn: string; sqlstates: string[] }[];
+  problems: string[];
+}> {
+  const constraints = await rows<{ name: string; table: string; type: string }>(
+    db,
+    `SELECT c.conname::text AS name, c.conrelid::regclass::text AS table, c.contype::text AS type
+     FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace
+     WHERE ${OURS} AND c.contype IN ('f', 'u', 'p', 'x', 'c') AND c.conrelid <> 0
+       AND c.conrelid <> 'public.schema_migrations'::regclass
+     UNION ALL
+     SELECT ic.relname::text, i.indrelid::regclass::text, 'i'
+     FROM pg_index i
+     JOIN pg_class ic ON ic.oid = i.indexrelid
+     JOIN pg_namespace n ON n.oid = ic.relnamespace
+     WHERE ${OURS} AND i.indisunique
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conindid = i.indexrelid)
+     ORDER BY 1, 2`,
+  );
+  const kinds: Readonly<Record<string, { sqlstate: string; what: string }>> = {
+    f: { sqlstate: '23503', what: 'foreign key' },
+    u: { sqlstate: '23505', what: 'unique key' },
+    p: { sqlstate: '23505', what: 'primary key' },
+    i: { sqlstate: '23505', what: 'unique index' },
+    x: { sqlstate: '23P01', what: 'exclusion constraint' },
+    c: { sqlstate: '23514', what: 'CHECK' },
+  };
+  const violations: NamedViolation[] = constraints.map((c) => ({
+    name: c.name,
+    table: c.table,
+    sqlstate: kinds[c.type]?.sqlstate ?? `unknown contype ${c.type}`,
+    what: kinds[c.type]?.what ?? c.type,
+    mappable: c.type !== 'c',
+  }));
+
+  const functions = await rows<{
+    fn: string;
+    body: string;
+    triggers: string[];
+    tables: string[];
+  }>(
+    db,
+    `SELECT p.oid::regprocedure::text AS fn, p.prosrc AS body,
+            ARRAY(SELECT t.tgname::text FROM pg_trigger t
+                  WHERE t.tgfoid = p.oid AND NOT t.tgisinternal ORDER BY t.tgname, t.tgrelid) AS triggers,
+            ARRAY(SELECT t.tgrelid::regclass::text FROM pg_trigger t
+                  WHERE t.tgfoid = p.oid AND NOT t.tgisinternal ORDER BY t.tgname, t.tgrelid) AS tables
+     FROM pg_proc p
+     JOIN pg_namespace n ON n.oid = p.pronamespace
+     JOIN pg_language l ON l.oid = p.prolang
+     WHERE ${OURS} AND l.lanname = 'plpgsql' ORDER BY 1`,
+  );
+  const unnamed: { fn: string; sqlstates: string[] }[] = [];
+  const problems: string[] = [];
+  for (const { fn, body, triggers, tables } of functions) {
+    const fires = triggers.map((trigger, i) => ({ trigger, table: tables[i] ?? '' }));
+    const unnamedHere = new Set<string>();
+    for (const raise of raisesOf(body)) {
+      if ('problem' in raise) {
+        problems.push(`${fn}: ${raise.problem}.`);
+        continue;
+      }
+      // Only an integrity violation carries a constraint a caller reads (classifyDbError).
+      if (!raise.sqlstate.startsWith('23')) continue;
+      if (raise.constraint === null) {
+        unnamedHere.add(raise.sqlstate);
+      } else if ('literal' in raise.constraint) {
+        const name = raise.constraint.literal;
+        for (const { trigger, table } of fires.length > 0 ? fires : [{ trigger: '', table: fn }]) {
+          violations.push({
+            name,
+            table,
+            sqlstate: raise.sqlstate,
+            what: trigger === '' ? `guard raised by ${fn}` : `guard of trigger ${trigger}`,
+            mappable: true,
+          });
+        }
+      } else if (/^TG_NAME$/i.test(raise.constraint.expression)) {
+        for (const { trigger, table } of fires) {
+          violations.push({
+            name: trigger,
+            table,
+            sqlstate: raise.sqlstate,
+            what: `guard of trigger ${trigger}`,
+            mappable: true,
+          });
+        }
+      } else {
+        problems.push(
+          `${fn} raises ${raise.sqlstate} with CONSTRAINT = ${raise.constraint.expression}, which this test cannot resolve to a name. Write the name as a string literal, or TG_NAME, so that the registry (${REGISTRY_FILE}) can be compared with it.`,
+        );
+      }
+    }
+    if (unnamedHere.size > 0) unnamed.push({ fn, sqlstates: [...unnamedHere].sort() });
+  }
+  // One RAISE per path of a guard, often several with the same name: one entry each.
+  const seen = new Set<string>();
+  const unique = violations.filter((v) => {
+    const key = `${v.name}|${v.table}|${v.sqlstate}`;
+    return seen.has(key) ? false : (seen.add(key), true);
+  });
+  return { violations: unique, unnamed, problems };
+}
+
+/** U-9: the registry, the never-mapped register and the schema name the same things. */
+async function constraintRegistryProblems(db: pg.Client): Promise<string[]> {
+  const { violations, unnamed, problems } = await readNamedViolations(db);
+  const label = (v: NamedViolation): string => `${v.what} of ${v.table}, ${v.sqlstate}`;
+  const registry: Readonly<Record<string, ConstraintEntry>> = CONSTRAINTS;
+
+  for (const [name, entry] of Object.entries(registry)) {
+    const found = violations.filter((v) => v.name === name);
+    const registered = `${name} (${entry.table}, ${entry.sqlstate})`;
+    if (found.length === 0) {
+      problems.push(
+        `${registered} is in the registry (${REGISTRY_FILE}) and is not a constraint, unique index or guard of the schema: remove the entry and every mapping of it, or correct the name.`,
+      );
+    } else if (found.length > 1) {
+      problems.push(
+        `${name} names ${found.length} things (${found.map(label).join('; ')}): an error carries the name alone, so a caller cannot tell them apart. Rename one in a new migration.`,
+      );
+    } else if (
+      found[0] !== undefined &&
+      (found[0].table !== entry.table || found[0].sqlstate !== entry.sqlstate)
+    ) {
+      problems.push(
+        `${registered} in the registry (${REGISTRY_FILE}) is a ${label(found[0])} in the schema: correct the entry, and re-read what the routes that map it answer.`,
+      );
+    }
+    // Own keys only, as isConstraintName: a schema object named toString is no entry.
+    if (Object.hasOwn(NEVER_MAPPED, name)) {
+      problems.push(
+        `${name} is in both the registry (${REGISTRY_FILE}) and ${NEVER_FILE}: a name is mapped or never mapped. Remove one entry.`,
+      );
+    }
+  }
+
+  const mappable = [...new Set(violations.filter((v) => v.mappable).map((v) => v.name))];
+  for (const name of mappable) {
+    if (Object.hasOwn(registry, name) || Object.hasOwn(NEVER_MAPPED, name)) continue;
+    const of = violations
+      .filter((v) => v.name === name)
+      .map(label)
+      .join('; ');
+    problems.push(
+      `${name} (${of}) is in neither the registry nor ${NEVER_FILE}. If a route answers its violation, add it to CONSTRAINTS in ${REGISTRY_FILE} with its SQLSTATE, table and meaning; if no write of ours can trip it, add it to NEVER_MAPPED with the reason. Unmapped, it stays a 500.`,
+    );
+  }
+  for (const [name, why] of Object.entries(NEVER_MAPPED)) {
+    if (!mappable.includes(name)) {
+      problems.push(
+        `${name} is in ${NEVER_FILE} and is not a foreign key, unique or primary key, exclusion constraint, unique index or named guard of the schema: remove the entry.`,
+      );
+    }
+    if (why.trim().length < 20) {
+      problems.push(`${name} has no reason in ${NEVER_FILE}: say why no write maps it.`);
+    }
+  }
+
+  const unnamedFns = unnamed.map((u) => u.fn);
+  for (const { fn, sqlstates } of unnamed) {
+    if (!Object.hasOwn(UNNAMED_GUARDS, fn)) {
+      problems.push(
+        `${fn} raises ${sqlstates.join(', ')} and names no constraint, so no caller can tell its refusal from any other. Add CONSTRAINT = '<name>' (or TG_NAME) to the RAISE in a new migration and register the name, or add the function to UNNAMED_GUARDS in ${NEVER_FILE} with the reason it is a 500.`,
+      );
+    }
+  }
+  for (const [fn, why] of Object.entries(UNNAMED_GUARDS)) {
+    if (!unnamedFns.includes(fn)) {
+      problems.push(
+        `${fn} is in UNNAMED_GUARDS (${NEVER_FILE}) and raises no unnamed integrity violation: remove the entry.`,
+      );
+    }
+    if (why.trim().length < 20) {
+      problems.push(`${fn} has no reason in ${NEVER_FILE}: say why its refusal is a 500.`);
+    }
+  }
+  return problems;
+}
+
 // ------------------------------------------------------------------ tests
 
 describe('the three roles', () => {
@@ -971,6 +1301,93 @@ describe('CHECK constraints', () => {
 describe('columns that hold a member id', () => {
   it('each say how a removal, a reactivation and a cut-off close them (RCX-01, D22)', async () => {
     expect(await memberReferenceProblems(catalogue)).toEqual([]);
+  });
+});
+
+describe('the constraint registry (U-9, step 25)', () => {
+  it('equals the schema: every registered name exists with its table and SQLSTATE, and every other key, index and guard is never mapped with its reason', async () => {
+    expect(await constraintRegistryProblems(catalogue)).toEqual([]);
+  });
+
+  it('reads the guard names from the function bodies (not vacuous)', async () => {
+    const { violations, unnamed } = await readNamedViolations(catalogue);
+    const guards = violations.filter((v) => v.what.startsWith('guard')).map((v) => v.name);
+    // A literal name (0013) and a TG_NAME one (0009, 0011), and a guard that names none (0001).
+    expect(guards).toEqual(
+      expect.arrayContaining([
+        'membership_last_owner',
+        'member_invite_guard',
+        'schedule_default_playlist_guard',
+        'schedule_event_playlist_guard',
+        'layout_zone_playlist_guard',
+      ]),
+    );
+    expect(unnamed.map((u) => u.fn)).toContain('public.reject_change()');
+    // Unique indexes, which pg_constraint does not list.
+    expect(violations.map((v) => v.name)).toContain('tag_org_scope_name_key');
+  });
+
+  it('reads a RAISE as PL/pgSQL does: ERRCODE by name or code, CONSTRAINT as a literal or TG_NAME', () => {
+    const unknownCondition: unknown = expect.stringMatching(
+      /^condition name restrict_violaton is not in CONDITIONS/,
+    );
+    expect(
+      raisesOf(`BEGIN
+        RAISE NOTICE 'skipped; not an error' USING ERRCODE = 'unique_violation';
+        -- a member's comment, /* and */ a block one: RAISE 'not a statement';
+        RAISE EXCEPTION 'a; b -- c' USING ERRCODE = 'restrict_violation', CONSTRAINT = 'x_guard';
+        RAISE EXCEPTION 'c' USING ERRCODE = '23505', CONSTRAINT = TG_NAME; -- RAISE 'no';
+        RAISE unique_violation USING MESSAGE = 'd';
+        RAISE 'e %', v;
+        RAISE EXCEPTION 'f' USING ERRCODE = 'restrict_violaton';
+        RAISE EXCEPTION 'g' USING CONSTRAINT = v_name, ERRCODE = 'check_violation';
+        RAISE;
+      END`),
+    ).toEqual([
+      { sqlstate: '23001', constraint: { literal: 'x_guard' } },
+      { sqlstate: '23505', constraint: { expression: 'TG_NAME' } },
+      { sqlstate: '23505', constraint: null },
+      { sqlstate: 'P0001', constraint: null },
+      { problem: unknownCondition },
+      { sqlstate: '23514', constraint: { expression: 'v_name' } },
+    ]);
+  });
+
+  it("reads E'' strings, dollar quotes and quoted identifiers whole, so a RAISE after one is not lost", () => {
+    expect(
+      raisesOf(`DECLARE v text := E'it\\'s here; RAISE'; w text := $q$it's; 'x$q$; "it's" int;
+      BEGIN
+        RAISE EXCEPTION 'probe' USING ERRCODE = 'unique_violation', CONSTRAINT = 'probe_hidden_key';
+        RAISE EXCEPTION 'p2' USING ERRCODE = 'foreign_key_violation', CONSTRAINT = $n$probe_fk$n$;
+      END`),
+    ).toEqual([
+      { sqlstate: '23505', constraint: { literal: 'probe_hidden_key' } },
+      { sqlstate: '23503', constraint: { literal: 'probe_fk' } },
+    ]);
+  });
+
+  it('fails closed: a body it may have misread is a problem, not fewer guards (U-9)', () => {
+    const misread: unknown = expect.stringMatching(/may miss a RAISE in it\. Write the body with/);
+    // A quoting form the reader does not know (a backslash escape outside E''), which swallows
+    // the RAISE into a string.
+    expect(
+      raisesOf(`BEGIN v := 'it\\'s here'; RAISE EXCEPTION 'p' USING CONSTRAINT = 'k'; END`),
+    ).toEqual(expect.arrayContaining([{ problem: misread }]));
+    // An identifier with a $ in it (v$x$) read as a dollar quote, which swallows a RAISE in the
+    // condition-name form, with USING or bare.
+    for (const raise of [
+      `RAISE unique_violation USING CONSTRAINT = 'k'`,
+      'RAISE unique_violation',
+    ]) {
+      expect(raisesOf(`DECLARE v$x$ int; BEGIN ${raise}; y$x$ := 1; END`)).toEqual(
+        expect.arrayContaining([{ problem: misread }]),
+      );
+    }
+    // A quote left unmatched, and a nested block comment.
+    expect(raisesOf(`BEGIN v := 'a; END`)).toEqual([{ problem: misread }]);
+    expect(raisesOf(`BEGIN /* a /* b */ RAISE 'c'; */ END`)).toEqual(
+      expect.arrayContaining([{ problem: misread }]),
+    );
   });
 });
 
@@ -1474,5 +1891,89 @@ describe('each rule fails when its subject is wrong (every change is rolled back
     expect(
       await caused(['ALTER TABLE public.media DROP COLUMN created_by'], memberReferenceProblems),
     ).toEqual([expect.stringMatching(/^public\.media\.created_by is in .*member-references\.ts/)]);
+  });
+
+  it('a constraint, index or guard the registry does not know, and an entry the schema no longer has (U-9)', async () => {
+    const guard = (raise: string): string[] => [
+      `CREATE FUNCTION public.probe_guard() RETURNS trigger LANGUAGE plpgsql
+         SET search_path = pg_catalog, pg_temp AS $$ BEGIN ${raise}; RETURN NEW; END $$`,
+      'CREATE TRIGGER folder_probe BEFORE UPDATE ON public.folder FOR EACH ROW EXECUTE FUNCTION public.probe_guard()',
+    ];
+    const cases: [string[], RegExp][] = [
+      // The Verify cell of step 25: a new constraint, as a scratch migration would add it.
+      [
+        [
+          'ALTER TABLE public.folder ADD CONSTRAINT folder_probe_fk FOREIGN KEY (org_id) REFERENCES public.organization (id)',
+        ],
+        /^folder_probe_fk \(foreign key of public\.folder, 23503\) is in neither the registry nor .*never-mapped\.ts/,
+      ],
+      [
+        ['CREATE UNIQUE INDEX folder_probe_key ON public.folder (id, name)'],
+        /^folder_probe_key \(unique index of public\.folder, 23505\) is in neither the registry/,
+      ],
+      [
+        ['ALTER TABLE public.folder ADD CONSTRAINT folder_probe_key UNIQUE (id, name)'],
+        /^folder_probe_key \(unique key of public\.folder, 23505\) is in neither the registry/,
+      ],
+      [
+        guard(
+          "RAISE EXCEPTION 'probe' USING ERRCODE = 'restrict_violation', CONSTRAINT = 'folder_probe_guard'",
+        ),
+        /^folder_probe_guard \(guard of trigger folder_probe of public\.folder, 23001\) is in neither the registry/,
+      ],
+      // A guard function of 0009 under a new trigger: its TG_NAME is the new trigger's name.
+      [
+        [
+          'CREATE TRIGGER folder_probe_guard BEFORE UPDATE ON public.folder FOR EACH ROW EXECUTE FUNCTION public.schedule_playlist_guard()',
+        ],
+        /^folder_probe_guard \(guard of trigger folder_probe_guard of public\.folder, 23001\) is in neither the registry/,
+      ],
+      [
+        guard("RAISE EXCEPTION 'probe' USING ERRCODE = 'unique_violation'"),
+        /^public\.probe_guard\(\) raises 23505 and names no constraint/,
+      ],
+      [
+        guard(
+          "RAISE EXCEPTION 'probe' USING ERRCODE = 'restrict_violation', CONSTRAINT = pg_catalog.concat('a', 'b')",
+        ),
+        /^public\.probe_guard\(\) raises 23001 with CONSTRAINT = pg_catalog\.concat\('a', 'b'\), which this test cannot resolve/,
+      ],
+      [
+        guard("RAISE EXCEPTION 'probe' USING ERRCODE = 'restrict_violaton'"),
+        /^public\.probe_guard\(\): condition name restrict_violaton is not in CONDITIONS/,
+      ],
+      // The other direction: a registered name, and a never-mapped one, that went.
+      [
+        ['DROP INDEX public.tag_org_scope_name_key'],
+        /^tag_org_scope_name_key \(public\.tag, 23505\) is in the registry .* and is not a constraint, unique index or guard of the schema/,
+      ],
+      [
+        ['ALTER TABLE public.folder DROP CONSTRAINT folder_org_id_fkey'],
+        /^folder_org_id_fkey is in .*never-mapped\.ts and is not a foreign key/,
+      ],
+      // A registered name that now means something else, or two things.
+      [
+        [
+          'ALTER TABLE public.media DROP CONSTRAINT media_folder_fk',
+          'ALTER TABLE public.media ADD CONSTRAINT media_folder_fk UNIQUE (id, folder_id)',
+        ],
+        /^media_folder_fk \(public\.media, 23503\) in the registry .* is a unique key of public\.media, 23505 in the schema/,
+      ],
+      [
+        [
+          'ALTER TABLE public.folder ADD CONSTRAINT media_folder_fk FOREIGN KEY (org_id) REFERENCES public.organization (id)',
+        ],
+        /^media_folder_fk names 2 things \(foreign key of public\.folder, 23503; foreign key of public\.media, 23503\)/,
+      ],
+      [
+        ['ALTER FUNCTION public.reject_change() RENAME TO reject_change_probe'],
+        /^public\.reject_change_probe\(\) raises 23001 and names no constraint/,
+      ],
+    ];
+    for (const [statements, message] of cases) {
+      expect(await caused(statements, constraintRegistryProblems), statements.join('; ')).toEqual(
+        expect.arrayContaining([expect.stringMatching(message)]),
+      );
+    }
   });
 });

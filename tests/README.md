@@ -140,6 +140,18 @@ query string, a token-shaped string or an e-mail address (`scripts/lib/audit-row
 AG-3.4). A short secret or a typed name has no shape the scan can see; the tests of the routes
 that take them check those by value.
 
+### Every answer against its response contract
+
+`startTestApp` (`apps/api/test/support.ts`) checks every answer the application sends against
+`ROUTE_RESPONSE_SCHEMAS` (`packages/contracts/src/responses.ts`; poteto adoption plan step 23a,
+UTX-01): the schema the portal or the player parses that route's answer with, the error envelope
+for every error answer, and the statuses at which the route sends no JSON (204, 304, a redirect,
+stored bytes). A test that received an answer its client would refuse fails with the route and
+the schema's issues, whatever it asserted itself (`apps/api/test/response-contract.ts`). The
+harness refuses to start when a registered route has no row, and so does a unit test in
+`apps/api/src/route-audit.test.ts`. The check is test code only: production never parses its own
+answers.
+
 Before either suite: `npm run setup`, `npm run infra:up`, and for E2E also
 `npm run db:migrate` and `npm run db:seed -- --second-org`. For E2E the API (4000), the
 portal (5173) and the player (5174) must **not** be running: Playwright starts them.

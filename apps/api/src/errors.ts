@@ -2,11 +2,22 @@
  * One error type and one envelope for every non-2xx response. Responses never
  * carry stack traces, SQL text or internal messages.
  */
-import { apiError, HEADERS, type ApiErrorCode, type ApiErrorDetail } from '@tinnox/contracts';
-import { errorField } from '@tinnox/db';
+import {
+  apiError,
+  HEADERS,
+  STATUS_OF,
+  type ApiErrorCode,
+  type ApiErrorDetail,
+} from '@tinnox/contracts';
+import { classifyDbError, errorField, isCommitOutcomeUnknown } from '@tinnox/db';
 import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { z } from 'zod';
 
+/**
+ * An answer with an error code. Its status is the code's (STATUS_OF of @tinnox/contracts, step
+ * 28), so no call site passes one and an HttpError cannot send a code with another status. The
+ * framework branch of the handler below is the exception: it keeps a framework 4xx's own status.
+ */
 export class HttpError extends Error {
   readonly statusCode: number;
   readonly code: ApiErrorCode;
@@ -14,14 +25,13 @@ export class HttpError extends Error {
   readonly headers: Readonly<Record<string, string>> | undefined;
 
   constructor(
-    statusCode: number,
     code: ApiErrorCode,
     message: string,
     options: { details?: ApiErrorDetail[]; headers?: Record<string, string> } = {},
   ) {
     super(message);
     this.name = 'HttpError';
-    this.statusCode = statusCode;
+    this.statusCode = STATUS_OF[code];
     this.code = code;
     this.details = options.details;
     this.headers = options.headers;
@@ -29,7 +39,17 @@ export class HttpError extends Error {
 }
 
 export const notFound = (what = 'The requested item'): HttpError =>
-  new HttpError(404, 'not_found', `${what} was not found.`);
+  new HttpError('not_found', `${what} was not found.`);
+
+/**
+ * The row a lookup found, or 404 `not_found` naming `what` when it found none. Row-level security
+ * hides another organisation's row, so its id gets this same answer as an id never issued
+ * (adoption plan section 2.2, D1).
+ */
+export function found<T>(row: T, what = 'The requested item'): NonNullable<T> {
+  if (row === null || row === undefined) throw notFound(what);
+  return row;
+}
 
 function clip(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
@@ -47,11 +67,14 @@ export function parseInput<S extends z.ZodType>(
     path: clip(issue.path.map(String).join('.') || what, 200),
     message: clip(issue.message, 500),
   }));
-  throw new HttpError(400, 'validation_failed', `The ${what} is not valid.`, { details });
+  throw new HttpError('validation_failed', `The ${what} is not valid.`, { details });
 }
 
-/** PostgreSQL error code of an unknown error, or null. */
-export function pgErrorCode(error: unknown): string | null {
+/**
+ * PostgreSQL error code of an unknown error, or null: for the log only. What a code means is
+ * classifyDbError's (@tinnox/db), so nothing outside this file reads one (step 26).
+ */
+function pgErrorCode(error: unknown): string | null {
   if (typeof error !== 'object' || error === null) return null;
   const code = errorField(error, 'code');
   return typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) ? code : null;
@@ -81,6 +104,13 @@ const SAFE_MESSAGES: Readonly<Partial<Record<ApiErrorCode, string>>> = {
   rate_limited: 'Too many requests. Wait a moment and try again.',
   service_unavailable: 'The service is temporarily unavailable.',
 };
+
+/** The methods whose unconfirmed COMMIT answers `commit_outcome_unknown` (D9); GET and HEAD do not. */
+const STATE_CHANGING_METHODS: ReadonlySet<string> = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+/** The one message of `commit_outcome_unknown` (D9, adoption plan section 2.3). */
+export const COMMIT_OUTCOME_UNKNOWN_MESSAGE =
+  'The change may have been saved, but the server could not confirm it. Reload to check before you try again.';
 
 function send(
   request: FastifyRequest,
@@ -154,16 +184,47 @@ export function registerErrorHandling(app: FastifyInstance): void {
       return;
     }
 
+    // COMMIT was sent and not confirmed, so the change may have been saved (SCX-03, D9). A
+    // request that changes state says so, with no Retry-After: sending it again could repeat a
+    // change that went through. GET and HEAD keep internal_error (a read-only transaction of
+    // readOrg never gets here: its failed COMMIT changed nothing). Only the cause's name and
+    // SQLSTATE are logged.
+    if (isCommitOutcomeUnknown(error)) {
+      const cause: unknown = error.cause;
+      request.log.error(
+        {
+          cause: cause instanceof Error ? cause.name : typeof cause,
+          pgCode: pgErrorCode(cause),
+        },
+        'commit outcome unknown',
+      );
+      if (STATE_CHANGING_METHODS.has(request.method)) {
+        send(request, reply, 500, 'commit_outcome_unknown', COMMIT_OUTCOME_UNKNOWN_MESSAGE);
+      } else {
+        send(request, reply, 500, 'internal_error', 'Something went wrong. Try again.');
+      }
+      return;
+    }
+
     // Database errors that mean "that row is not yours" (docs/dev-handoff.md section 5):
     // answered as not found, never as a message that confirms another tenant's row.
+    const failure = classifyDbError(error);
     const pg = pgErrorCode(error);
-    if (pg === '42501') {
+    if (failure?.kind === 'denied') {
       request.log.warn({ pgCode: pg }, 'database refused the statement');
       send(request, reply, 404, 'not_found', 'The requested item was not found.');
       return;
     }
-    if (pg !== null) {
-      request.log.error({ pgCode: pg, err: { name: error.name } }, 'unhandled database error');
+    if (failure !== null) {
+      // A constraint no route maps is logged by its name (adoption plan section 2.3).
+      const constraint =
+        failure.kind === 'constraint' || failure.kind === 'unmapped_constraint'
+          ? { constraint: failure.name }
+          : {};
+      request.log.error(
+        { pgCode: pg, ...constraint, err: { name: error.name } },
+        'unhandled database error',
+      );
       send(request, reply, 500, 'internal_error', 'Something went wrong. Try again.');
       return;
     }

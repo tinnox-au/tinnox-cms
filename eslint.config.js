@@ -197,6 +197,134 @@ const NO_RANDOM_IN_TESTS = [
   },
 ];
 
+// RCX-03 (adoption plan step 23): a status asserted as a range or as "not 401" passes on a 500, a
+// 429 or any other answer nobody meant. Matched on expect(...) and expect.soft(...) whose subject
+// reads a status: a `.status` or `.statusCode` member (optional, awaited or Playwright's
+// `.status()` call included), or a name or a call whose name ends in "status"
+// (`await manifestStatus(player)`). The forms: a comparison matcher, negated or not
+// (`.not.toBeLessThan(400)` is `>= 400`); a negated toBe; a comparison inside expect()
+// (`expect(response.status >= 400).toBe(true)`, alone or joined by && or ||); and toSatisfy,
+// which can hold any range. A comparison on a member, by matcher or inside expect(), is refused
+// unless its bound is a number that is not a status; the
+// named forms and the negations only with a three-digit status literal, so a process's
+// `expect(run.status).toBeGreaterThan(0)`, `expect(run.status).not.toBe(0)` and
+// `expect(status).not.toBe('ready')` stay allowed. A list of exact answers
+// (`expect([200, 204]).toContain(...)`, `toBeOneOf`) names what proves the code ran and is allowed;
+// its negation (`expect([401, 403]).not.toContain(response.status)`,
+// `expect(response.status).not.toBeOneOf([401])`) is refused. Since CHK-4 of the group C review a
+// comparison inside expect() is also seen as `!==` or `!=` against a status literal
+// (`expect(response.status !== 401).toBe(true)`) and behind `!` (`expect(!(status < 400))`).
+// Since TST-5 an exact comparison asserted false is seen too
+// (`expect(response.status === 401).toBe(false)`), and so, in the files that send real requests,
+// is a response's `ok` asserted false (NO_RESPONSE_NOT_OK below). Not seen: arithmetic on the
+// status (`Math.floor(status / 100)`), the status as text (`expect(String(status)).toMatch(/^4/)`),
+// a comparison compared again (`expect(status < 400 === false)`) and a negation by a named
+// constant (`.not.toBe(OK)`, left alone so `.not.toBe(previousStatus)` stays allowed).
+const RANGE_STATUS_MESSAGE =
+  "Assert the exact status: expect(response.status).toBe(204), or for an error expectError(response, 'not_found') from apps/api/test/support.ts (also exported by tests/integration/support.ts), which checks the status and the error code. A range or a 'not 401' passes on a crash or a rate limit (RCX-03).";
+const STATUS_READ = (path) =>
+  `:matches([${path}.property.name=/^(status|statusCode)$/], [${path}.expression.property.name=/^(status|statusCode)$/], [${path}.argument.property.name=/^(status|statusCode)$/], [${path}.callee.property.name='status'], [${path}.argument.callee.property.name='status'])`;
+const STATUS_NAMED = (path) =>
+  `:matches([${path}.name=/^status$|Status$/], [${path}.callee.name=/^status$|Status$/], [${path}.argument.callee.name=/^status$|Status$/])`;
+const STATUS_SUBJECT = (path) => `:matches(${STATUS_READ(path)}, ${STATUS_NAMED(path)})`;
+const HTTP_STATUS_LITERAL = (path) => `[${path}.raw=/^[1-5][0-9][0-9]$/]`;
+const HTTP_STATUS_ARGUMENT = HTTP_STATUS_LITERAL('arguments.0');
+// Anything but a literal that is not a status: `toBeLessThan(500)` and `toBeLessThan(limit)`, not
+// an exit code's `toBeGreaterThan(0)`.
+const NOT_OTHER_LITERAL = (path) =>
+  `:not([${path}.type='Literal']:not([${path}.raw=/^[1-5][0-9][0-9]$/]))`;
+const NOT_OTHER_LITERAL_ARGUMENT = NOT_OTHER_LITERAL('arguments.0');
+const EXPECT_CALL = (path) =>
+  `:matches([${path}.callee.name='expect'], [${path}.callee.object.name='expect'])`;
+const COMPARISON_MATCHER =
+  'CallExpression[callee.property.name=/^(toBeGreaterThan|toBeGreaterThanOrEqual|toBeLessThan|toBeLessThanOrEqual)$/]';
+const STATUS_COMPARISON = `${COMPARISON_MATCHER}${EXPECT_CALL('callee.object')}`;
+const STATUS_NEGATED_COMPARISON = `${COMPARISON_MATCHER}[callee.object.property.name='not']${EXPECT_CALL('callee.object.object')}`;
+const STATUS_NEGATION = `CallExpression[callee.property.name=/^(toBe|toEqual|toStrictEqual)$/][callee.object.property.name='not']${EXPECT_CALL('callee.object.object')}`;
+const STATUS_SATISFY = `CallExpression[callee.property.name='toSatisfy']:matches(${EXPECT_CALL('callee.object')}, [callee.object.property.name='not']${EXPECT_CALL('callee.object.object')})`;
+const RELATIONAL = (path) => `[${path}.type='BinaryExpression'][${path}.operator=/^[<>]=?$/]`;
+const NOT_EQUAL = (path) => `[${path}.type='BinaryExpression'][${path}.operator=/^!==?$/]`;
+// A comparison inside expect() takes the same bounds as the matcher forms: a status member against
+// anything but a literal that is not a status (`>= serverError`, not `> 0`), a status name only
+// against a status literal. It is found alone or as an operand of && or ||, two levels deep, so
+// `expect(response.status >= 400 && response.status < 500).toBe(true)` is one report.
+// A "not" (`!==`, `!=`) is refused only against a status literal, so `run.status !== 0` passes.
+const RELATIONAL_STATUS = (path) =>
+  `:matches(${RELATIONAL(path)}:matches(${STATUS_READ(`${path}.left`)}${NOT_OTHER_LITERAL(`${path}.right`)}, ${STATUS_READ(`${path}.right`)}${NOT_OTHER_LITERAL(`${path}.left`)}, ${STATUS_NAMED(`${path}.left`)}${HTTP_STATUS_LITERAL(`${path}.right`)}, ${STATUS_NAMED(`${path}.right`)}${HTTP_STATUS_LITERAL(`${path}.left`)}), ${NOT_EQUAL(path)}:matches(${STATUS_SUBJECT(`${path}.left`)}${HTTP_STATUS_LITERAL(`${path}.right`)}, ${STATUS_SUBJECT(`${path}.right`)}${HTTP_STATUS_LITERAL(`${path}.left`)}))`;
+const RELATIONAL_STATUS_WITHIN = (path, depth) =>
+  depth === 0
+    ? RELATIONAL_STATUS(path)
+    : `:matches(${RELATIONAL_STATUS(path)}, [${path}.type='LogicalExpression']:matches(${RELATIONAL_STATUS_WITHIN(`${path}.left`, depth - 1)}, ${RELATIONAL_STATUS_WITHIN(`${path}.right`, depth - 1)}), [${path}.type='UnaryExpression'][${path}.operator='!']${RELATIONAL_STATUS_WITHIN(`${path}.argument`, depth - 1)})`;
+const STATUS_NEGATED_LIST = `CallExpression[callee.property.name=/^(toContain|toBeOneOf)$/][callee.object.property.name='not']${EXPECT_CALL('callee.object.object')}`;
+// "Is false": toBe, toEqual or toStrictEqual with false, toBeFalsy, or the negation of true or of
+// toBeTruthy, on expect() or expect.soft() whose argument `subject` matches; `subject` takes the
+// path of that argument from the matcher call.
+const ASSERTED_FALSE = (subject) =>
+  `:matches(CallExpression[callee.property.name=/^(toBe|toEqual|toStrictEqual)$/][arguments.0.raw='false']${EXPECT_CALL('callee.object')}${subject('callee.object.arguments.0')}, CallExpression[callee.property.name='toBeFalsy']${EXPECT_CALL('callee.object')}${subject('callee.object.arguments.0')}, CallExpression[callee.property.name=/^(toBe|toEqual|toStrictEqual)$/][arguments.0.raw='true'][callee.object.property.name='not']${EXPECT_CALL('callee.object.object')}${subject('callee.object.object.arguments.0')}, CallExpression[callee.property.name='toBeTruthy'][callee.object.property.name='not']${EXPECT_CALL('callee.object.object')}${subject('callee.object.object.arguments.0')})`;
+// An exact comparison of a status with a status literal, either way round: asserted false, it is
+// "not 401" (`expect(response.status === 401).toBe(false)`).
+const STATUS_EQUALS_LITERAL = (path) =>
+  `[${path}.type='BinaryExpression'][${path}.operator=/^===?$/]:matches(${STATUS_SUBJECT(`${path}.left`)}${HTTP_STATUS_LITERAL(`${path}.right`)}, ${STATUS_SUBJECT(`${path}.right`)}${HTTP_STATUS_LITERAL(`${path}.left`)})`;
+const NO_RANGE_STATUS = [
+  {
+    selector: `${STATUS_COMPARISON}${NOT_OTHER_LITERAL_ARGUMENT}${STATUS_READ('callee.object.arguments.0')}`,
+    message: RANGE_STATUS_MESSAGE,
+  },
+  {
+    selector: `${STATUS_COMPARISON}${HTTP_STATUS_ARGUMENT}${STATUS_NAMED('callee.object.arguments.0')}`,
+    message: RANGE_STATUS_MESSAGE,
+  },
+  {
+    selector: `${STATUS_NEGATED_COMPARISON}${NOT_OTHER_LITERAL_ARGUMENT}${STATUS_READ('callee.object.object.arguments.0')}`,
+    message: RANGE_STATUS_MESSAGE,
+  },
+  {
+    selector: `${STATUS_NEGATED_COMPARISON}${HTTP_STATUS_ARGUMENT}${STATUS_NAMED('callee.object.object.arguments.0')}`,
+    message: RANGE_STATUS_MESSAGE,
+  },
+  {
+    selector: `${STATUS_NEGATION}${HTTP_STATUS_ARGUMENT}${STATUS_SUBJECT('callee.object.object.arguments.0')}`,
+    message: RANGE_STATUS_MESSAGE,
+  },
+  {
+    selector: `${STATUS_SATISFY}:matches(${STATUS_SUBJECT('callee.object.arguments.0')}, ${STATUS_SUBJECT('callee.object.object.arguments.0')})`,
+    message: RANGE_STATUS_MESSAGE,
+  },
+  {
+    selector: `CallExpression:matches([callee.name='expect'], [callee.object.name='expect'])${RELATIONAL_STATUS_WITHIN('arguments.0', 2)}`,
+    message: RANGE_STATUS_MESSAGE,
+  },
+  {
+    selector: ASSERTED_FALSE(STATUS_EQUALS_LITERAL),
+    message: RANGE_STATUS_MESSAGE,
+  },
+  {
+    // The status on one side and a list that opens with a status literal on the other.
+    selector: `${STATUS_NEGATED_LIST}:matches(${STATUS_SUBJECT('callee.object.object.arguments.0')}${HTTP_STATUS_LITERAL('arguments.0.elements.0')}, ${STATUS_SUBJECT('arguments.0')}${HTTP_STATUS_LITERAL('callee.object.object.arguments.0.elements.0')})`,
+    message: RANGE_STATUS_MESSAGE,
+  },
+];
+
+// TST-5 of the group C review: a response's `ok` asserted false (`expect(response.ok).toBe(false)`,
+// Playwright's `expect(response.ok()).toBeFalsy()`) is "not 2xx", which a 500 or a 429 passes.
+// Only in the files that send real requests (REAL_SERVICE_TEST_FILES): unit tests assert the `ok`
+// of a result type (`expect(result.ok).toBe(false)` in apps/portal/src/lib), which is exact.
+// The `ok` of a query's row (`expect(taken.rows[0]?.ok).toBe(false)`, packages/db/test) is a
+// column, not a response, and is left alone; any other `ok` that is not a response's is
+// asserted through its object, as the message says.
+const ROW_ELEMENT = (path) =>
+  `:matches([${path}.object.name='rows'], [${path}.object.property.name='rows'])`;
+const NOT_ROW_OK = (path) =>
+  `:not(${ROW_ELEMENT(`${path}.object`)}, ${ROW_ELEMENT(`${path}.object.expression`)}, ${ROW_ELEMENT(`${path}.expression.object`)})`;
+const OK_READ = (path) =>
+  `:matches([${path}.property.name='ok'], [${path}.expression.property.name='ok'], [${path}.callee.property.name='ok'], [${path}.argument.callee.property.name='ok'], [${path}.argument.property.name='ok'])${NOT_ROW_OK(path)}`;
+const NO_RESPONSE_NOT_OK = [
+  {
+    selector: ASSERTED_FALSE(OK_READ),
+    message: `${RANGE_STATUS_MESSAGE} An \`ok\` that is not an HTTP response's is asserted through its object: expect(result).toMatchObject({ ok: false }).`,
+  },
+];
+
 // Every test file: the unit, component and integration projects, Playwright specs, their
 // support files and the setup files vitest.config.ts names.
 const TEST_FILES = [
@@ -611,6 +739,250 @@ const NO_SESSION_LOCK = [
     message:
       'Take a session lock through withSessionLock, so work on other connections stops when the lock is lost (EAX-06): withSessionLock(ctx.db, name, (signal) => work) from @tinnox/db (packages/db/src/session-lock.ts) holds the lock on a connection of its own, aborts the signal when that connection is lost, and gives the lock back; add the name to its SessionLock type. A lock that only guards the statements of one transaction is pg_advisory_xact_lock in that transaction (withCountedLimit for a counted ceiling).',
   },
+];
+
+// Step 26 (adoption plan section 2.3): what a database error means is decided in one place,
+// classifyDbError in packages/db/src/outcome.ts, so no API source reads a SQLSTATE code (the
+// classes of integrity, transaction rollback, access, object state and operator intervention), in
+// string or template text: a route names the registered constraint it maps in the constraints
+// option of changeAsOperator, and the rest ask the classifier. The migration runner
+// (packages/db/src/migrate.ts) is held to it too: its lock wait asks isLockTimeout. Tests are
+// outside: they build the errors the classifier reads. A whole class tested by its prefix
+// (`code.startsWith('23')`) is refused too (CHK-2 of the group C review). Not seen: a code put
+// together at run time, kept in a constant of another package, written as a regular expression
+// (`/^23505$/`) or with escapes in a template (`\x323505`).
+const CONSTRAINT_READ =
+  'Do not read the constraint of a database error in API source (step 26): add the constraint to CONSTRAINTS in packages/db/src/constraints.ts and map it in the constraints option of changeAsOperator(ctx, request, fn, { constraints: { name: () => error } }) (apps/api/src/auth/permissions.ts), which reads it through classifyDbError of @tinnox/db.';
+const SQLSTATE_MESSAGE =
+  'Do not read a SQLSTATE code here (step 26): classifyDbError(error) from @tinnox/db (packages/db/src/outcome.ts) says what a database error means. To answer a constraint violation, add the constraint to CONSTRAINTS in packages/db/src/constraints.ts and map it in the constraints option of changeAsOperator(ctx, request, fn, { constraints: { name: () => error } }) (apps/api/src/auth/permissions.ts). Otherwise ask the classifier: classifyDbError(error)?.kind (denied, transient, other), or isLockTimeout(classifyDbError(error)) for a lock wait past lock_timeout.';
+const NO_SQLSTATE_LITERAL = [
+  {
+    selector: [
+      stringMatching('/^(23|40|42|55|57)[0-9A-Z]{3}$/'),
+      "CallExpression[callee.property.name='startsWith'][arguments.0.value=/^(23|40|42|55|57)$/]",
+    ].join(', '),
+    message: SQLSTATE_MESSAGE,
+  },
+];
+// CHK-2 (group C review): the import ban on violatedConstraint (no-restricted-imports below) does
+// not see the constraint read straight off the error, with errorField of @tinnox/db, a property
+// read after an `in` check or a destructured key (`const { constraint } = error`). No API source
+// reads a property named `constraint` today. API source only: the offline tools are not held to
+// the registry (provisioning reads a constraint name).
+const NO_CONSTRAINT_READ = [
+  {
+    selector: [
+      "CallExpression[callee.name='errorField'][arguments.1.value='constraint']",
+      "MemberExpression[computed=false][property.name='constraint']",
+      "MemberExpression[property.value='constraint']",
+      "BinaryExpression[operator='in'][left.value='constraint']",
+      "ObjectPattern > Property:matches([key.name='constraint'], [key.value='constraint'])",
+    ].join(', '),
+    message: CONSTRAINT_READ,
+  },
+];
+
+// Step 27 (adoption plan section 2.3, SCX-03): how a change ended is read in one place, settle()
+// of packages/db/src/outcome.ts, which gives 'committed', 'rolled_back' or 'unknown', and
+// switch-exhaustiveness-check fails a switch that leaves one out. So no file of the API, the
+// offline tools or packages/db tests an error for CommitOutcomeUnknownError itself: a catch that
+// does is where stored bytes were deleted, or could be mailed, for a transaction that may have
+// committed. The one test of the class is unconfirmedCommit in packages/db/src/commit-outcome.ts
+// (DB_ONE_PLACES). Tests are outside: they build the error and assert on it. Since CHK-3 of the
+// group C review, the class may be imported only as a type, so it cannot be tested under another
+// name (`import { CommitOutcomeUnknownError as E }`), and its name may not be written as a string,
+// so `error.name === 'CommitOutcomeUnknownError'` is refused too; packages/db/src/index.ts passes
+// it on with `export { ... } from`, which imports nothing into that file. A namespace or dynamic
+// import of @tinnox/db, which would carry the class under another name, is refused in the API and
+// the offline tools (CHK-6, NO_GATED_REEXPORT). Not seen: inside packages/db, the class taken
+// from a namespace import of ./commit-outcome.ts into a variable (`const E = ns.CommitOutcome...`).
+const NO_COMMIT_OUTCOME_TEST = [
+  {
+    selector: [
+      "BinaryExpression[operator='instanceof']:matches([right.name='CommitOutcomeUnknownError'], [right.property.name='CommitOutcomeUnknownError'])",
+      "ImportDeclaration:not([importKind='type']) > ImportSpecifier[imported.name='CommitOutcomeUnknownError']:not([importKind='type'])",
+      "Literal[value='CommitOutcomeUnknownError']",
+    ].join(', '),
+    message:
+      "Do not test for CommitOutcomeUnknownError (SCX-03, step 27). Wrap the change in settle() from @tinnox/db (packages/db/src/outcome.ts): `const ended = await settle(changeAsOperator(ctx, request, fn))`, then `switch (ended.end)` with all three cases. 'committed': use ended.value; only here send e-mail. 'rolled_back': only here delete files or stored objects, then throw ended.error. 'unknown': COMMIT did not confirm, so keep what the rows may own, send nothing, and throw ended.unconfirmed, which the API answers 500 commit_outcome_unknown (D9).",
+  },
+];
+// The predicate is the same test under another name. It stays for the one caller that answers an
+// unknown outcome and has nothing to undo, the API's error handler (D9); COMMIT_OUTCOME_ANSWERERS
+// names it. packages/db is outside: the migration runner reports its own COMMIT with it. This
+// rule goes beyond the plan's: D9 gave the handler the predicate so that it needs no exemption
+// from the instanceof rule above, and it has none; without this rule any caller could ask the
+// predicate in place of settle(), so the handler's excusal here is the one this step adds. The
+// name is refused wherever it is taken (CHK-3 of the group C review): an import (aliased too), a
+// re-export under another name, a property of a namespace or of a dynamic import, and a
+// destructured key. Not seen: a computed key (`db['isCommitOutcomeUnknown']`).
+const NO_COMMIT_OUTCOME_PREDICATE = [
+  {
+    selector: [
+      "ImportSpecifier[imported.name='isCommitOutcomeUnknown']",
+      "ExportSpecifier[local.name='isCommitOutcomeUnknown']",
+      "MemberExpression[property.name='isCommitOutcomeUnknown']",
+      "Property[key.name='isCommitOutcomeUnknown']",
+    ].join(', '),
+    message:
+      "isCommitOutcomeUnknown is for the API's error handler (apps/api/src/errors.ts), which answers 500 commit_outcome_unknown and has nothing to undo (D9). A caller that does anything after its change (deletes stored bytes, sends e-mail, runs again) wraps the change in settle() from @tinnox/db (packages/db/src/outcome.ts) and switches on ended.end: 'committed', 'rolled_back' and 'unknown' (SCX-03, step 27). Only 'rolled_back' may delete files or stored objects; 'unknown' throws ended.unconfirmed.",
+  },
+];
+// Step 27: a publish under an Idempotency-Key goes through changeOncePerKey of
+// apps/api/src/publishing.ts, which takes the key lock, looks up what the key already made and
+// runs again only after a known rollback. Its two steps stay exported for the handle-type test
+// (apps/api/src/read-handles.test.ts), so the rest of the API may not import them and write that
+// order, or a retry, by hand. publishing.ts declares them and imports neither, so nothing is
+// excused; tests are outside. A namespace import is seen where it is used (`p.lockPublishKey`).
+// Not seen: the same SQL written out, a computed or destructured name (`p['lockPublishKey']`,
+// `const { lockPublishKey } = p`), and a route that maps publication_idempotency in the
+// constraints option of changeAsOperator.
+const NO_HAND_KEYED_PUBLISH = [
+  {
+    selector: [
+      'ImportSpecifier[imported.name=/^(lockPublishKey|findPublicationByKey)$/]',
+      'MemberExpression[property.name=/^(lockPublishKey|findPublicationByKey)$/]',
+    ].join(', '),
+    message:
+      'Do not lock or look up an Idempotency-Key by hand (step 27). Publish through changeOncePerKey(ctx, request, { displayId, key, replay, publish }) from apps/api/src/publishing.ts: it takes the key lock, replays what the key already made, and runs once more only when the change is known to have rolled back.',
+  },
+];
+
+// Step 28 (adoption plan section 2.2 item 4, D1, D20): a 403 is built only in apps/api/src/auth/,
+// so no route answers 403 after its own lookup. Row-level security hides another organisation's
+// row, so a route answers "no row" with found() or notFound() (apps/api/src/errors.ts), and the
+// 403s are named constructors of three files (API_403_BUILDERS): the role guard's (forbidden,
+// before the handler runs) and assertStillAllowed's (PermissionDeniedError, after reading only the
+// caller's own member row) in auth/permissions.ts, the origin and CSRF checks in auth/session.ts
+// and the player protocol's three in auth/player-refusals.ts. NO_API_403 is in the API's list, so
+// every other API file, not only the routes, is refused (D1). HttpError takes its status from its
+// code (STATUS_OF of @tinnox/contracts), so the codes this refuses are read from that table, not
+// written here: a new 403 code is refused here once it is added there. Since CHK-1 of the group C
+// review it also sees the code under `as` or `satisfies` and an error object given
+// `statusCode: 403`, which the error handler would answer as `forbidden`; NO_HTTP_ERROR_ALIAS
+// refuses HttpError imported or re-exported under another name, and a subclass of it with no
+// constructor of its own, whose calls pass the code to no super() it can read. And NO_REPLY_ERROR_STATUS (SEC-5) refuses an error status set on the reply
+// itself, in every API file: an answer sent that way bypasses HttpError, so nothing ties its
+// status to its code.
+// The role refusals may not be imported into an API file outside apps/api/src/auth/ either
+// (NO_ROUTE_REFUSAL, in the API's list since SEC-2 of the group C review), so neither a route nor
+// a module it calls (tags.ts) can refuse by role after its own lookup; ROUTE_REFUSAL_IMPORTERS
+// names the two route files that may, and why. That ban is written as selectors here, not in
+// no-restricted-imports as the plan has it: that rule's lists are built per combination of facets
+// (importBoundaryBlocks), where an allow-list by file would double the API's blocks; the selectors
+// also see a re-export. A namespace import, an `export *` or a dynamic import of
+// auth/permissions.ts (any extension spelling, CHK-5) is refused outright, since a name taken from
+// it is not seen. The cross-organisation conformance test (tests/integration/cross-org.test.ts,
+// step 23) holds that another organisation's id answers exactly like a never-issued id, so no 403
+// or other answer depends on a row the caller cannot see. Whether a 403 of auth/ is decided before
+// the lookup of the caller's own row it cannot tell, since neither of its ids finds a row: that
+// stays a review question (AGENTS.md section 2, D1). Not seen: a code held in a variable or chosen
+// by a condition (`new HttpError(code, ...)`), also when a subclass's constructor passes it on to
+// super(code, ...), HttpError reached through a namespace
+// (`new errors.HttpError(...)`), held in a variable (`const E = HttpError`) or built with
+// Reflect.construct, and a refusal built in auth/ under another name and imported elsewhere.
+const { STATUS_OF } = await import('./packages/contracts/src/errors.ts');
+const CODES_WITH_STATUS_403 = Object.keys(STATUS_OF).filter((code) => STATUS_OF[code] === 403);
+const API_403_BUILDERS = [
+  'apps/api/src/auth/permissions.ts',
+  'apps/api/src/auth/session.ts',
+  'apps/api/src/auth/player-refusals.ts',
+];
+const ROLE_REFUSALS = ['forbidden', 'requirePermission', 'PermissionDeniedError'];
+const CODE_403 = `/^(${CODES_WITH_STATUS_403.join('|')})$/`;
+// The first argument as a string literal or as a template literal with no substitution, bare or
+// under `as` or `satisfies` (`'forbidden' as const`).
+const CODE_403_ARGUMENT = `:matches([arguments.0.value=${CODE_403}], [arguments.0.quasis.0.value.cooked=${CODE_403}][arguments.0.expressions.length=0], [arguments.0.type=/^TS(As|Satisfies)Expression$/][arguments.0.expression.value=${CODE_403}])`;
+const API_403_MESSAGE = `Only apps/api/src/auth/ builds a 403 (step 28, D1): a row of another organisation is invisible, so answer a missing row with found(row, 'The thing') or notFound('The thing') from apps/api/src/errors.ts. The codes with status 403 (${CODES_WITH_STATUS_403.join(', ')}; STATUS_OF in packages/contracts/src/errors.ts) are built by named constructors decided before any lookup: the role guard (auth/permissions.ts), the origin and CSRF checks (auth/session.ts) and the player protocol's refusals (auth/player-refusals.ts). A new refusal of that kind is a named constructor in apps/api/src/auth/, its file in API_403_BUILDERS in eslint.config.js.`;
+const NO_API_403 = [
+  {
+    selector: [
+      `NewExpression[callee.name='HttpError']${CODE_403_ARGUMENT}`,
+      `:matches(ClassDeclaration, ClassExpression)[superClass.name='HttpError'] CallExpression[callee.type='Super']${CODE_403_ARGUMENT}`,
+      "Property[key.name='statusCode'][value.value=403]",
+    ].join(', '),
+    message: API_403_MESSAGE,
+  },
+];
+// Not excused for API_403_BUILDERS: no API file needs HttpError under another name, nor a
+// subclass of it with no constructor, which is HttpError under another name too. A default
+// export of it (`export default HttpError`) is the same dodge, since the importer names it, so it
+// is refused too; with it refused, `import X from` or `import { default as X }` cannot reach
+// HttpError.
+const NO_HTTP_ERROR_ALIAS = [
+  {
+    selector:
+      ":matches(ClassDeclaration, ClassExpression)[superClass.name='HttpError']:not(:has(MethodDefinition[kind='constructor']))",
+    message: `Give a subclass of HttpError a constructor that calls super(code, message) (step 28, D1), so the lint can read its code; RefusedConflict in apps/api/src/routes/members.ts is one. ${API_403_MESSAGE}`,
+  },
+  {
+    selector: [
+      "ImportSpecifier[imported.name='HttpError']:not([local.name='HttpError'])",
+      "ExportSpecifier[local.name='HttpError']:not([exported.name='HttpError'])",
+      "ExportDefaultDeclaration[declaration.name='HttpError']",
+    ].join(', '),
+    message: `Import and re-export HttpError under its own name (step 28, D1): import { HttpError } from '../errors.ts', so the lint can read the code of each new HttpError(code, message) and see that none has status 403. ${API_403_MESSAGE}`,
+  },
+];
+// The status as a number, bare or under `as` or `satisfies`, given to code() or status() or
+// assigned to statusCode. Not seen: a status held in a variable or chosen by a condition
+// (`reply.code(ok ? 200 : 403)`), the form errors.ts's own send() and the readiness route
+// (routes/ops.ts) need.
+const NO_REPLY_ERROR_STATUS = [
+  {
+    selector: [
+      'CallExpression[callee.property.name=/^(code|status)$/]:matches([arguments.0.value>=400], [arguments.0.expression.value>=400])',
+      "AssignmentExpression[left.property.name='statusCode']:matches([right.value>=400], [right.expression.value>=400])",
+    ].join(', '),
+    message:
+      "Do not set an error status on the reply (SEC-5 of the group C review): throw new HttpError(code, message) from apps/api/src/errors.ts, or found(row, 'The thing') or notFound('The thing') for a missing row. HttpError takes its status from the code (STATUS_OF in packages/contracts/src/errors.ts), and the error handler sends the envelope; a status set by code(), status() or statusCode is checked against no code.",
+  },
+];
+/** The step 28 import ban of an API file that may import the role refusals in `allowed`. */
+function noRouteRefusal(allowed = []) {
+  const banned = ROLE_REFUSALS.filter((name) => !allowed.includes(name));
+  const name = `/^(${banned.join('|')})$/`;
+  // Any extension spelling: NodeNext resolves '../auth/permissions.js' to the .ts file (CHK-5).
+  const permissions = '/auth.permissions(\\.[cm]?[jt]s)?$/';
+  return [
+    {
+      selector: [
+        `ImportSpecifier[imported.name=${name}]`,
+        `ExportSpecifier[local.name=${name}]`,
+      ].join(', '),
+      message: `An API file outside apps/api/src/auth/ does not refuse by role itself (step 28, D20): ${banned.join(', ')} of apps/api/src/auth/permissions.ts are for the role guard, which decides from ROUTE_PERMISSIONS before the handler runs. Give the route the keys it needs in its ROUTE_PERMISSIONS row (all(...) for keys it needs together); changeAsOperator(ctx, request, fn) checks them again inside the write. A refusal decided after the target is read is allowed only for the people routes' rank, self and grant rules (docs/portal-v2/stage-c.md section 1.6), in routes/members.ts; routes/audit.ts keeps its unreachable unknown-role check: ROUTE_REFUSAL_IMPORTERS in eslint.config.js.`,
+    },
+    {
+      selector: [
+        `ImportDeclaration[source.value=${permissions}] > ImportNamespaceSpecifier`,
+        `ExportAllDeclaration[source.value=${permissions}]`,
+        `ImportExpression[source.value=${permissions}]`,
+      ].join(', '),
+      message: `An API file outside apps/api/src/auth/ imports apps/api/src/auth/permissions.ts by name (step 28, D20): import { changeAsOperator, ... } from '../auth/permissions.ts', so the lint can see that none of the names is a role refusal (${ROLE_REFUSALS.join(', ')}), which only the role guard uses. A route gets the keys it needs from its ROUTE_PERMISSIONS row.`,
+    },
+  ];
+}
+const NO_ROUTE_REFUSAL = noRouteRefusal();
+/** Whether `file` is in apps/api/src/auth/, where the role refusals live and may be imported. */
+const inAuth = (file) => file.startsWith('apps/api/src/auth/');
+// The route files that may import a role refusal, which one, and why (step 28, section 2.2 item 4).
+const ROUTE_REFUSAL_IMPORTERS = {
+  // The people routes' rank, self and grant rules are the one 403 allowed after a lookup
+  // (docs/portal-v2/stage-c.md section 1.6, D20). refused() builds it as a PermissionDeniedError,
+  // which carries the audit row's record. The target is read under row-level security first, so
+  // another organisation's id still answers 404 (tests/integration/cross-org.test.ts).
+  'apps/api/src/routes/members.ts': ['PermissionDeniedError'],
+  // GET /api/audit refuses a session whose role it cannot read. Unreachable: the role guard has
+  // already refused an unknown role, before the handler (auth/permissions.ts, permissionGuard).
+  'apps/api/src/routes/audit.ts': ['forbidden'],
+};
+
+// The API files that may ask the predicate, and why.
+const COMMIT_OUTCOME_ANSWERERS = [
+  // The error handler: the last reader of every error of a request. It answers a COMMIT that did
+  // not confirm with 500 commit_outcome_unknown (GET and HEAD: internal_error) and undoes nothing
+  // (D9, adoption plan step 24).
+  'apps/api/src/errors.ts',
 ];
 
 // EAX-08: a security exemption is decided on an address, never on a name. A loopback name or
@@ -1333,6 +1705,10 @@ const IMPORT_FACETS = [
       },
       ...(dir === 'packages/db' ? [] : [{ regex: '^pg(/|$)', message: pgMessage(dir) }]),
       ...dbEntryPatterns(dir),
+      // Step 26: API source reads no constraint name; the constraints option maps one.
+      ...(dir === 'apps/api'
+        ? [{ regex: '^@tinnox/db$', importNames: ['violatedConstraint'], message: CONSTRAINT_READ }]
+        : []),
     ],
   },
   {
@@ -1569,8 +1945,11 @@ function importBoundaryBlocks() {
 // @tinnox/db/migrate or the entry of the jobs. A selector cannot follow an export back to its
 // import, so the name is imported under its own name, and those modules by name, not as a
 // namespace: an alias (`import { poolAsTx as open }`, then `export { open }`) or a namespace
-// (`import * as db`, then `export { db }`) would carry it past the re-export check. Nothing in the
-// tree needs either. Not seen: a name passed on as a value (`export const open = poolAsTx`).
+// (`import * as db`, then `export { db }`) would carry it past the re-export check. A dynamic
+// import of those modules is refused for the same reason (CHK-8 of the group C review): the import
+// rules' importNames see only a static import, so `const { poolAsTx } = await import('@tinnox/db')`
+// would pass them. Nothing in the tree needs any of these. Not seen: a name passed on as a value
+// (`export const open = poolAsTx`).
 const GATED_NAMES = [
   ...UNSCOPED_HELPERS,
   ...CROSS_ORG_WRAPPERS,
@@ -1596,9 +1975,11 @@ const NO_GATED_REEXPORT = [
     selector: [
       `ImportSpecifier[imported.name=${GATED_NAME}]:not([local.name=${GATED_NAME}])`,
       `ImportDeclaration[source.value=${GATED_MODULE}] > ImportNamespaceSpecifier`,
+      `ImportExpression[source.value=${GATED_MODULE}]`,
+      `ImportExpression[source.quasis.length=1][source.quasis.0.value.cooked=${GATED_MODULE}]`,
     ].join(', '),
     message:
-      "Import a name the import rules hold to a list under its own name, and @tinnox/db, @tinnox/db/migrate and the entry of the jobs (apps/api/src/jobs.ts) by name, not as a namespace (CHK-6): the re-export check reads the name of what a file exports, so an alias or a namespace would carry poolAsTx, a cross-organisation sec.* wrapper, issueWritePermit, issueAuditStatement, changePreOrg, newOrgId or changeAsJob past it. Write `import { poolAsTx } from '@tinnox/db'` and call poolAsTx(...).",
+      "Import a name the import rules hold to a list under its own name, and @tinnox/db, @tinnox/db/migrate and the entry of the jobs (apps/api/src/jobs.ts) by name with a static import, not as a namespace and not with import() (CHK-6): the re-export check reads the name of what a file exports, and the import rules see only a static import, so an alias, a namespace or a dynamic import would carry poolAsTx, a cross-organisation sec.* wrapper, issueWritePermit, issueAuditStatement, changePreOrg, newOrgId or changeAsJob past them. Write `import { poolAsTx } from '@tinnox/db'` and call poolAsTx(...).",
   },
 ];
 
@@ -1632,7 +2013,20 @@ const API_SYNTAX = [
   ...NO_GATED_REEXPORT,
   ...NO_SESSION_LOCK,
   ...NO_LOOPBACK_NAME,
+  ...NO_SQLSTATE_LITERAL,
+  ...NO_CONSTRAINT_READ,
+  ...NO_COMMIT_OUTCOME_TEST,
+  ...NO_COMMIT_OUTCOME_PREDICATE,
+  ...NO_HAND_KEYED_PUBLISH,
+  ...NO_API_403,
+  ...NO_HTTP_ERROR_ALIAS,
+  ...NO_REPLY_ERROR_STATUS,
+  ...NO_ROUTE_REFUSAL,
 ];
+// SEC-2 (group C review): apps/api/src/auth/ holds the role refusals, so its files keep the rest
+// of the API's list without the ban on importing them.
+const authSyntax = (file, list) =>
+  inAuth(file) ? list.filter((entry) => !NO_ROUTE_REFUSAL.includes(entry)) : list;
 // The list of the offline tools (D25: scripts get the database rules too). The tools that read
 // the migrator URL get it as it is; every other script also gets NO_MIGRATOR_URL.
 const SCRIPTS_SYNTAX = [
@@ -1645,16 +2039,23 @@ const SCRIPTS_SYNTAX = [
   ...NO_TRANSACTION_TEXT,
   ...NO_GATED_REEXPORT,
   ...NO_SESSION_LOCK,
+  ...NO_COMMIT_OUTCOME_TEST,
+  ...NO_COMMIT_OUTCOME_PREDICATE,
 ];
 // EAX-06: packages/db holds withSessionLock and the migration runner's lock, so the product list
-// of its source leaves out NO_SESSION_LOCK.
-const DB_SYNTAX = PRODUCT_SYNTAX.filter((entry) => !NO_SESSION_LOCK.includes(entry));
+// of its source leaves out NO_SESSION_LOCK. Step 27: it holds the commit-outcome error, so its
+// source gets the ban on testing for the class, outside the one file that does (DB_ONE_PLACES).
+const DB_SYNTAX = [
+  ...PRODUCT_SYNTAX.filter((entry) => !NO_SESSION_LOCK.includes(entry)),
+  ...NO_COMMIT_OUTCOME_TEST,
+];
 
 // The files of packages/db that are the one place for something the rest may not write, with the
 // list each is excused from. The rest of the package's list is unchanged for them.
+const MIGRATION_RUNNER = 'packages/db/src/migrate.ts';
 const DB_ONE_PLACES = {
   // SEC-1: connectMigrator mints the MigratorPool brand here, after checking the role.
-  'packages/db/src/migrate.ts': NO_MIGRATOR_POOL_CAST,
+  [MIGRATION_RUNNER]: NO_MIGRATOR_POOL_CAST,
   // AG-2.2: the typed wrappers of the sec.* functions.
   'packages/db/src/sec.ts': NO_RAW_SEC,
   // D25: asDefiner, the one role switch.
@@ -1663,7 +2064,22 @@ const DB_ONE_PLACES = {
   'packages/db/src/sql.ts': NO_SQL_FRAGMENT_CAST,
   // AG-2.3: mintOrgId and the rows asDefiner reads make the OrgId.
   'packages/db/src/org-id.ts': NO_ORG_ID_FORGERY,
+  // SCX-03: unconfirmedCommit, the one test for CommitOutcomeUnknownError, which settle() reads.
+  'packages/db/src/commit-outcome.ts': NO_COMMIT_OUTCOME_TEST,
 };
+
+// The API files that are the one place for something the rest of the API may not write, and the
+// list each is excused from (D5, EAX-08, D9, D1). A file may be in more than one.
+const API_ONE_PLACES = [
+  [CREDENTIAL_NAME_REFUSERS, NO_CREDENTIAL_NAMES],
+  [LOOPBACK_NAME_ALLOWED, NO_LOOPBACK_NAME],
+  [COMMIT_OUTCOME_ANSWERERS, NO_COMMIT_OUTCOME_PREDICATE],
+  // Step 28 (D1): the named constructors of the 403s.
+  [API_403_BUILDERS, NO_API_403],
+];
+const API_ONE_PLACE_FILES = [...new Set(API_ONE_PLACES.flatMap(([files]) => files))];
+const apiExcusals = (file) =>
+  API_ONE_PLACES.flatMap(([files, entries]) => (files.includes(file) ? entries : []));
 
 // CHK-12: the one-place excusals of the no-restricted-syntax lists above, by file, so that
 // scripts/lib/db-access-lint.test.ts can show each is still needed: it lints the file's text with
@@ -1671,15 +2087,7 @@ const DB_ONE_PLACES = {
 export const ONE_PLACE_EXCUSALS = {
   ...DB_ONE_PLACES,
   'packages/domain/src/planned.ts': NO_PLANNED_PUBLICATION_CAST,
-  ...Object.fromEntries(
-    [...new Set([...CREDENTIAL_NAME_REFUSERS, ...LOOPBACK_NAME_ALLOWED])].map((file) => [
-      file,
-      [
-        ...(CREDENTIAL_NAME_REFUSERS.includes(file) ? NO_CREDENTIAL_NAMES : []),
-        ...(LOOPBACK_NAME_ALLOWED.includes(file) ? NO_LOOPBACK_NAME : []),
-      ],
-    ]),
-  ),
+  ...Object.fromEntries(API_ONE_PLACE_FILES.map((file) => [file, apiExcusals(file)])),
 };
 
 export default tseslint.config(
@@ -1871,6 +2279,8 @@ export default tseslint.config(
         'error',
         ...DB_SYNTAX.filter((entry) => !excused.includes(entry)),
         ...outboundSyntax('packages/db', null),
+        // Step 26: the runner's lock wait asks isLockTimeout, as the API does.
+        ...(file === MIGRATION_RUNNER ? NO_SQLSTATE_LITERAL : []),
       ],
     },
   })),
@@ -1899,6 +2309,30 @@ export default tseslint.config(
     },
   },
   {
+    // Step 28, SEC-2: auth/ may import the role refusals it defines (NO_ROUTE_REFUSAL).
+    files: ['apps/api/src/auth/**/*.ts'],
+    ignores: TEST_FILES,
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...authSyntax('apps/api/src/auth/', API_SYNTAX),
+        ...outboundSyntax('apps/api', null),
+      ],
+    },
+  },
+  ...Object.entries(ROUTE_REFUSAL_IMPORTERS).map(([file, allowed]) => ({
+    // Each keeps the rest of the API's list, and may import only its own refusal.
+    files: [file],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...API_SYNTAX.filter((entry) => !NO_ROUTE_REFUSAL.includes(entry)),
+        ...noRouteRefusal(allowed),
+        ...outboundSyntax('apps/api', null),
+      ],
+    },
+  })),
+  {
     // CHK-4: the two entry points keep the rest of the API's list (the loopback-name and
     // organisation-from-request rules included); only the clock rule is off, since they make it.
     files: ['apps/api/src/main.ts', 'apps/api/src/alerts-once.ts'],
@@ -1914,24 +2348,25 @@ export default tseslint.config(
     // Each reviewed client may load its own package.
     files: [file],
     rules: {
-      'no-restricted-syntax': ['error', ...API_SYNTAX, ...outboundSyntax('apps/api', name)],
+      'no-restricted-syntax': [
+        'error',
+        ...authSyntax(file, API_SYNTAX),
+        ...outboundSyntax('apps/api', name),
+      ],
     },
   })),
-  // D5 and EAX-08: a file that refuses the credential names, or may name a loopback host, keeps the
-  // rest of the API's list. One block per file, because flat config replaces the option list and
-  // a file may be in either list or both.
-  ...[...new Set([...CREDENTIAL_NAME_REFUSERS, ...LOOPBACK_NAME_ALLOWED])].map((file) => {
-    const excused = [
-      ...(CREDENTIAL_NAME_REFUSERS.includes(file) ? NO_CREDENTIAL_NAMES : []),
-      ...(LOOPBACK_NAME_ALLOWED.includes(file) ? NO_LOOPBACK_NAME : []),
-    ];
+  // D5, EAX-08, D9 and D1: a file that refuses the credential names, may name a loopback host,
+  // answers an unknown commit outcome or builds a 403 keeps the rest of the API's list. One block per file,
+  // because flat config replaces the option list and a file may be in more than one list.
+  ...API_ONE_PLACE_FILES.map((file) => {
+    const excused = apiExcusals(file);
     const client = Object.entries(OUTBOUND_CLIENTS).find(([, path]) => path === file)?.[0] ?? null;
     return {
       files: [file],
       rules: {
         'no-restricted-syntax': [
           'error',
-          ...API_SYNTAX.filter((entry) => !excused.includes(entry)),
+          ...authSyntax(file, API_SYNTAX).filter((entry) => !excused.includes(entry)),
           ...outboundSyntax('apps/api', client),
         ],
       },
@@ -1981,6 +2416,22 @@ export default tseslint.config(
         'error',
         ...NO_SKIPPED_TESTS,
         ...NO_RANDOM_IN_TESTS,
+        ...NO_RANGE_STATUS,
+        ...NO_BRAND_CAST,
+        ...NO_HTML_SINK_CALLS,
+      ],
+    },
+  },
+  {
+    // The test files that send real requests also refuse a response's `ok` asserted false.
+    files: REAL_SERVICE_TEST_FILES,
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...NO_SKIPPED_TESTS,
+        ...NO_RANDOM_IN_TESTS,
+        ...NO_RANGE_STATUS,
+        ...NO_RESPONSE_NOT_OK,
         ...NO_BRAND_CAST,
         ...NO_HTML_SINK_CALLS,
       ],
@@ -1995,6 +2446,7 @@ export default tseslint.config(
         ...NO_RAW_HTML,
         ...NO_SKIPPED_TESTS,
         ...NO_RANDOM_IN_TESTS,
+        ...NO_RANGE_STATUS,
         ...NO_BARE_KEYBOARD,
         ...NO_BRAND_CAST,
         ...NO_HTML_SINK_CALLS,
@@ -2012,6 +2464,7 @@ export default tseslint.config(
         ...NO_RAW_HTML,
         ...NO_SKIPPED_TESTS,
         ...NO_RANDOM_IN_TESTS,
+        ...NO_RANGE_STATUS,
         ...NO_BRAND_CAST,
         ...NO_HTML_SINK_CALLS,
       ],

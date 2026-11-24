@@ -42,6 +42,7 @@ import {
   type AuditInput,
   type AuditStatement,
   type OrgId,
+  type TxEnd,
 } from '@tinnox/db';
 import {
   asDefiner,
@@ -1245,4 +1246,35 @@ export function runInvocation(
   call: Invocation,
 ): Promise<Result> {
   return runCommand(pool, idp, call);
+}
+
+/** Where the CLI prints: the staff terminal. */
+export interface StaffTerminal {
+  log(line: string): void;
+  error(line: unknown): void;
+}
+
+/** What a run that did not confirm tells staff: the command may or may not have been applied. */
+export const OUTCOME_UNKNOWN =
+  'outcome unknown: run `pending` or read the audit log before running again';
+
+/**
+ * Prints how a command ended and returns the exit code: 0 done, 1 refused, failed or unknown.
+ * `ended` is settle(runInvocation(...)): each command is one transaction, so its three outcomes
+ * are the three reports. A COMMIT that did not confirm is never reported as a refusal or a
+ * failure, either of which would tell staff to run the command again (SCX-03).
+ */
+export function reportEnd(ended: TxEnd<Result>, terminal: StaffTerminal): 0 | 1 {
+  switch (ended.end) {
+    case 'committed':
+      for (const line of ended.value.lines) terminal.log(line);
+      return 0;
+    case 'rolled_back':
+      if (ended.error instanceof RefusedError) terminal.error(`refused: ${ended.error.message}`);
+      else terminal.error(ended.error instanceof Error ? ended.error.message : ended.error);
+      return 1;
+    case 'unknown':
+      terminal.error(OUTCOME_UNKNOWN);
+      return 1;
+  }
 }

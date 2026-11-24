@@ -1,11 +1,16 @@
-import { termsOfStatement } from '@tinnox/db';
+import { settle, termsOfStatement } from '@tinnox/db';
+import { withOrg, testOrgId, type Pool } from '@tinnox/db/testing';
 import { describe, expect, it } from 'vitest';
 import { keycloakDirectory } from './idp.ts';
 import {
+  OUTCOME_UNKNOWN,
   PROVISION_COMMANDS,
+  RefusedError,
   UsageError,
   parseInvocation,
   provisionStatement,
+  reportEnd,
+  type Result,
 } from './provision.ts';
 
 const INVITE = '3f9a12c4-1111-4222-8333-444455556666';
@@ -271,5 +276,69 @@ describe('the audit statement of a provisioning command', () => {
     expect(() => provisionStatement('org-delete' as never)).toThrow(
       'no provisioning command is called org-delete: a command gets its row in PROVISION_COMMANDS (scripts/lib/provision.ts) with the audit actions it writes, and each its case in tests/integration/provision-member.test.ts',
     );
+  });
+});
+
+// The CLI prints and exits by how the command's one transaction ended (adoption plan step 27,
+// SCX-03): scripts/provision-member.ts hands settle(runInvocation(...)) to reportEnd.
+describe('what the CLI reports for how a command ended (step 27)', () => {
+  function terminal() {
+    const out: string[] = [];
+    const err: unknown[] = [];
+    return {
+      out,
+      err,
+      log: (line: string) => out.push(line),
+      error: (line: unknown) => err.push(line),
+    };
+  }
+  const DONE: Result = { lines: ['invite fulfilled', 'member 0b7e1a2c'] };
+
+  it('committed: prints the lines and exits 0', async () => {
+    const t = terminal();
+    expect(reportEnd(await settle(Promise.resolve(DONE)), t)).toBe(0);
+    expect(t.out).toEqual(DONE.lines);
+    expect(t.err).toEqual([]);
+  });
+
+  it('rolled back: says refused, or the failure, and exits 1', async () => {
+    const refused = terminal();
+    const refusal = Promise.reject<Result>(new RefusedError('this invite was cancelled'));
+    expect(reportEnd(await settle(refusal), refused)).toBe(1);
+    expect(refused.err).toEqual(['refused: this invite was cancelled']);
+    expect(refused.out).toEqual([]);
+
+    const failed = terminal();
+    const failure = Promise.reject<Result>(new Error('connect ECONNREFUSED'));
+    expect(reportEnd(await settle(failure), failed)).toBe(1);
+    expect(failed.err).toEqual(['connect ECONNREFUSED']);
+  });
+
+  it('unknown: says so with exit 1, never as a refusal or a failure that invites a second run', async () => {
+    // A transaction whose COMMIT is sent and answered with a lost connection.
+    const pool = {
+      connect: () =>
+        Promise.resolve({
+          on: () => undefined,
+          removeListener: () => undefined,
+          release: () => undefined,
+          query: (text: string) =>
+            text === 'COMMIT'
+              ? Promise.reject(new Error('Connection terminated unexpectedly'))
+              : Promise.resolve({ rows: [] }),
+        }),
+    } as unknown as Pool;
+    const ended = await settle(
+      withOrg(pool, testOrgId('00000000-0000-4000-8000-000000000001'), () => Promise.resolve(DONE)),
+    );
+    expect(ended.end).toBe('unknown');
+    const t = terminal();
+    expect(reportEnd(ended, t)).toBe(1);
+    expect(t.err).toEqual([OUTCOME_UNKNOWN]);
+    expect(OUTCOME_UNKNOWN).toBe(
+      'outcome unknown: run `pending` or read the audit log before running again',
+    );
+    // The lines of a command that may not have been applied are not printed as done.
+    expect(t.out).toEqual([]);
   });
 });

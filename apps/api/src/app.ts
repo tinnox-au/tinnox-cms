@@ -90,7 +90,7 @@ export async function buildApp(
     global: true,
     ...perMinute(ctx, 600),
     errorResponseBuilder: (_request, context) =>
-      new HttpError(429, 'rate_limited', `Too many requests. Try again in ${context.after}.`),
+      new HttpError('rate_limited', `Too many requests. Try again in ${context.after}.`),
   });
   await app.register(multipart, {
     limits: {

@@ -30,17 +30,22 @@ import {
 } from '@tinnox/contracts';
 import {
   changeOrg,
+  classifyDbError,
+  isLockTimeout,
   issueWritePermit,
   lockOrgMembership,
   membershipForCheck,
+  settle,
   type Change,
+  type ConstraintName,
   type OrgTx,
+  type TxEnd,
   type WritePermit,
 } from '@tinnox/db';
 import { permissionsOf } from '@tinnox/domain';
 import type { FastifyReply, FastifyRequest, RouteOptions } from 'fastify';
 import type { AppContext } from '../context.ts';
-import { HttpError, pgErrorCode } from '../errors.ts';
+import { HttpError } from '../errors.ts';
 import { audits, noAudit, type RouteAudit } from '../route-audit.ts';
 import {
   recordPermissionDenied,
@@ -49,7 +54,7 @@ import {
 } from './permission-audit.ts';
 import { operatorOf, type OperatorSession } from './session.ts';
 
-export type RefineName = 'displayPatchFields' | 'tagScopeFromBody' | 'tagScopeFromRow';
+export type RefineName = 'displayPatchFields' | 'tagScopeFromBody';
 /** The keys a route needs. */
 export type KeyRule =
   | { readonly all: readonly PermissionKey[] }
@@ -143,18 +148,18 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteRule>> = Object.fre
   [`DELETE ${ROUTES.layoutPattern}`]: write(all('content.delete'), 'layout.delete'),
 
   [`GET ${ROUTES.tags}`]: read(all('org.read')),
+  // A new tag needs its scope's key: the body names the scope, so the guard decides it before
+  // any lookup. A change or deletion needs both scopes' keys (D20): the scope is known only from
+  // the stored tag, and a refusal after that lookup is what step 28 removed. Every role with a
+  // content key also holds screen.setup (packages/domain/src/permissions.ts), so today's roles
+  // get the same answers; a later split of the keys refuses instead of widening. That POST stays
+  // per scope while PATCH and DELETE need both is recorded in D20.
   [`POST ${ROUTES.tags}`]: write(
     any('tagScopeFromBody', 'content.write', 'screen.setup'),
     'tag.create',
   ),
-  [`PATCH ${ROUTES.tagPattern}`]: write(
-    any('tagScopeFromRow', 'content.write', 'screen.setup'),
-    'tag.update',
-  ),
-  [`DELETE ${ROUTES.tagPattern}`]: write(
-    any('tagScopeFromRow', 'content.delete', 'screen.setup'),
-    'tag.delete',
-  ),
+  [`PATCH ${ROUTES.tagPattern}`]: write(all('content.write', 'screen.setup'), 'tag.update'),
+  [`DELETE ${ROUTES.tagPattern}`]: write(all('content.delete', 'screen.setup'), 'tag.delete'),
 
   [`GET ${ROUTES.folders}`]: read(all('org.read')),
   [`POST ${ROUTES.folders}`]: write(all('content.write'), 'folder.create'),
@@ -258,7 +263,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 /**
  * Narrow an any-of rule from the parsed (not yet validated) body. Null keeps the any-of
- * requirement; validation then answers 400, or the handler checks the stored row.
+ * requirement; validation then answers 400.
  */
 export const REFINES: {
   readonly [N in RefineName]: (body: unknown) => readonly PermissionKey[] | null;
@@ -271,8 +276,6 @@ export const REFINES: {
     const scope = body['scope'];
     return scope === 'media' || scope === 'display' ? [tagScopeKey(scope, 'write')] : null;
   },
-  // The scope is known only after the handler reads the tag (routes/tags.ts).
-  tagScopeFromRow: () => null,
 });
 
 // ------------------------------------------------------------------------ the test
@@ -345,13 +348,13 @@ export function createRouteCheck(): {
 // --------------------------------------------------------------------------- refusals
 
 export const forbidden = (): HttpError =>
-  new HttpError(403, 'forbidden', "Your role doesn't allow this.");
+  new HttpError('forbidden', "Your role doesn't allow this.");
 
 /** A refusal by role found inside a transaction or by a people-route rule. Carries what the audit row needs. */
 export class PermissionDeniedError extends HttpError {
   readonly record: DenialRecord;
   constructor(record: DenialRecord) {
-    super(403, 'forbidden', "Your role doesn't allow this.");
+    super('forbidden', "Your role doesn't allow this.");
     this.name = 'PermissionDeniedError';
     this.record = record;
   }
@@ -426,15 +429,19 @@ export function permissionGuard(
       request.permission = { required, audit: rule.audit };
       return;
     }
-    if (!SAFE_METHODS.has(request.method)) {
-      await recordPermissionDenied(ctx, request, session, {
-        keys: failed,
-        reason: 'role',
-        always: false,
-      });
+    try {
+      if (!SAFE_METHODS.has(request.method)) {
+        await recordPermissionDenied(ctx, request, session, {
+          keys: failed,
+          reason: 'role',
+          always: false,
+        });
+      }
+    } finally {
+      // A Viewer's upload is refused before any byte reaches storage, also when its refusal row
+      // fails the request (AUD-9). After the row, since abandonBody starts its 2 s cut-off.
+      if (key === `POST ${ROUTES.media}`) abandonBody(request, reply);
     }
-    // A Viewer's upload is refused before any byte reaches storage.
-    if (key === `POST ${ROUTES.media}`) abandonBody(request, reply);
     throw forbidden();
   };
 }
@@ -454,7 +461,7 @@ export async function assertStillAllowed(
 ): Promise<Role> {
   const row = await membershipForCheck(tx, session.membershipId, session.createdAt);
   if (row === null || row.removedAt !== null || row.cutOff) {
-    throw new HttpError(401, 'unauthenticated', 'Sign in to continue.');
+    throw new HttpError('unauthenticated', 'Sign in to continue.');
   }
   const role = parseRole(row.role);
   if (role === null || !meets(role, required)) {
@@ -467,9 +474,6 @@ export async function assertStillAllowed(
   return role;
 }
 
-/** SQLSTATE lock_not_available: `lock_timeout` (5 s for tinnox_app) ran out. */
-const LOCK_NOT_AVAILABLE = '55P03';
-
 // SEC-5: the re-check is always the requirement the guard resolved. A handler could once name its
 // own, which could only loosen the one check the permit exists to run.
 function requirementOf(request: FastifyRequest): Requirement {
@@ -481,31 +485,54 @@ function requirementOf(request: FastifyRequest): Requirement {
 }
 
 /**
- * A lock timeout (55P03) as 503 service_unavailable with retry-after 2; anything else unchanged.
- * For a write outside changeAsOperator that waits for a row lock, such as the public alert
- * confirmation (review findings SEC-3, BEH-3), so it answers as every other write does.
+ * A lock timeout (`lock_timeout`, 5 s for tinnox_app, ran out; isLockTimeout of @tinnox/db) as
+ * 503 service_unavailable with retry-after 2; anything else unchanged. For a write outside
+ * changeAsOperator that waits for a row lock, such as the public alert confirmation (review
+ * findings SEC-3, BEH-3), so it answers as every other write does.
  */
 export function lockTimeoutAsUnavailable(request: FastifyRequest, error: unknown): unknown {
-  if (pgErrorCode(error) !== LOCK_NOT_AVAILABLE) return error;
-  request.log.warn({ pgCode: LOCK_NOT_AVAILABLE }, 'a write waited too long for a lock');
+  const failure = classifyDbError(error);
+  if (!isLockTimeout(failure)) return error;
+  request.log.warn({ pgCode: failure.sqlstate }, 'a write waited too long for a lock');
   return new HttpError(
-    503,
     'service_unavailable',
     'Another change is being saved. Try again in a moment.',
     { headers: { 'retry-after': '2' } },
   );
 }
 
-/** Records a role refusal and maps a lock timeout; anything else passes unchanged. */
-async function settle(
+/**
+ * What a change answers when the database refuses it with a constraint of the registry
+ * (CONSTRAINTS, packages/db/src/constraints.ts): each name the route maps, with the error to
+ * throw in place of the database's. A name the route does not map stays the database's error,
+ * a 500 logged by its name. A route maps names to answers only, usually an HttpError. The one
+ * change that runs again after a refusal is a keyed publish: changeOncePerKey
+ * (apps/api/src/publishing.ts) maps publication_idempotency to its own private error and runs
+ * once more, and its KeyedPublish.constraints leaves that name out of what a route may map.
+ */
+export type ConstraintAnswers = { readonly [Name in ConstraintName]?: () => Error };
+
+/**
+ * What to throw for a change that rolled back (the `rolled_back` end of settle(), @tinnox/db):
+ * records a role refusal, answers a registered constraint the route maps, and maps a lock
+ * timeout; anything else passes unchanged. Until step 27 this was a private `settle` that every
+ * failure went through; a COMMIT that did not confirm no longer comes here.
+ */
+async function rolledBackAnswer(
   ctx: AppContext,
   request: FastifyRequest,
   session: OperatorSession,
-  error: unknown,
+  rolledBack: Extract<TxEnd<unknown>, { end: 'rolled_back' }>,
+  constraints: ConstraintAnswers | undefined,
 ): Promise<unknown> {
+  const { error, failure } = rolledBack;
   if (error instanceof PermissionDeniedError) {
     await recordPermissionDenied(ctx, request, session, error.record);
     return error;
+  }
+  if (failure?.kind === 'constraint') {
+    const answer = constraints?.[failure.name];
+    if (answer !== undefined) return answer();
   }
   return lockTimeoutAsUnavailable(request, error);
 }
@@ -514,6 +541,11 @@ async function settle(
 export interface WriteOptions {
   /** Take the organisation's membership lock before the role is read again. */
   readonly lockMembership?: boolean;
+  /**
+   * The registered constraints the route answers, and with what (step 26): a route names them
+   * here and reads no SQLSTATE code or constraint name itself.
+   */
+  readonly constraints?: ConstraintAnswers;
 }
 
 /**
@@ -550,9 +582,13 @@ function writePermit(
  * assertStillAllowed → fn(tx, role) → the audit rows `fn` returned → COMMIT. `fn` returns
  * `{ value, audit }` and writes no audit row itself.
  * A PermissionDeniedError thrown anywhere inside rolls back, is recorded with
- * recordPermissionDenied in its own transaction, and is rethrown. A lock timeout (55P03)
- * raised anywhere inside (membership lock, actor row, target row, any other lock) becomes
- * 503 service_unavailable with retry-after 2.
+ * recordPermissionDenied in its own transaction, and is rethrown. A violation of a registered
+ * constraint that `options.constraints` maps is thrown as the route's answer instead (step 26).
+ * A lock timeout (55P03) raised anywhere inside (membership lock, actor row, target row, any
+ * other lock) becomes 503 service_unavailable with retry-after 2.
+ * A COMMIT that did not confirm is thrown as it came (CommitOutcomeUnknownError): the change may
+ * be saved, so it is neither recorded as a refusal nor mapped to an answer of the route. A
+ * caller that does anything outside the database afterwards wraps this call in settle().
  */
 export async function changeAsOperator<T>(
   ctx: AppContext,
@@ -562,9 +598,13 @@ export async function changeAsOperator<T>(
 ): Promise<T> {
   const session = operatorOf(request);
   const permit = writePermit(request, session, options);
-  try {
-    return await changeOrg(ctx.db, session.orgId, permit, fn);
-  } catch (error) {
-    throw await settle(ctx, request, session, error);
+  const ended = await settle(changeOrg(ctx.db, session.orgId, permit, fn));
+  switch (ended.end) {
+    case 'committed':
+      return ended.value;
+    case 'rolled_back':
+      throw await rolledBackAnswer(ctx, request, session, ended, options?.constraints);
+    case 'unknown':
+      throw ended.unconfirmed;
   }
 }

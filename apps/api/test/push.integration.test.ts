@@ -36,8 +36,10 @@ import {
   createPlaylist,
   createSchedule,
   desiredPublicationId,
+  expectError,
   imageItem,
   layoutZones,
+  losingCommitAnswers,
   pairPlayer,
   pngBytes,
   push,
@@ -768,6 +770,46 @@ describe('assign, then push', () => {
       expect(next[1]?.publicationId).toBe(first[1]?.publicationId);
       expect(await publications(orgA, one.displayId)).toHaveLength(2);
       expect(await publications(orgA, two.displayId)).toHaveLength(1);
+    });
+
+    it('answers commit_outcome_unknown when the COMMIT of a pushed display does not confirm, and repeats with the same key publish nothing twice (SCX-03, D9)', async () => {
+      const one = await assigned(alice, orgA, [imageA], 'Unconfirmed one');
+      const two = await assigned(alice, orgA, [imageB], 'Unconfirmed two');
+      const ids = [one.displayId, two.displayId];
+      // Every publication of this app commits for real, and the answer to its COMMIT is lost.
+      const lossy = await startTestApp({}, 1000, {
+        wrapPool: (pool) => losingCommitAnswers(pool, /INSERT INTO publication \(id/),
+      });
+      try {
+        const operator = await signIn(lossy, orgA);
+        const key = randomUUID();
+        // The first display is published and its answer lost: the push stops there, and the
+        // server does not run it again by itself.
+        const first = await push(operator, ids, key);
+        expect(first.headers.get('retry-after')).toBeNull();
+        await expectError(first, 'commit_outcome_unknown');
+        expect(await publications(orgA, one.displayId)).toHaveLength(1);
+        expect(await publications(orgA, two.displayId)).toHaveLength(0);
+        // The repeat replays the first display and publishes the second, whose answer is lost too.
+        await expectError(await push(operator, ids, key), 'commit_outcome_unknown');
+        // Both exist now, so a third repeat only replays.
+        const done = await push(operator, ids, key);
+        expect(done.status, await done.clone().text()).toBe(200);
+        const results = PushResponseSchema.parse(await done.json()).results;
+        expect(results.map((r) => r.outcome)).toEqual(['published', 'published']);
+        for (const [index, displayId] of ids.entries()) {
+          const stored = await publications(orgA, displayId);
+          expect(stored.map((p) => p.id)).toEqual([results[index]?.publicationId]);
+          expect(await desiredPublicationId(alice, displayId)).toBe(results[index]?.publicationId);
+        }
+        // One audit row per publication, none for a replay.
+        const created = (await auditEvents(alice, '&category=publication')).filter(
+          (e) => e.result === 'success' && ids.includes(String(e.detail?.['displayId'])),
+        );
+        expect(created).toHaveLength(2);
+      } finally {
+        await lossy.close();
+      }
     });
 
     it('creates one publication per display for many concurrent pushes with the same key', async () => {

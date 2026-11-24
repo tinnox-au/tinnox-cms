@@ -17,10 +17,10 @@ import {
 import { readOrg, type OrgReadTx } from '@tinnox/db';
 import type { FastifyInstance } from 'fastify';
 import { APP_COLUMNS, toAppDto, type AppRow } from '../app-rows.ts';
-import { changeAsOperator } from '../auth/permissions.ts';
+import { changeAsOperator, type ConstraintAnswers } from '../auth/permissions.ts';
 import { operatorOf } from '../auth/session.ts';
 import type { AppContext } from '../context.ts';
-import { HttpError, notFound, parseInput, pgErrorCode } from '../errors.ts';
+import { found, HttpError, parseInput } from '../errors.ts';
 
 async function loadApp(tx: OrgReadTx, id: string): Promise<AppDto | null> {
   const { rows } = await tx.query<AppRow>(
@@ -32,7 +32,12 @@ async function loadApp(tx: OrgReadTx, id: string): Promise<AppDto | null> {
 }
 
 const appInUse = (message: string, details?: { path: string; message: string }[]): HttpError =>
-  new HttpError(409, 'app_in_use', message, details === undefined ? {} : { details });
+  new HttpError('app_in_use', message, details === undefined ? {} : { details });
+
+/** A playlist took the app between the check of its delete and the DELETE. */
+const ADDED_MEANWHILE = {
+  playlist_item_app_fk: () => appInUse('This app has just been added to a playlist. Try again.'),
+} as const satisfies ConstraintAnswers;
 
 export function registerAppRoutes(app: FastifyInstance, ctx: AppContext): void {
   const { db } = ctx;
@@ -90,8 +95,7 @@ export function registerAppRoutes(app: FastifyInstance, ctx: AppContext): void {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     return readOrg(db, session.orgId, async (tx) => {
-      const dto = await loadApp(tx, id);
-      if (dto === null) throw notFound('The app');
+      const dto = found(await loadApp(tx, id), 'The app');
       return dto;
     });
   });
@@ -105,10 +109,9 @@ export function registerAppRoutes(app: FastifyInstance, ctx: AppContext): void {
         'SELECT type FROM app WHERE id = $1 AND org_id = app_org_id() FOR UPDATE',
         [id],
       );
-      const current = locked.rows[0];
-      if (current === undefined) throw notFound('The app');
+      const current = found(locked.rows[0], 'The app');
       if (patch.content !== undefined && patch.content.type !== current.type) {
-        throw new HttpError(400, 'validation_failed', "An app's type cannot be changed.", {
+        throw new HttpError('validation_failed', "An app's type cannot be changed.", {
           details: [{ path: 'content.type', message: `must be ${current.type}` }],
         });
       }
@@ -149,14 +152,15 @@ export function registerAppRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.delete(ROUTES.appPattern, async (request, reply) => {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
-    try {
-      await changeAsOperator(ctx, request, async (tx) => {
+    await changeAsOperator(
+      ctx,
+      request,
+      async (tx) => {
         const locked = await tx.query<{ type: string }>(
           'SELECT type FROM app WHERE id = $1 AND org_id = app_org_id() FOR UPDATE',
           [id],
         );
-        const current = locked.rows[0];
-        if (current === undefined) throw notFound('The app');
+        const current = found(locked.rows[0], 'The app');
         const used = await tx.query<{ name: string }>(
           `SELECT p.name FROM playlist p
            WHERE p.org_id = app_org_id() AND p.deleted_at IS NULL
@@ -184,14 +188,9 @@ export function registerAppRoutes(app: FastifyInstance, ctx: AppContext): void {
             detail: { type: current.type },
           },
         };
-      });
-    } catch (error) {
-      // A playlist took the app between the check above and the delete.
-      if (pgErrorCode(error) === '23503') {
-        throw appInUse('This app has just been added to a playlist. Try again.');
-      }
-      throw error;
-    }
+      },
+      { constraints: ADDED_MEANWHILE },
+    );
     return reply.code(204).send();
   });
 }
