@@ -3,7 +3,7 @@ contract: status/v2
 repo: tinnox-au/tinnox-cms
 initiative: TINNOX CMS
 key: CMS
-next_id: 38
+next_id: 39
 phase: Not written yet: one sentence on what this project is and where it stands
 gate: -
 seeded: 17 Nov 2026 by status init
@@ -43,6 +43,7 @@ None.
 | CMS-35 | Provider review for alert e-mail: name the reviewed SMTP host; production sends no alert e-mail until then (poteto D23) | proposed | - | 24 Nov |
 | CMS-36 | Decide two unaudited writes: an alert episode closed without an e-mail, and the expiry mark on a pairing session; audit or exempt them in D3 (poteto step 16) | proposed | - | 24 Nov |
 | CMS-37 | Deploy the CMS to production: agree the deployment plan first (data stays in Australia, stability, scalability, security), then the first production release | proposed | - | 24 Nov |
+| CMS-38 | Player push channel for instant commands (reload, restart, screenshot): the player only polls today; add when a customer needs faster than the 15 s poll | proposed | - | 24 Nov |
 
 ## To do
 
@@ -304,3 +305,6 @@ from: CMS-30
 
 **Notes**
 - 24 Nov: Michael, 24 Nov: media is served direct from Sydney storage, no CDN, if possible. Michael is the incident owner for now. Native players: Linux only for now, Windows 11 set aside.
+
+### CMS-38
+from: CMS-37
