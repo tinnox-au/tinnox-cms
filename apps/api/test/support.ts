@@ -75,12 +75,18 @@ import {
   OFF_ROUTE_AUDIT,
   OTHER_ROUTE_AUDIT,
 } from '../src/route-audit.ts';
+import { installResponseContractCheck } from './response-contract.ts';
 
 // Tests outside apps/api reach this harness only as '@tinnox/api/test-support', so the types they
 // need are re-exported here. RUNTIME_ENV_NAMES is deliberately not: the e2e stack takes it from
 // the light entry '@tinnox/api/test-support/runtime-env' (./runtime-env.ts), so that the
 // stackless layout checks never load this file (CHK-9).
 export type { IdentityProvider };
+export {
+  installResponseContractCheck,
+  routesCheckedForContract,
+  takeResponseContractMismatches,
+} from './response-contract.ts';
 
 /**
  * What the route `${METHOD} ${pattern}` says a request to it can audit (src/route-audit.ts and
@@ -280,6 +286,8 @@ export interface TestAppOptions {
   readonly wrapPool?: (pool: Pool) => Pool;
   /** Replaces the recording mailer; null is a server without SMTP. */
   readonly mail?: Mailer | null;
+  /** Replaces the identity provider, which otherwise refuses every sign-in and has no sign-out address. */
+  readonly identityProvider?: IdentityProvider;
 }
 
 export async function startTestApp(
@@ -360,13 +368,15 @@ export async function startTestApp(
         maxVideoHeightPx: config.limits.maxVideoHeightPx,
       },
     }),
-    idp: noIdentityProvider,
+    idp: options.identityProvider ?? noIdentityProvider,
     media,
     mail: options.mail === undefined ? recording : options.mail,
     now,
     rateLimitScale,
   };
   const app = await buildApp(ctx, { logger: false });
+  // Every answer of every test is parsed with the schema its client parses it with (UTX-01).
+  installResponseContractCheck(app, registeredRoutes(app));
   await app.listen({ host: '127.0.0.1', port: 0 });
   const address = app.server.address() as AddressInfo;
   return {
