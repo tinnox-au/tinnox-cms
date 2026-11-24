@@ -1,6 +1,7 @@
 import { ABSOLUTE, type Canvas, type LayoutBox, type Rect } from '@tinnox/contracts';
 import { effectiveContentRect, zoneRect } from './geometry.ts';
 import type { PlanPublicationResult } from './manifest.ts';
+import { markPlanned } from './planned.ts';
 import { planSources, type PlanPlaylist } from './sources.ts';
 import type { PublicationDraft, PublicationValidator, PublishIssue } from './types.ts';
 
@@ -71,5 +72,5 @@ export function planLayoutPublication(input: LayoutPlanInput): PlanPublicationRe
   if (issues.length > 0) {
     return { ok: false, issues: issues.map((issue) => ({ ...issue, path: 'layout' })) };
   }
-  return { ok: true, draft: combined };
+  return { ok: true, draft: markPlanned(combined) };
 }

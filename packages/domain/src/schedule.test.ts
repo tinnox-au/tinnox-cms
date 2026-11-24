@@ -9,9 +9,13 @@ import {
   route,
   type FixturePlaylist,
 } from './fixtures.test-support.ts';
-import { manifestVersionFor, type PlanPublicationResult } from './manifest.ts';
+import {
+  manifestVersionFor,
+  type PlanPublicationResult,
+  type PlannedPublication,
+} from './manifest.ts';
 import { planSchedulePublication } from './schedule.ts';
-import type { DraftItem, PublicationDraft, PublishIssue } from './types.ts';
+import type { DraftItem, PublishIssue } from './types.ts';
 
 const image = (mediaId: string, durationMs = 5000): DraftItem => ({
   mediaId,
@@ -44,7 +48,7 @@ const event = (
   days: readonly boolean[] = WEEKDAYS,
 ) => ({ playlistId, days, start, end });
 
-function draftOf(plan: PlanPublicationResult): PublicationDraft {
+function draftOf(plan: PlanPublicationResult): PlannedPublication {
   if (!plan.ok) throw new Error(`expected a draft, got ${plan.issues[0]?.code}`);
   return plan.draft;
 }

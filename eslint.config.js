@@ -409,7 +409,25 @@ const NO_AUDIT_STATEMENT_CAST = [
       'Do not cast to AuditStatement: the type says the statement was read from the table of its route, job or command, so the change is compared with what that table says it audits (SCR-34). A route outside the operator table passes routeStatement(request), a job jobStatement(name), a refusal refusalStatement(request, audit) (all apps/api/src/route-audit.ts), and a provisioning command provisionStatement(command) (scripts/lib/provision.ts). A test makes one with issueAuditStatement({ stated, statedIn }) from @tinnox/db.',
   },
 ];
-// The types only packages/db may make.
+// DEC-23 (adoption plan step 22): a PlannedPublication says a planner of @tinnox/domain accepted
+// the draft, the route's capability check included, and createPublication (apps/api/src/
+// publishing.ts) takes nothing else. markPlanned, its one maker, is off the package entry; a cast
+// would forge one all the same. In every file, tests included; packages/domain/src/planned.ts,
+// where markPlanned is, has its own block below. Matched like MigratorPool above, with the same
+// three forms left to review.
+const PLANNED_PUBLICATION =
+  ":matches([typeName.name='PlannedPublication'], [typeName.right.name='PlannedPublication'])";
+const NO_PLANNED_PUBLICATION_CAST = [
+  {
+    selector: [
+      `:matches(TSAsExpression, TSTypeAssertion) > TSTypeReference.typeAnnotation${PLANNED_PUBLICATION}`,
+      `:matches(TSAsExpression, TSTypeAssertion) > .typeAnnotation TSTypeReference${PLANNED_PUBLICATION}`,
+    ].join(', '),
+    message:
+      "Do not cast to PlannedPublication: the type says a planner accepted the draft, so the route's capability check ran (DEC-23). Pass the draft that planPublication, planSchedulePublication or planLayoutPublication from @tinnox/domain returned (in apps/api, the draft of planDraft or assessDisplays in apps/api/src/publishing.ts). A test of @tinnox/domain stands in for a planner with markPlanned from packages/domain/src/planned.ts.",
+  },
+];
+// The types only packages/db (and, for PlannedPublication, packages/domain) may make.
 const NO_BRAND_CAST = [
   ...NO_MIGRATOR_POOL_CAST,
   ...NO_TX_CAST,
@@ -418,6 +436,7 @@ const NO_BRAND_CAST = [
   ...NO_WRITE_PERMIT_CAST,
   ...NO_VERIFIED_DEVICE_CAST,
   ...NO_AUDIT_STATEMENT_CAST,
+  ...NO_PLANNED_PUBLICATION_CAST,
 ];
 
 // Adoption plan section 3.2: the API reads the time from one injected clock, so tests can set it.
@@ -1637,6 +1656,17 @@ export default tseslint.config(
       ],
     },
   })),
+  {
+    // DEC-23: markPlanned makes the PlannedPublication here. The rest of the product list is
+    // unchanged for it.
+    files: ['packages/domain/src/planned.ts'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...PRODUCT_SYNTAX.filter((entry) => !NO_PLANNED_PUBLICATION_CAST.includes(entry)),
+      ],
+    },
+  },
   {
     // API source but its two entry points, which create the clock, and the two reviewed clients.
     files: ['apps/api/src/**/*.ts'],

@@ -10,8 +10,13 @@ import {
   type FixturePlaylist,
 } from './fixtures.test-support.ts';
 import { planLayoutPublication } from './layout.ts';
-import { buildManifest, manifestVersionFor, type PlanPublicationResult } from './manifest.ts';
-import type { DraftItem, PublicationDraft, PublishIssue } from './types.ts';
+import {
+  buildManifest,
+  manifestVersionFor,
+  type PlanPublicationResult,
+  type PlannedPublication,
+} from './manifest.ts';
+import type { DraftItem, PublishIssue } from './types.ts';
 
 const image = (mediaId: string, durationMs = 5000): DraftItem => ({
   mediaId,
@@ -34,7 +39,7 @@ const PLAYLISTS = { [ID.listDefault]: MAIN, [ID.listBand]: BAND };
 const ZONES = bandZones(15, ID.listDefault, ID.listBand);
 const ROUTE = route(200, 4);
 
-function draftOf(plan: PlanPublicationResult): PublicationDraft {
+function draftOf(plan: PlanPublicationResult): PlannedPublication {
   if (!plan.ok) throw new Error(`expected a draft, got ${plan.issues[0]?.code}`);
   return plan.draft;
 }

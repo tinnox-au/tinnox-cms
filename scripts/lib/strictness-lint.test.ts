@@ -327,6 +327,62 @@ describe('casts to MigratorPool (SEC-1, D4)', () => {
   });
 });
 
+describe('casts to PlannedPublication (DEC-23)', { timeout: 30_000 }, () => {
+  const PLANNED_CAST =
+    /^Do not cast to PlannedPublication: .*Pass the draft that planPublication, planSchedulePublication or planLayoutPublication/;
+
+  it.each([
+    ['a plain cast', 'export const d = draft as PlannedPublication;'],
+    ['a double cast', 'export const d = draft as unknown as PlannedPublication;'],
+    ['an angle-bracket assertion', 'export const d = <PlannedPublication>draft;'],
+    ['a union', 'export const d = draft as PlannedPublication | null;'],
+    ['a list', 'export const d = drafts as PlannedPublication[];'],
+    ['a qualified name', 'export const d = draft as domain.PlannedPublication;'],
+  ])('flags %s', async (_name, code) => {
+    const messages = await flagged('apps/api/src/routes/fixture.ts', code, [SYNTAX]);
+    expect(messages).toEqual([expect.stringMatching(PLANNED_CAST)]);
+  });
+
+  it.each([
+    'apps/api/src/fixture.ts',
+    'apps/api/src/publishing.ts',
+    'apps/api/src/mail.ts',
+    'packages/domain/src/manifest.ts',
+    'packages/domain/src/fixture.ts',
+    'packages/delivery/src/fixture.ts',
+    'apps/portal/src/features/fixture.tsx',
+    'scripts/lib/fixture.ts',
+    // Tests too: a test of @tinnox/domain calls markPlanned, and no other test needs one.
+    'apps/api/src/fixture.test.ts',
+    'packages/domain/src/fixture.test.ts',
+    'tests/integration/fixture.test.ts',
+    'apps/portal/src/fixture.test.tsx',
+  ])('flags it in %s', async (path) => {
+    const messages = await flagged(path, 'export const d = draft as PlannedPublication;', [SYNTAX]);
+    expect(messages).toEqual([expect.stringMatching(PLANNED_CAST)]);
+  });
+
+  it('leaves the type in annotations alone', async () => {
+    const code =
+      'export function take(draft: PlannedPublication): PlannedPublication { return draft; }';
+    expect(await flagged('apps/api/src/fixture.ts', code, [SYNTAX])).toEqual([]);
+  });
+
+  it('lets packages/domain/src/planned.ts mint it, and keeps that file the rest of its list', async () => {
+    const path = 'packages/domain/src/planned.ts';
+    expect(await flagged(path, 'export const d = draft as PlannedPublication;', [SYNTAX])).toEqual(
+      [],
+    );
+    const rest =
+      'export const v = a!; export const c = (e as { a: 1 }).a; export const p = pool as MigratorPool;';
+    expect(await flagged(path, rest, [SYNTAX])).toEqual([
+      expect.stringMatching(/^Do not assert a value is not null/),
+      expect.stringMatching(/^Do not cast to an inline object type/),
+      expect.stringMatching(/^Do not cast to MigratorPool: /),
+    ]);
+  });
+});
+
 describe('casts to a transaction handle (D2, CX-01, AG-2.1)', { timeout: 30_000 }, () => {
   const TX_CAST =
     /^Do not cast to a transaction handle \(Tx, OrgTx, OrgReadTx, PreOrgTx, DefinerTx\): .*Use the tx that the callback of readOrg receives \(an OrgReadTx\) or of changeOrg \(an OrgTx; an operator route calls changeAsOperator\(ctx, request, fn\) from apps\/api\/src\/auth\/permissions\.ts\), or, before the organisation is known, the one the callback of changePreOrg receives \(a PreOrgTx, for the sec\.\* wrappers\) and the OrgTx its enterOrg returns, all from @tinnox\/db\. A test opens one with withOrg or inTx from @tinnox\/db\/testing\. .*auditStandalone\(ctx\.db, event\)\.$/;
