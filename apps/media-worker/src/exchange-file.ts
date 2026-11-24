@@ -4,7 +4,7 @@
 // writes in the job directory goes through this file, and tinnox/exchange-files refuses a
 // `mode` option or a direct write anywhere else in apps/media-worker/src. The API has its own
 // copy (apps/api/src/media/exchange-file.ts): the two cannot share code.
-import { chmod, rename, writeFile } from 'node:fs/promises';
+import { chmod, rename, stat, writeFile } from 'node:fs/promises';
 
 /** What the API needs to read a file: the worker writes, everybody reads. */
 export const EXCHANGE_FILE_MODE = 0o644;
@@ -20,8 +20,17 @@ export async function publishExchangeFile(
   await rename(tempPath, finalPath);
 }
 
-/** A file written in place, with no rename (the attempt marker and the liveness file). */
+/**
+ * A file written in place, with no rename (the attempt marker and the liveness file). The
+ * mode is set only when this call creates the file, as writeFile's own `mode` is: a file that
+ * is already there keeps its mode, and may belong to another uid, whose file chmod refuses
+ * on Linux (EPERM) even when the file is writable.
+ */
 export async function writeExchangeFile(path: string, data: string | Buffer): Promise<void> {
+  const existed = await stat(path).then(
+    () => true,
+    () => false,
+  );
   await writeFile(path, data, { mode: EXCHANGE_FILE_MODE, flag: 'w' });
-  await chmod(path, EXCHANGE_FILE_MODE);
+  if (!existed) await chmod(path, EXCHANGE_FILE_MODE);
 }

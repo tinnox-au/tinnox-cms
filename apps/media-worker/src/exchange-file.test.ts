@@ -1,5 +1,5 @@
 // CU-02: the worker's exchange helpers give a file its mode whatever the container's umask is.
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -30,5 +30,15 @@ describe('exchange files (CU-02)', () => {
     const marker = join(dir, 'marker');
     await writeExchangeFile(marker, '1');
     expect(await modeOf(marker)).toBe(0o644);
+  });
+
+  it('rewrites a marker that is already there without touching its mode', async () => {
+    // A marker left by another uid is writable but not the worker's to chmod (EPERM on Linux).
+    const marker = join(dir, 'left-by-another');
+    await writeFile(marker, '');
+    await chmod(marker, 0o666);
+    await writeExchangeFile(marker, '2');
+    expect(await readFile(marker, 'utf8')).toBe('2');
+    expect(await modeOf(marker)).toBe(0o666);
   });
 });
