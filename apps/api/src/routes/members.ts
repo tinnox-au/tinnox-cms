@@ -357,7 +357,7 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): voi
           let sessionsEnded = 0;
           let invitesCancelled = 0;
           if (to !== null && isDemotion(target.role, to)) {
-            // Its own statement, after the target row is locked: the cut-off is its start.
+            // The cut-off is taken inside, once the function holds the target row (0015).
             sessionsEnded = await sessionRevokeMembership(tx, target.row.id);
             const cancelled = await cancelInvitesOf(
               tx,

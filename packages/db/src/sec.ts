@@ -239,11 +239,12 @@ export async function sessionRevokeUnaudited(db: Database, idHash: Buffer): Prom
 }
 
 /**
- * sec.session_revoke_membership (0013): ends every live session of the member and sets the
+ * sec.session_revoke_membership (0013, 0015): ends every live session of the member and sets the
  * member's cut-off, so older sessions and sign-ins authenticated before it are refused. The
- * cut-off is the start of this statement (never earlier than it was), so lock waits before it
- * are covered. Takes an `OrgTx`: a member of another organisation raises 42501, and so would
- * no organisation context. Returns the number of sessions ended (already expired ones are not).
+ * function locks the member row itself and takes the cut-off once it holds it (never earlier
+ * than it was), so a caller need not lock first: a wait for the row is covered (RCX-02). Takes
+ * an `OrgTx`: a member of another organisation raises 42501, and so would no organisation
+ * context. Returns the number of sessions ended (already expired ones are not).
  */
 export async function sessionRevokeMembership(tx: OrgTx, membershipId: string): Promise<number> {
   const { rows } = await tx.query<{ n: number }>('SELECT sec.session_revoke_membership($1) AS n', [

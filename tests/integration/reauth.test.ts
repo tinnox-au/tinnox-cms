@@ -337,4 +337,50 @@ describe('signing in again after the sessions were ended', () => {
       idp.sub = sub;
     }
   });
+
+  it("a sign-in during a people route's wait for the member row has no working session afterwards (RCX-02)", async () => {
+    const target = await addMember(org, 'editor');
+    const sub = idp.sub;
+    idp.sub = target.oidcSub;
+    // "Sign out everywhere" by the Owner, stopped where lockTarget would wait for the member row.
+    const held = holds.hold(
+      (text) => text.includes('FROM membership') && text.includes('FOR NO KEY UPDATE'),
+    );
+    try {
+      const signingOut = owner.fetch(`/api/members/${target.membershipId}/sign-out`, {
+        method: 'POST',
+      });
+      await held.reached;
+      // Past a whole second (auth_time has whole seconds), so a cut-off from before the wait,
+      // such as the start of the route's transaction, is an earlier second than the sign-in.
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      // The member signs in meanwhile, authenticated now by the database's clock.
+      const [clock] = await queryAsDefiner<{ at: Date }>('SELECT clock_timestamp() AS at', []);
+      if (clock === undefined) throw new Error('no clock');
+      idp.authTime = Math.floor(clock.at.getTime() / 1000);
+      const signedIn = await callback(await startLogin());
+      expect(signedIn.headers.get('location')).toBe(`${PORTAL_ORIGIN}/`);
+      const cookie = setCookie(signedIn, t.config.sessionCookieName) ?? '';
+      expect(await sessionOf(cookie)).toMatchObject({ authenticated: true });
+
+      held.release();
+      const response = await signingOut;
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ sessionsEnded: 1 });
+
+      // The session that sign-in created is ended, and the same authentication cannot be
+      // used again: the cut-off was taken once the route held the row, after the sign-in.
+      expect(await sessionOf(cookie)).toMatchObject({ authenticated: false });
+      const begins = idp.begins.length;
+      const again = await callback(await startLogin());
+      expect(again.status).toBe(303);
+      expect(again.headers.get('location')).toBe(`${IDP_URL}?state=${idp.state}`);
+      expect(idp.begins.slice(begins)).toEqual([undefined, { reauthenticate: true }]);
+      expect(setCookie(again, t.config.sessionCookieName) ?? '').toBe('');
+      expect(await liveSessions(target.membershipId)).toBe(0);
+    } finally {
+      held.release();
+      idp.sub = sub;
+    }
+  });
 });

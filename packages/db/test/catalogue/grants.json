@@ -260,7 +260,7 @@
       },
       "table public.membership": {
         "privileges": ["SELECT", "UPDATE (first_signed_in_at)", "UPDATE (sessions_valid_after)"],
-        "why": "SELECT: sec.membership_by_oidc_sub, sec.session_create, sec.session_by_id_hash, sec.pairing_claim and sec.pairing_complete look a member up, and provision-member finds a member's organisation by id or subject under SET LOCAL ROLE tinnox_definer. UPDATE (first_signed_in_at): sec.session_create stamps the first sign-in, and its FOR NO KEY UPDATE lock needs UPDATE on one column. UPDATE (sessions_valid_after): sec.session_revoke_membership and scripts/revoke-subject-sessions.sql set the cut-off; the FOR SHARE lock of sec.pairing_complete rests on it too (AG-1.18)."
+        "why": "SELECT: sec.membership_by_oidc_sub, sec.session_create, sec.session_by_id_hash, sec.pairing_claim and sec.pairing_complete look a member up, and provision-member finds a member's organisation by id or subject under SET LOCAL ROLE tinnox_definer. UPDATE (first_signed_in_at): sec.session_create stamps the first sign-in, and its FOR NO KEY UPDATE lock needs UPDATE on one column. UPDATE (sessions_valid_after): sec.session_revoke_membership locks the member row (FOR NO KEY UPDATE, 0015) and sets the cut-off, also for scripts/revoke-subject-sessions.sql, which calls it; the FOR SHARE lock of sec.pairing_complete rests on it too (AG-1.18)."
       },
       "table public.organization": {
         "privileges": ["SELECT"],
@@ -280,7 +280,7 @@
       },
       "table public.session": {
         "privileges": ["DELETE", "INSERT", "SELECT", "UPDATE"],
-        "why": "The sec.session_* functions are the only way to it: session_create inserts, session_by_id_hash, session_revoke and session_revoke_membership update, session_purge_expired updates and deletes. scripts/revoke-all-sessions.sql and scripts/revoke-subject-sessions.sql update it under SET LOCAL ROLE tinnox_definer. tinnox_app has no rights on the table."
+        "why": "The sec.session_* functions are the only way to it: session_create inserts, session_by_id_hash, session_revoke and session_revoke_membership update, session_purge_expired updates and deletes. scripts/revoke-all-sessions.sql updates it under SET LOCAL ROLE tinnox_definer; scripts/revoke-subject-sessions.sql calls sec.session_revoke_membership (0015). tinnox_app has no rights on the table."
       }
     }
   }

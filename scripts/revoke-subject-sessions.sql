@@ -12,37 +12,34 @@
 -- live session), and each membership that had a live session one auth.logout event.
 
 BEGIN;
--- Exactly the rights of the security functions' owner: UPDATE on session and on the member's
--- cut-off, INSERT on audit_event, and past row-level security on every table.
+-- Exactly the rights of the security functions' owner: it may run sec.session_revoke_membership,
+-- INSERT into audit_event, and read past row-level security on every table.
 SET LOCAL ROLE tinnox_definer;
 
--- The member row first, in a statement of its own, as the API does. The cut-off is then taken
--- after any wait for the row, so a sign-in authenticated during that wait is refused too.
-SELECT 1 AS locked FROM public.membership WHERE oidc_sub = :'subject' FOR NO KEY UPDATE;
+-- The member's organisation: sec.session_revoke_membership works on a member of the current
+-- organisation only. oidc_sub is unique (0001), so this is one row. No row: no membership has
+-- this subject, and nothing below changes anything.
+SELECT set_config('app.org_id', m.org_id::text, true) IS NOT NULL AS member_found
+FROM public.membership m WHERE m.oidc_sub = :'subject';
 
--- The cut-off (0013, the definer's UPDATE (sessions_valid_after) grant): sessions created, and
--- sign-ins authenticated, before it are refused. greatest() never moves an existing one back.
--- clock_timestamp(): a file sent as one message gives every statement one statement_timestamp().
-WITH cut AS (
-  UPDATE public.membership SET sessions_valid_after = greatest(sessions_valid_after, clock_timestamp())
-  WHERE oidc_sub = :'subject'
-  RETURNING id, org_id
+-- The function (0015) locks the member row, takes the cut-off once it holds it and ends the live
+-- sessions, all for one member id, as the API's "Sign out everywhere" does: sessions created, and
+-- sign-ins authenticated, before the cut-off are refused, also one authenticated while this
+-- waited for the row. A cut-off never moves back. If the member was provisioned after the
+-- statement above, the function refuses (no organisation context) and the script stops with
+-- nothing changed: run it again.
+WITH cut AS MATERIALIZED (
+  SELECT m.id, m.org_id, sec.session_revoke_membership(m.id) AS sessions
+  FROM public.membership m WHERE m.oidc_sub = :'subject'
 )
 INSERT INTO public.audit_event (org_id, actor_type, actor_id, action, object_type, object_id, result, detail)
-SELECT cut.org_id, 'system', NULL, 'membership.sessions_end', 'membership', cut.id::text, 'success',
-       jsonb_build_object('reason', 'incident_revocation')
-FROM cut;
-
-WITH ended AS (
-  UPDATE public.session s
-  SET revoked_at = now(), id_token = NULL
-  WHERE s.oidc_sub = :'subject' AND s.revoked_at IS NULL AND s.expires_at > now()
-  RETURNING s.org_id, s.membership_id
-)
-INSERT INTO public.audit_event (org_id, actor_type, actor_id, action, object_type, object_id, result, detail)
-SELECT ended.org_id, 'system', NULL, 'auth.logout', 'membership', ended.membership_id::text, 'success',
-       jsonb_build_object('reason', 'incident_revocation', 'sessions', count(*))
-FROM ended
-GROUP BY ended.org_id, ended.membership_id;
+SELECT cut.org_id, 'system', NULL, event.action, 'membership', cut.id::text, 'success', event.detail
+FROM cut
+CROSS JOIN LATERAL (VALUES
+  ('membership.sessions_end', jsonb_build_object('reason', 'incident_revocation'), true),
+  ('auth.logout', jsonb_build_object('reason', 'incident_revocation', 'sessions', cut.sessions),
+   cut.sessions > 0)
+) AS event (action, detail, wanted)
+WHERE event.wanted;
 
 COMMIT;
