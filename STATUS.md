@@ -256,6 +256,7 @@ from: CMS-28
 
 **Notes**
 - 24 Nov: Paused 24 Nov 2026 at Michael's request, after step 20. Steps 13 to 20 are built and verified locally on the branch refactor/poteto-pyramid-group-b: not pushed, no pull request. Left: steps 21 and 22, the whole-branch review, the as-built section of the plan, then one pull request.
+- 24 Nov: Steps 13 to 20 merged in pull request 38 on 24 Nov 2026, CI green. Still to build: steps 21 and 22, then the whole-branch review of group B and the as-built section of the plan.
 
 ### CMS-31
 from: CMS-30
