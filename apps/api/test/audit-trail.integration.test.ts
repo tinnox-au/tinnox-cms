@@ -683,7 +683,12 @@ describe('the audit trail of the stage A routes', () => {
         action,
       ).toEqual([action]);
       if (objectId !== '') expect(events[0]?.objectId, action).toBe(objectId);
-      expect(JSON.stringify(events[0]?.detail), action).not.toMatch(/[0-9A-F]{8}-[0-9A-F]{4}-/);
+      // No id in upper case. Compared with its lower-case form, as above: a bare match would
+      // also refuse an id whose first twelve digits happen to hold no letter.
+      const detail = JSON.stringify(events[0]?.detail);
+      expect(detail, action).toBe(
+        detail.replace(/[0-9A-F]{8}-[0-9A-F]{4}-/g, (id) => id.toLowerCase()),
+      );
     }
     // Media is in a playlist: refused, no event. Out of the playlist: one event.
     expect(
