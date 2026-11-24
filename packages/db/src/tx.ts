@@ -1,4 +1,4 @@
-import pg from 'pg';
+import { commitFailure } from './commit-outcome.ts';
 import { poolOfDatabase, type Database } from './database.ts';
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from './pool.ts';
 import { current, OPENERS, refuseNested, type Transaction } from './nesting.ts';
@@ -149,38 +149,6 @@ function requireOrgId(caller: string, orgId: OrgId): void {
   }
 }
 
-/**
- * COMMIT was sent but did not confirm, so the transaction may have committed. Callers
- * must not undo work outside the database (delete files or stored objects) on this
- * error: the rows that own that work may exist (review round 3, SCX-03). `cause` holds
- * what COMMIT failed with.
- */
-export class CommitOutcomeUnknownError extends Error {
-  constructor(cause: unknown) {
-    super('the outcome of the transaction is unknown: COMMIT did not confirm', { cause });
-    this.name = 'CommitOutcomeUnknownError';
-  }
-}
-
-/** SQLSTATE 40003, statement_completion_unknown: class 40, yet it confirms nothing. */
-const STATEMENT_COMPLETION_UNKNOWN = '40003';
-
-/**
- * True when the server answered COMMIT with an error that it raises only while rolling
- * the transaction back: a deferred constraint (class 23) or a serialization failure
- * (class 40, except 40003, which says the server itself does not know). Anything else (a
- * lost connection, a timeout, a server shutting down) may have come after the commit was
- * durable.
- */
-function commitRefused(error: unknown): boolean {
-  return (
-    error instanceof pg.DatabaseError &&
-    typeof error.code === 'string' &&
-    error.code !== STATEMENT_COMPLETION_UNKNOWN &&
-    (error.code.startsWith('23') || error.code.startsWith('40'))
-  );
-}
-
 async function run<T>(
   opener: string,
   pool: Pool,
@@ -215,7 +183,10 @@ async function run<T>(
     try {
       await client.query('COMMIT');
     } catch (error) {
-      throw commitRefused(error) ? error : new CommitOutcomeUnknownError(error);
+      // A READ ONLY transaction changed nothing, whether or not its COMMIT arrived, so its
+      // failure is a plain one: a read answers internal_error, never commit_outcome_unknown,
+      // whatever the request's method (adoption plan step 24, D9).
+      throw access === 'read only' ? error : commitFailure(error);
     }
     return result;
   } catch (error) {
@@ -276,7 +247,8 @@ export async function withOrg<T>(
  * lock (FOR UPDATE, FOR SHARE) in it with SQLSTATE 25006, and a function that writes too, so a
  * write cannot hide in a read (SCR-34); and its handle is an `OrgReadTx`, which the audit
  * writer and every helper typed `tx: OrgTx` refuse. No role is checked again here: the guard of
- * the route decided the read.
+ * the route decided the read. A COMMIT that fails is thrown as it came, never as
+ * CommitOutcomeUnknownError: a read-only transaction changed nothing either way.
  */
 export async function readOrg<T>(
   db: Database,

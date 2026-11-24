@@ -403,7 +403,7 @@ A later LED route (a dedicated player over HDMI, or controller-native playback) 
 | 413 | `payload_too_large` | heartbeat | Shorten the error list |
 | 416 | `range_not_satisfiable` | media | Restart the download from byte 0 |
 | 429 | `rate_limited` | any | Wait for `Retry-After`, then continue |
-| 5xx | `internal_error`, `service_unavailable` | any | Keep playing from cache; retry with backoff |
+| 5xx | `internal_error`, `service_unavailable`, `commit_outcome_unknown` | any | Keep playing from cache; retry with backoff (`commit_outcome_unknown`: the POST or DELETE may have been applied, and a repeat is harmless: a repeated heartbeat with the same `seq` is ignored as `stale_seq`, a repeated `POST /player/pairing` starts a new pairing session, a repeated `POST /player/media-urls` issues fresh URLs, and a repeated `DELETE /player/registration` whose first attempt was applied gets `401 device_revoked`, which ends in the same local reset) |
 
 `Retry-After` is delay-seconds or an HTTP-date (RFC 9110). The browser player waits at least
 that long and at least its ordinary backoff. A value above 10 minutes is read as 10 minutes

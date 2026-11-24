@@ -10,6 +10,7 @@ import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   heartbeatLogPurge,
+  isCommitOutcomeUnknown,
   loginStatePut,
   loginStateTake,
   pairingCancelClaims,
@@ -130,6 +131,8 @@ async function refusalOf(work: Promise<unknown>): Promise<string> {
     (thrown: unknown) => thrown,
   );
   expect(error, 'the commit went through').toBeInstanceOf(pg.DatabaseError);
+  // A refusal at COMMIT rolled back: run() passes it on, never as an unknown outcome (step 24).
+  expect(isCommitOutcomeUnknown(error)).toBe(false);
   const refused = error as pg.DatabaseError;
   expect(refused.code).toBe(AUDIT_DEBT_SQLSTATE);
   expect(refused.constraint).toBe('audit_debt');

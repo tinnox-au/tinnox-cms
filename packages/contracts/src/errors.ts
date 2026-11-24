@@ -35,6 +35,10 @@ export const API_ERROR_CODES = [
   // confirmation e-mail was not sent. Each has a definite outcome the portal states.
   'mail_not_configured',
   'confirmation_not_sent',
+  // 500 of a POST, PUT, PATCH or DELETE whose COMMIT the database did not confirm: the change
+  // may have been saved. No Retry-After, since sending it again could repeat it; the client
+  // reloads to check (D9). A GET or HEAD answers internal_error instead.
+  'commit_outcome_unknown',
   'internal_error',
 ] as const;
 export const ApiErrorCodeSchema = z.enum(API_ERROR_CODES);

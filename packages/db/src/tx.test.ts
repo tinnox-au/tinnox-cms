@@ -6,6 +6,7 @@ import pg from 'pg';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
   CommitOutcomeUnknownError,
+  isCommitOutcomeUnknown,
   lockOrgMembership,
   poolAsTx,
   readOrg,
@@ -201,6 +202,33 @@ describe('a COMMIT that does not confirm (review round 3, SCX-03)', () => {
       const { pool } = fakePool(['COMMIT'], () => refusal);
       await expect(withoutOrg(pool, () => Promise.resolve(1))).rejects.toBe(refusal);
     }
+  });
+
+  it('throws the failure of a READ ONLY transaction’s COMMIT as it came: a read changed nothing (step 24, D9)', async () => {
+    for (const failure of [
+      new Error('Connection terminated unexpectedly'),
+      serverError('57P01', 'FATAL'),
+      serverError('40001'),
+    ]) {
+      const { pool, statements } = fakePool(['COMMIT'], () => failure);
+      const error: unknown = await readOrg(databaseOn(pool), ORG, () =>
+        Promise.resolve('rows'),
+      ).catch((thrown: unknown) => thrown);
+      expect(error).toBe(failure);
+      expect(error).not.toBeInstanceOf(CommitOutcomeUnknownError);
+      expect(isCommitOutcomeUnknown(error)).toBe(false);
+      expect(statements[0]).toBe('BEGIN READ ONLY');
+    }
+  });
+
+  it('is what isCommitOutcomeUnknown recognises, for the API’s error handler (D9)', async () => {
+    const { pool } = fakePool(['COMMIT'], () => new Error('Connection terminated unexpectedly'));
+    const error: unknown = await withOrg(pool, ORG, () => Promise.resolve(1)).catch(
+      (thrown: unknown) => thrown,
+    );
+    expect(isCommitOutcomeUnknown(error)).toBe(true);
+    expect(isCommitOutcomeUnknown(serverError('23505'))).toBe(false);
+    expect(isCommitOutcomeUnknown(new Error('boom'))).toBe(false);
   });
 
   it('does not touch the error of work that failed before COMMIT', async () => {

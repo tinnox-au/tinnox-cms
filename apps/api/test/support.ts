@@ -173,6 +173,7 @@ export const ERROR_STATUS = Object.freeze({
   rate_limited: 429,
   pairing_locked: 429,
   internal_error: 500,
+  commit_outcome_unknown: 500,
   service_unavailable: 503,
   mail_not_configured: 503,
   confirmation_not_sent: 503,
@@ -991,7 +992,8 @@ export function losingCommitAnswers(pool: Pool, marker: RegExp): Pool {
           get(real, name) {
             if (name !== 'query') return bound(real, name);
             return async (text: string, values?: unknown[]) => {
-              if (text === 'BEGIN') marked = false;
+              // 'BEGIN' or 'BEGIN READ ONLY': a mark never carries over from an earlier transaction.
+              if (text.startsWith('BEGIN')) marked = false;
               if (marker.test(text)) marked = true;
               const result = await real.query(text, values);
               if (text === 'COMMIT' && marked) {

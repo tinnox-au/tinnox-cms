@@ -30,8 +30,8 @@ export {
   type RuntimeRoleFacts,
 } from './pool.ts';
 export { assertRuntimeRole, createDatabase, ping, type Database } from './database.ts';
+export { CommitOutcomeUnknownError, isCommitOutcomeUnknown } from './commit-outcome.ts';
 export {
-  CommitOutcomeUnknownError,
   poolAsTx,
   readOrg,
   type Autocommit,

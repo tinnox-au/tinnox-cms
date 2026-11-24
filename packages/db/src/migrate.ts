@@ -14,6 +14,7 @@ import {
   type AuditStatement,
   type Change,
 } from './change.ts';
+import { commitMigration, isCommitOutcomeUnknown } from './commit-outcome.ts';
 import { registerOwnHandle, type Database } from './database.ts';
 import { errorField } from './error-field.ts';
 import { mintOrgId } from './org-id.ts';
@@ -259,6 +260,14 @@ export async function runMigrations(options: MigrationOptions): Promise<Migratio
   });
   const applied: string[] = [];
   const alreadyApplied: string[] = [];
+  // A connection whose COMMIT went unanswered is not given back to the pool but destroyed. A
+  // connection lost while checked out also emits 'error', which would end the process unheard,
+  // as run() of ./tx.ts notes; the statement in flight rejects by itself.
+  let lost: Error | undefined;
+  const onLost = (error: Error): void => {
+    lost = error;
+  };
+  client.on('error', onLost);
   try {
     // Before the advisory lock, which a lock_timeout also bounds. Session level (is_local false):
     // each migration's BEGIN and ROLLBACK leave it alone.
@@ -335,7 +344,6 @@ export async function runMigrations(options: MigrationOptions): Promise<Migratio
           digest,
         ]);
         await assertSchemaInvariants(client, knownBefore);
-        await client.query('COMMIT');
       } catch (error) {
         await client.query('ROLLBACK');
         const message = error instanceof Error ? error.message : String(error);
@@ -343,6 +351,13 @@ export async function runMigrations(options: MigrationOptions): Promise<Migratio
           cause: error,
         });
       }
+      // A refusal at COMMIT is a rollback; any other failure there leaves the outcome unknown,
+      // as for the transactions of ./tx.ts (SCX-03, adoption plan step 24). Either ends the
+      // transaction, so no ROLLBACK follows.
+      await commitMigration(client, name).catch((error: unknown) => {
+        if (isCommitOutcomeUnknown(error) && error instanceof Error) lost = error;
+        throw error;
+      });
       applied.push(name);
     }
     if (pending.length === 0 && knownBefore.length > 0) {
@@ -357,7 +372,8 @@ export async function runMigrations(options: MigrationOptions): Promise<Migratio
     }
   } finally {
     await client.query('SELECT pg_advisory_unlock($1)', [ADVISORY_LOCK_KEY]).catch(() => undefined);
-    client.release();
+    client.removeListener('error', onLost);
+    client.release(lost);
     await pool.end();
   }
   return { applied, alreadyApplied };

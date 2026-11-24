@@ -3,7 +3,7 @@
  * carry stack traces, SQL text or internal messages.
  */
 import { apiError, HEADERS, type ApiErrorCode, type ApiErrorDetail } from '@tinnox/contracts';
-import { errorField } from '@tinnox/db';
+import { errorField, isCommitOutcomeUnknown } from '@tinnox/db';
 import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { z } from 'zod';
 
@@ -82,6 +82,13 @@ const SAFE_MESSAGES: Readonly<Partial<Record<ApiErrorCode, string>>> = {
   service_unavailable: 'The service is temporarily unavailable.',
 };
 
+/** The methods whose unconfirmed COMMIT answers `commit_outcome_unknown` (D9); GET and HEAD do not. */
+const STATE_CHANGING_METHODS: ReadonlySet<string> = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+/** The one message of `commit_outcome_unknown` (D9, adoption plan section 2.3). */
+export const COMMIT_OUTCOME_UNKNOWN_MESSAGE =
+  'The change may have been saved, but the server could not confirm it. Reload to check before you try again.';
+
 function send(
   request: FastifyRequest,
   reply: FastifyReply,
@@ -151,6 +158,28 @@ export function registerErrorHandling(app: FastifyInstance): void {
         for (const [name, value] of Object.entries(error.headers)) reply.header(name, value);
       }
       send(request, reply, error.statusCode, error.code, error.message, error.details);
+      return;
+    }
+
+    // COMMIT was sent and not confirmed, so the change may have been saved (SCX-03, D9). A
+    // request that changes state says so, with no Retry-After: sending it again could repeat a
+    // change that went through. GET and HEAD keep internal_error (a read-only transaction of
+    // readOrg never gets here: its failed COMMIT changed nothing). Only the cause's name and
+    // SQLSTATE are logged.
+    if (isCommitOutcomeUnknown(error)) {
+      const cause: unknown = error.cause;
+      request.log.error(
+        {
+          cause: cause instanceof Error ? cause.name : typeof cause,
+          pgCode: pgErrorCode(cause),
+        },
+        'commit outcome unknown',
+      );
+      if (STATE_CHANGING_METHODS.has(request.method)) {
+        send(request, reply, 500, 'commit_outcome_unknown', COMMIT_OUTCOME_UNKNOWN_MESSAGE);
+      } else {
+        send(request, reply, 500, 'internal_error', 'Something went wrong. Try again.');
+      }
       return;
     }
 
