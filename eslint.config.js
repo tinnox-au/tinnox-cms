@@ -894,9 +894,7 @@ const AUDIT_WRITERS = ['packages/db/src/sec.ts'];
 // its line; nothing is added (scripts/lib/legacy-transaction-lint.test.ts holds the list to
 // what step 19 found). Test files are outside the rule: they arrange data with withOrg.
 export const LEGACY_TRANSACTION_FILES = [
-  // Sign-in, sign-out and the player protocol: no role, and partly before the organisation is
-  // known.
-  'apps/api/src/routes/auth.ts',
+  // The player protocol: no role, and partly before the organisation is known.
   'apps/api/src/routes/player.ts',
   // The legacy wrappers themselves (withOrgAllowed and withOrgDecisionAllowed, already on
   // changeOrg; withOrgDecision), deleted when their last caller has moved.

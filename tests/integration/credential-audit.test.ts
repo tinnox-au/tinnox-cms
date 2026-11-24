@@ -258,6 +258,62 @@ describe('credential changes and their audit events', () => {
     expect(await actions('auth.logout')).toBe(1);
   });
 
+  it('audits one sign-out when several end the same session, and the others change nothing', async () => {
+    const leaving = await signIn(t, org);
+    const before = await actions('auth.logout');
+    const requests = 3;
+    const answers: Promise<Response>[] = [];
+    // A key-share lock on the session row lets each request past requireOperator (its activity
+    // stamp is a no-key update) and holds every sign-out at the FOR UPDATE of sec.session_revoke.
+    // Once the lock goes, one ends the session and the rest find no live session left: the
+    // unaudited('nothing_changed') branch of POST /api/auth/logout, which the audit-debt guard
+    // would fail at COMMIT with a 500 if it changed anything.
+    const holder = new pg.Client({ connectionString: migratorUrl() });
+    await holder.connect();
+    try {
+      await holder.query('BEGIN');
+      await holder.query('SET LOCAL ROLE tinnox_definer');
+      const held = await holder.query(
+        'SELECT 1 FROM public.session WHERE csrf_token = $1 FOR KEY SHARE',
+        [leaving.csrfToken],
+      );
+      expect(held.rowCount).toBe(1);
+      // One at a time, so no request's activity stamp waits on another's.
+      for (let i = 1; i <= requests; i += 1) {
+        answers.push(leaving.fetch('/api/auth/logout', { method: 'POST' }));
+        const deadline = Date.now() + 10_000;
+        let waiting = 0;
+        while (waiting < i && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          waiting = await asMigrator(async (client) => {
+            const { rows } = await client.query<{ n: number }>(
+              'SELECT count(DISTINCT pid)::int AS n FROM pg_locks WHERE NOT granted',
+            );
+            return rows[0]?.n ?? 0;
+          });
+        }
+        expect(waiting, `sign-out ${String(i)} never waited for the session row`).toBe(i);
+      }
+    } finally {
+      await holder.query('ROLLBACK');
+      await holder.end();
+    }
+
+    const responses = await Promise.all(answers);
+    const statuses = responses.map((response) => response.status).sort();
+    expect(statuses).toEqual([200, 401, 401]);
+    for (const response of responses.filter((r) => r.status === 401)) {
+      // requireOperator refuses with no Set-Cookie; only the handler clears the cookie, so these
+      // came from the branch that found the session already ended.
+      expect(response.headers.get('set-cookie') ?? '').toMatch(/tinnox_session=;/);
+      expect(((await response.json()) as { error: { code: string } }).error.code).toBe(
+        'unauthenticated',
+      );
+    }
+    expect((await leaving.fetch('/api/displays')).status).toBe(401);
+    expect(await actions('auth.logout')).toBe(before + 1);
+  });
+
   it('creates no session and keeps the previous one when the sign-in audit event cannot be written', async () => {
     let lastState = '';
     const provider: IdentityProvider = {
