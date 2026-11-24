@@ -227,9 +227,14 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
             windowSeconds: limits.pairingSessionWindowSeconds,
           });
           if (created.outcome !== 'created') {
-            // Rate-limited, or the code was taken: no session was made. All that
-            // sec.pairing_create can have written is the mark on the pending sessions whose
-            // time had passed, which is not audited, as before (the step 20 ruling, CMS-36).
+            // Rate-limited (rate_limited), or the code was taken (code_collision): no session
+            // was made, and the refusal is not audited anywhere (open, as is the 503 after five
+            // collisions below; a B11 residual in docs/security/control-matrix.md). All that
+            // sec.pairing_create can have written is the mark on the pending sessions whose time
+            // had passed, and it may have marked none. The reason is given for every such run, not only for one
+            // that marked a session, because the run cannot tell (it returns no row count) and
+            // the write is not audited, as built at step 20 and open on CMS-36. It is
+            // "may have marked", not "marked".
             return { value: created, audit: unaudited('pairing_expired_by_time') };
           }
           return {
@@ -318,7 +323,7 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
           return { value: polled, audit: unaudited('counter_under_threshold') };
         }
         // sec.pairing_poll marks the session expired once its time has passed, which is not
-        // audited, as before (the step 20 ruling, CMS-36).
+        // audited, as before (kept as built at step 20, open on CMS-36).
         if (polled.outcome === 'expired') {
           return { value: polled, audit: unaudited('pairing_expired_by_time') };
         }

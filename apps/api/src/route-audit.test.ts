@@ -224,7 +224,7 @@ describe('the statements of the changes with no operator behind them (D3)', () =
     );
   });
 
-  it('grants each write the step 20 ruling leaves unaudited to what makes it, and to nothing else (DEC-38, CMS-36)', () => {
+  it('grants each write step 20 kept unaudited as built to what makes it, and to nothing else (open on CMS-36)', () => {
     // Who may say unaudited(reason) for a write that changed something: the pairing routes for
     // the expiry mark of sec.pairing_create and sec.pairing_poll, the alert check for its silent
     // close. The seed's reason is granted by no table: only by the offline permit

@@ -1335,7 +1335,7 @@ describe('provision-member, every command', () => {
   // Step 20: only the development seed writes rows with no audit row under them, and only under
   // seedStatement(); no command's statement lets a change say so.
   it.each(Object.keys(PROVISION_COMMANDS) as ProvisionCommand[])(
-    '%s cannot leave its writes unaudited as the development seed (step 20 ruling, DEC-38)',
+    '%s cannot leave its writes unaudited as the development seed (kept as built at step 20)',
     async (command) => {
       // An organisation with no rows: nothing is written, and the refusal comes before COMMIT.
       const orgId = testOrgId(randomUUID());

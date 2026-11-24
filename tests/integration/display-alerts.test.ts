@@ -79,8 +79,8 @@ describe('e-mail alerts for screens', () => {
       t.advanceClock(-DELAY_MS);
     }
   }
-  // A close without an e-mail writes no audit row, as today (alert_closed_silently, the step 20
-  // ruling; open on CMS-36): the audit-debt guard lets its DELETE through (EXEMPT_SHAPES).
+  // A close without an e-mail writes no audit row, as today (alert_closed_silently, kept as
+  // built at step 20; open on CMS-36): the audit-debt guard lets its DELETE through (EXEMPT_SHAPES).
   async function check(): Promise<void> {
     expect((await checkAlerts(t)).failed).toBe(0);
   }

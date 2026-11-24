@@ -1,6 +1,6 @@
 // AUD-3 (group B review): the audit-debt guard of the integration database lets every DELETE on
 // display_alert through (EXEMPT_SHAPES in packages/db/src/audit-debt-guard.ts), because the
-// alert check's silent close is the one write of that shape the step 20 ruling leaves unaudited.
+// alert check's silent close is the one write of that shape step 20 kept unaudited as built.
 // The guard cannot tell that close from any other delete, so this test holds the claim its
 // reason makes: no other source file deletes from display_alert. Rows a display delete removes
 // by cascade are audited as display.* and need no case here.

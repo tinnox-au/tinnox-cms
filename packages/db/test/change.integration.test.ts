@@ -354,7 +354,7 @@ describe('changeOrgAsMigrator against the database (AG-3.1, SCR-34)', () => {
     expect(await committed('Offline and unstated')).toEqual({ folders: 0, audited: [] });
   });
 
-  it('takes the seed’s synthetic data unaudited only under seedStatement() (step 20 ruling, DEC-38)', async () => {
+  it('takes the seed’s synthetic data unaudited only under seedStatement() (kept as built at step 20)', async () => {
     // The seed's own statement: its change may say development_seed, and commits no row.
     await changeOrgAsMigrator(pool, org.orgId, seedStatement(), async (tx) => {
       await newFolder(tx, 'Seeded');

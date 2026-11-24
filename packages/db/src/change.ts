@@ -74,7 +74,7 @@ export interface Unaudited {
  * nothing to change, `idempotent_replay` when an earlier request already did the work, and
  * `telemetry` or `counter_under_threshold` when what it stored is one of the things D3 leaves
  * unaudited, which only a route that states or grants the reason may give. The three writes the
- * step 20 ruling leaves as they are today (`alert_closed_silently`, `pairing_expired_by_time`,
+ * step 20 kept as built (`alert_closed_silently`, `pairing_expired_by_time`,
  * `development_seed`) are granted the same way, each to the job, routes or tool that makes it.
  * A new reason is a decision, recorded in that list. `read_only` is not one: a read
  * belongs in `readOrg`, whose transaction refuses a write. Nothing checks at run time that a

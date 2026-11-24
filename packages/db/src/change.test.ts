@@ -325,7 +325,7 @@ describe('what a change records against what its route states (D3)', () => {
     expect(statements).not.toContain('COMMIT');
   });
 
-  it('takes the three writes the step 20 ruling leaves unaudited only where each is granted (DEC-38, CMS-36)', async () => {
+  it('takes the three writes step 20 kept unaudited as built only where each is granted (open on CMS-36)', async () => {
     // Today's behaviour, named: the alert check's silent close, the pairing expiry mark and the
     // seed. Each is the grant of the one job, routes or tool that makes the write.
     for (const [reason, statedIn, stated] of [

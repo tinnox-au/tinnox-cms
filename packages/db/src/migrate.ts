@@ -108,7 +108,7 @@ export async function connectMigrator(
 
 /**
  * The statement of the development seed (scripts/seed.ts): it names no audit action, because the
- * seed writes no audit row, as today (the step 20 ruling, DEC-38). It is the one statement
+ * seed writes no audit row, as today (kept as built at step 20). It is the one statement
  * changeOrgAsMigrator grants unaudited('development_seed') to, and it grants nothing else. No
  * table can grant that reason (issueAuditStatement refuses it), so a route, a job or a
  * provisioning command, whose statements come from their tables, never can; and this entry,
@@ -155,7 +155,7 @@ export async function changeOrgAsMigrator<T>(
   }
   const permit = issueWritePermit({
     ...termsOfStatement('changeOrgAsMigrator', statement),
-    // The step 20 ruling (DEC-38) keeps the seed's synthetic data unaudited, as today, and
+    // Step 20 kept as built the seed's synthetic data unaudited, as today, and
     // names it development_seed. Only this permit grants it, and only to the seed's own
     // statement, told by identity: a statement that merely looks like it gets nothing.
     ...(statement === SEED_STATEMENT ? { grants: ['development_seed' as const] } : {}),

@@ -74,7 +74,7 @@ describe('the exempt lists of the audit-debt guard (D3)', () => {
     expect(UNWATCHED_TABLES).toEqual(['schema_migrations', 'audit_event']);
   });
 
-  it('let through only the shape of the writes the step 20 ruling leaves unaudited (DEC-38, CMS-36)', () => {
+  it('let through only the shape of the writes step 20 kept unaudited as built (open on CMS-36)', () => {
     // The guard does not believe a declared unaudited(reason): it knows the shape of today's
     // write, the alert check's DELETE and the pairing functions' expiry mark, and judges every
     // other write on those tables.
@@ -83,10 +83,10 @@ describe('the exempt lists of the audit-debt guard (D3)', () => {
       ['pairing_session', 'expired_by_time'],
     ]);
     expect(EXEMPT_SHAPES['display_alert']?.why).toMatch(
-      /^step 20 ruling \(DEC-38\), alert_closed_silently: \S.{20,}Open: CMS-36$/,
+      /^kept as built at step 20, alert_closed_silently: \S.{20,}Open: CMS-36$/,
     );
     expect(EXEMPT_SHAPES['pairing_session']?.why).toMatch(
-      /^step 20 ruling \(DEC-38\), pairing_expired_by_time: \S.{20,}Open: CMS-36$/,
+      /^kept as built at step 20, pairing_expired_by_time: \S.{20,}Open: CMS-36$/,
     );
     // One branch per shape, each as narrow as today's write.
     expect(NOTE_FUNCTION).toContain("IF TG_ARGV[2] = 'delete' AND TG_OP = 'DELETE' THEN");

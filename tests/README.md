@@ -98,7 +98,7 @@ ran, also when the route answered 500 or product code caught the error.
 - **Exempt, by D3**: the tables `heartbeat_log`, `display_delivery` and `login_state`; the columns
   `session.last_seen_at` and `pairing_session.failed_attempts`; writes made inside the three
   purge functions. The lists, with their reasons, are at the top of the guard's file.
-- **Exempt by shape, by the step 20 ruling** (DEC-38; whether they are audited is open, CMS-36):
+- **Exempt by shape, kept as built at step 20** (whether they are audited is open, CMS-36):
   a `DELETE` on `display_alert`, which is the alert check closing an offline episode without an
   e-mail (`alert_closed_silently`); and an `UPDATE` of `pairing_session` that changes only its
   `status`, from pending or claimed to expired, on a row whose time has passed, which is
@@ -207,7 +207,7 @@ the Keycloak client come from the root `.env`, and every other name the API read
 empty, so nothing exported in the shell reaches it. Before anything else, global set-up refuses
 to run unless every host and URL of the run (those settings, the database set-up's connection,
 the previews, Mailpit and the API origin, which `playwright.config.ts` also gives the player
-build as `VITE_API_BASE_URL`) is `localhost`, 127.0.0.0/8 or `::1`, including any `host` or
+build as `VITE_API_BASE_URL`) is `localhost` (after it resolves to loopback), 127.0.0.1 or `::1`, including any `host` or
 `hostaddr` parameter of a database URL (EAX-09; the rules are in
 `scripts/lib/loopback-targets.ts`). The previews are started by
 Playwright just before global set-up; they listen on 127.0.0.1 only.

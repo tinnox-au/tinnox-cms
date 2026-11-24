@@ -585,8 +585,8 @@ export async function pending(
     // rows span every organisation (its 0013 UPDATE (status) on member_invite, its INSERT on
     // audit_event). No membership lock: only member_invite rows change, and an invite a
     // concurrent fulfil or cancel holds FOR UPDATE is skipped by the READ COMMITTED re-check.
-    // The one audit row in the repository that auditScoped does not write (D25): the statement
-    // below is named, whole, in RAW_AUDIT_INSERTS of eslint.config.js, so a change to it is a
+    // The one statement in the TypeScript tree that inserts into audit_event outside sec.ts (D25):
+    // the statement below is named, whole, in RAW_AUDIT_INSERTS of eslint.config.js, so a change to it is a
     // change to that entry, and its row has the shape AuditEventShapes gives invite.cancel.
     // So this change returns no event (changePreOrg would write the rows a second time): it
     // returns the statement's own result, below.

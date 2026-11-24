@@ -107,7 +107,7 @@ describe('a change by a job on changeOrg (SCR-34)', () => {
     ).rejects.toThrow(/^changeOrg: the change returned an empty list of audit events/);
   });
 
-  it('lets the alert check alone close an episode without an e-mail and no audit row (step 20 ruling, CMS-36)', async () => {
+  it('lets the alert check alone close an episode without an e-mail and no audit row (kept as built at step 20, open on CMS-36)', async () => {
     const { pool, transactions } = fakePool();
     await changeAsJob(databaseOn(pool), 'display_alerts', ORG, async (tx) => {
       await tx.query('DELETE DISPLAY ALERT');
@@ -152,7 +152,7 @@ describe('a change by a job on changeOrg (SCR-34)', () => {
         issueAuditStatement({
           stated: row.audit,
           statedIn: `the row of ${name} in JOB_AUDIT (apps/api/src/route-audit.ts)`,
-          // The grants too: the alert check's silent close (step 20 ruling, CMS-36).
+          // The grants too: the alert check's silent close (kept as built at step 20, open on CMS-36).
           ...('grants' in row ? { grants: row.grants } : {}),
         }),
       );

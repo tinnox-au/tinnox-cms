@@ -11,7 +11,7 @@
  * How, with no table of its own and no privilege for anybody:
  *  - audit_debt_note, a row trigger on every audited table, writes the table into the
  *    transaction-local setting audit_debt.owed, unless the write is one D3 exempts or one of
- *    the shapes the step 20 ruling leaves unaudited (EXEMPT_SHAPES);
+ *    the shapes step 20 kept unaudited as built (EXEMPT_SHAPES);
  *  - audit_debt_paid, a row trigger on audit_event, sets audit_debt.paid;
  *  - audit_debt_settle, a deferred constraint trigger on every audited table, runs at COMMIT and
  *    raises when something is owed and nothing was paid.
@@ -125,8 +125,8 @@ export const EXEMPT_FUNCTIONS: Readonly<Record<string, string>> = {
 export type ExemptShape = 'delete' | 'expired_by_time';
 
 /**
- * The writes that change audited state and still owe nothing, by their shape, because the step
- * 20 ruling (adoption plan, made under DEC-38) keeps them unaudited as they are today and names
+ * The writes that change audited state and still owe nothing, by their shape, because step
+ * 20 kept them unaudited as built (adoption plan, open on CMS-36) and names
  * each with a reason of UNAUDITED_REASONS (packages/contracts/src/audit.ts). The guard is the
  * backstop for a false reason, so it does not take the reason's word: it lets through the
  * shape of today's write and judges every other write on the table. CMS-36 decides whether
@@ -142,11 +142,11 @@ export const EXEMPT_SHAPES: Readonly<
 > = {
   display_alert: {
     shape: 'delete',
-    why: 'step 20 ruling (DEC-38), alert_closed_silently: the alert check (apps/api/src/alerts.ts) closes an offline episode without an e-mail and writes no audit row, as today (docs/portal-v2/stage-c-alerts.md section 9 rows 7 and 22); it is the only code that deletes from display_alert (scripts/lib/audit-exemptions.test.ts holds that, AUD-3), and a close with its e-mail writes display.online_alert. Open: CMS-36',
+    why: 'kept as built at step 20, alert_closed_silently: the alert check (apps/api/src/alerts.ts) closes an offline episode without an e-mail and writes no audit row, as today (docs/portal-v2/stage-c-alerts.md section 9 rows 7 and 22); it is the only code that deletes from display_alert (scripts/lib/audit-exemptions.test.ts holds that, AUD-3), and a close with its e-mail writes display.online_alert. Open: CMS-36',
   },
   pairing_session: {
     shape: 'expired_by_time',
-    why: 'step 20 ruling (DEC-38), pairing_expired_by_time: sec.pairing_create and sec.pairing_poll mark expired a pending or claimed session whose time has passed and write no audit row, as today. Open: CMS-36',
+    why: 'kept as built at step 20, pairing_expired_by_time: sec.pairing_create and sec.pairing_poll mark expired a pending or claimed session whose time has passed and write no audit row, as today. Open: CMS-36',
   },
 };
 
@@ -212,7 +212,7 @@ export const SETTLE_FUNCTION = `
     owed text := coalesce(current_setting('audit_debt.owed', true), '');
   BEGIN
     IF owed <> '' AND coalesce(current_setting('audit_debt.paid', true), '') = '' THEN
-      RAISE EXCEPTION 'audit debt: this transaction changed % as tinnox_app and commits no audit_event row. Return the audit event from the change, as { value, audit }, and its wrapper writes the row on the same transaction, so both commit or neither does (AGENTS.md section 3): changeAsOperator, changeAsDevice or changeAsJob in the API (each on changeOrg of @tinnox/db), changePreOrg before the organisation is known, changeOrgAsMigrator in an offline tool. Only a write that a recorded decision exempts (D3, or the step 20 ruling for EXEMPT_SHAPES) goes in the lists of packages/db/src/audit-debt-guard.ts, with that decision''s reason; product code never moves to a connection the guard does not judge.', owed
+      RAISE EXCEPTION 'audit debt: this transaction changed % as tinnox_app and commits no audit_event row. Return the audit event from the change, as { value, audit }, and its wrapper writes the row on the same transaction, so both commit or neither does (AGENTS.md section 3): changeAsOperator, changeAsDevice or changeAsJob in the API (each on changeOrg of @tinnox/db), changePreOrg before the organisation is known, changeOrgAsMigrator in an offline tool. Only a write that a recorded decision exempts (D3, or what step 20 kept as built, for EXEMPT_SHAPES) goes in the lists of packages/db/src/audit-debt-guard.ts, with that decision''s reason; product code never moves to a connection the guard does not judge.', owed
         USING ERRCODE = '${AUDIT_DEBT_SQLSTATE}', CONSTRAINT = 'audit_debt';
     END IF;
     RETURN NULL;

@@ -76,8 +76,9 @@ const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 /**
  * Writes the `security.csrf_rejected` row of a refused request. Nothing changed, so it is a
- * transaction of its own (`recordRefusal`, ./refusal.ts; SCR-32, D2). A failure is logged and
- * swallowed: the refusal stands whether or not it could be recorded.
+ * transaction of its own (`recordRefusal`, ./refusal.ts; SCR-32, D2). Any failure is logged and
+ * swallowed, a refusal of the row because the route's refusal statement does not state it
+ * included (AUD-9): the refusal stands whether or not it could be recorded.
  */
 async function recordCsrfRejection(
   ctx: AppContext,

@@ -641,7 +641,7 @@ const NO_LOOPBACK_NAME = [
       `Literal[regex.pattern=/localhost|127\\\\?\\.0|::1/i]`,
     ].join(', '),
     message:
-      "Use isLoopbackAddress from '@tinnox/contracts': a name is loopback only once it is resolved, and the one rule for an address is shared with the end-to-end stack (EAX-08). Only the files in LOOPBACK_NAME_ALLOWED of eslint.config.js (apps/api/src/config.ts, for the development origins on 'localhost') may compare a host with a loopback name.",
+      "Use isLoopbackAddress from '@tinnox/contracts': a name is loopback only once it is resolved, and the one rule for an address is shared with the end-to-end stack (EAX-08). Only the files in LOOPBACK_NAME_ALLOWED of eslint.config.js (apps/api/src/config.ts, for the development origins and issuer on 'localhost') may compare a host with a loopback name.",
   },
 ];
 
@@ -885,7 +885,7 @@ function dbEntryPatterns(dir) {
 // its reason. The same files hold the sec.* wrappers that read or change every organisation
 // (CROSS_ORG_WRAPPERS below, SEC-2): they take any handle, a transaction an operator route
 // already holds included, so the import is what keeps them to these files. Three of the reasons are not "before the organisation is known",
-// which is what the rule in AGENTS.md says: the list records what each file really does. A file
+// which is what the list was first written for: the list records what each file really does. A file
 // leaves the list when its use is gone. The handle of poolAsTx has a query, which
 // tinnox/no-query-off-transaction refuses in these files. withoutOrg, which ran with no
 // organisation too, is no longer exported by @tinnox/db since step 20 (tinnox/no-legacy-transaction

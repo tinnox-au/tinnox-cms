@@ -334,11 +334,11 @@ describe('what D3 exempts owes nothing', () => {
   });
 });
 
-// The step 20 ruling (DEC-38) keeps two writes unaudited as they are today, each named by a
+// Step 20 kept as built two writes unaudited as they are today, each named by a
 // reason of UNAUDITED_REASONS; whether they are audited is open (CMS-36). The guard does not take
 // a declared reason's word: EXEMPT_SHAPES lets through the shape of today's write, and these
 // cases show it is that narrow, the neighbouring writes on the same tables still refused.
-describe('the writes the step 20 ruling leaves unaudited owe nothing, in their shape only (DEC-38, CMS-36)', () => {
+describe('the writes step 20 kept unaudited as built owe nothing, in their shape only (open on CMS-36)', () => {
   const status = async (id: string): Promise<string | undefined> => {
     const [row] = await asDefiner<{ status: string }>(
       migrator,
