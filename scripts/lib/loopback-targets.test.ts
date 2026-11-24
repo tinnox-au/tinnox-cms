@@ -64,7 +64,7 @@ describe('isLoopbackAddress against node:net (EAX-08)', () => {
 });
 
 describe('isLoopbackTarget and hostsOf (EAX-09)', () => {
-  it('accepts localhost, 127.0.0.0/8 and ::1, bare and in URLs', () => {
+  it('accepts localhost, 127.0.0.1 and ::1, bare and in URLs', () => {
     for (const value of [
       'localhost',
       '127.0.0.1',

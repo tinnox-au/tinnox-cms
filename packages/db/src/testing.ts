@@ -4,7 +4,7 @@
 import { registerOwnHandle } from './database.ts';
 import type { MigratorPool } from './migrate.ts';
 import { mintOrgId } from './org-id.ts';
-import type { Pool, PoolClient } from './pool.ts';
+import type { Pool, PoolClient, QueryResult, QueryResultRow } from './pool.ts';
 import { statementsOf } from './pre-org.ts';
 import { withoutOrg, type Autocommit, type OrgId, type PreOrgTx } from './tx.ts';
 
@@ -92,6 +92,64 @@ export async function stillWaiting(promise: Promise<unknown>, ms = 300): Promise
   promise.then(mark, mark);
   await new Promise((resolve) => setTimeout(resolve, ms));
   return !settled;
+}
+
+/** A connection or pool that can read pg_stat_activity and pg_locks (any role can). */
+export interface LockReader {
+  query<R extends QueryResultRow>(text: string, values?: unknown[]): Promise<QueryResult<R>>;
+}
+
+/**
+ * Waits until `count` backends of this database wait for a lock that backend `holder` holds,
+ * directly or queued behind another such waiter (pg_blocking_pids), and returns their pids.
+ * Only waits that lead back to the test's own holder count, so a lock wait elsewhere on the
+ * shared server (another database, another checkout's run) can neither satisfy nor overshoot
+ * it, as a count over all of pg_locks could (TST-3). With `locktype`, only a wait for that kind
+ * of lock counts ('advisory' for withCountedLimit), so a wait for some other row does not pass
+ * for the lock under test. Unlike stillWaiting, the answer does not rest on a guess at how long
+ * an unblocked side takes (TST-5). It gives up after `timeoutMs` (ten seconds, for a loaded
+ * runner) with `what` in the message; a passing run returns as soon as the waiters are there.
+ */
+export async function waitForLockWaiters(
+  reader: LockReader,
+  holder: number,
+  count: number,
+  what: string,
+  options: { readonly locktype?: string; readonly timeoutMs?: number } = {},
+): Promise<readonly number[]> {
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const { rows } = await reader.query<{ pid: number; blockers: number[]; of_type: boolean }>(
+      `SELECT a.pid, pg_blocking_pids(a.pid) AS blockers,
+              EXISTS (SELECT 1 FROM pg_locks l
+                       WHERE l.pid = a.pid AND NOT l.granted
+                         AND ($1::text IS NULL OR l.locktype = $1::text)) AS of_type
+         FROM pg_stat_activity a
+        WHERE a.datname = current_database()
+          AND EXISTS (SELECT 1 FROM pg_locks l WHERE l.pid = a.pid AND NOT l.granted)`,
+      [options.locktype ?? null],
+    );
+    // Every backend whose wait leads back to the holder, through any number of waiters.
+    const behind = new Set<number>();
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const row of rows) {
+        if (!behind.has(row.pid) && row.blockers.some((b) => b === holder || behind.has(b))) {
+          behind.add(row.pid);
+          grew = true;
+        }
+      }
+    }
+    const waiting = rows.filter((row) => behind.has(row.pid) && row.of_type).map((r) => r.pid);
+    if (waiting.length >= count) return waiting;
+    if (Date.now() > deadline) {
+      throw new Error(
+        `${what}: ${String(waiting.length)} of ${String(count)} backends waited for a lock of backend ${String(holder)} within ${String(timeoutMs / 1000)} s`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
 }
 
 /**

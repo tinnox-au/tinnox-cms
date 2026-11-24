@@ -38,17 +38,22 @@ async function free(): Promise<boolean> {
   return true;
 }
 
+/** How long a wait for the server to end a backend may take on a loaded runner (TST-4). */
+const BACKEND_GONE_MS = 10_000;
+
 /**
- * Whether the lock becomes free within about two seconds. Where the lock went with a closed or
+ * Whether the lock becomes free within BACKEND_GONE_MS. Where the lock went with a closed or
  * ended backend, nothing waits for that backend to exit: pg-pool ends a released client without
  * awaiting it, and the server releases a dying backend's locks after the client has seen it go.
+ * A passing run returns at the first poll that finds the lock free.
  */
 async function freeSoon(): Promise<boolean> {
-  for (let i = 0; i < 100; i += 1) {
+  const deadline = Date.now() + BACKEND_GONE_MS;
+  for (;;) {
     if (await free()) return true;
+    if (Date.now() > deadline) return false;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  return false;
 }
 
 /** The backend that holds the lock, if any. */
@@ -147,7 +152,7 @@ describe('withSessionLock (EAX-06)', () => {
     expect(outcome).toEqual({ held: true, value: before });
     // The unlock was never sent: only closing that connection gave the lock back.
     expect(await pooledBackend()).not.toBe(before);
-    expect(await freeSoon()).toBe(true);
+    expect(await freeSoon(), 'the session lock was still held after its backend ended').toBe(true);
   });
 
   it('EAX-06: aborts the signal when the lock connection is lost, and frees the lock', async () => {
@@ -161,7 +166,9 @@ describe('withSessionLock (EAX-06)', () => {
       } finally {
         await killer.end();
       }
-      for (let i = 0; i < 100 && !signal.aborted; i += 1) {
+      // Ends at once when the socket error arrives; the deadline is for a loaded runner (TST-4).
+      const deadline = Date.now() + BACKEND_GONE_MS;
+      while (!signal.aborted && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
       const reason: unknown = signal.reason;
@@ -171,7 +178,7 @@ describe('withSessionLock (EAX-06)', () => {
       held: true,
       value: { aborted: true, reason: expect.any(Error) as unknown },
     });
-    expect(await freeSoon()).toBe(true);
+    expect(await freeSoon(), 'the session lock was still held after its backend ended').toBe(true);
     // The pool opens a new connection for the next caller.
     expect(await pooledBackend()).toBeTypeOf('number');
   });

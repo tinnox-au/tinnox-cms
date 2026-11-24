@@ -9,7 +9,7 @@
  */
 import { ABSOLUTE, MAX_ALERT_RECIPIENTS } from '@tinnox/contracts';
 import type { OrgTx } from '@tinnox/db';
-import { stillWaiting, withOrg } from '@tinnox/db/testing';
+import { waitForLockWaiters, withOrg } from '@tinnox/db/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   asMigratorIn,
@@ -65,33 +65,47 @@ describe('two creates at a counted ceiling (SCX-05)', () => {
 
   /**
    * Sends `first` and holds it at the statement `atInsert` matches, after its lock and count;
-   * sends `second` while it is held, and notes whether the second was still waiting before the
-   * first is let go. Both run to their answers before this returns.
+   * sends `second` while it is held, and lets the first go only once the second waits for an
+   * advisory lock the first one's backend holds (a lockless build fails here, not by timing:
+   * TST-5). `waiting` is how many backends waited behind the first. Both run to their answers
+   * before this returns.
    */
   async function race(
     atInsert: (text: string) => boolean,
     first: () => Promise<Response>,
     second: () => Promise<Response>,
-  ): Promise<{ waited: boolean; statuses: number[]; refusal: ErrorBody }> {
+  ): Promise<{ waiting: number; statuses: number[]; refusal: ErrorBody }> {
     const held = holds.hold(atInsert);
     const one = first();
-    await Promise.race([
+    const holder = await Promise.race([
       held.reached,
-      one.then((r) => {
+      one.then((r): never => {
         throw new Error(`the first create was answered ${r.status} before its insert`);
       }),
     ]);
-    let waited: boolean;
+    let waiting: number | undefined;
+    let notWaited: unknown;
     const two = second();
     try {
-      waited = await stillWaiting(two);
+      const waiters = await waitForLockWaiters(
+        t.testSql('reads which backends wait for the first create, as a test of the lock'),
+        holder,
+        1,
+        "the second create never waited for the first one's advisory lock",
+        { locktype: 'advisory' },
+      );
+      waiting = waiters.length;
+    } catch (error) {
+      notWaited = error;
     } finally {
       held.release();
     }
     const answers = await Promise.all([one, two]);
+    // Reported once both are answered, so a failure leaves no request open behind it.
+    if (waiting === undefined) throw notWaited;
     const refused = answers.find((r) => r.status >= 400);
     return {
-      waited,
+      waiting,
       statuses: answers.map((r) => r.status).sort((x, y) => x - y),
       refusal: (refused === undefined ? { error: {} } : await refused.json()) as ErrorBody,
     };
@@ -121,7 +135,7 @@ describe('two creates at a counted ceiling (SCX-05)', () => {
       ABSOLUTE.maxListItems,
     );
     // The second was held at the first one's lock until the first was let go.
-    expect(result.waited).toBe(true);
+    expect(result.waiting).toBe(1);
   });
 
   it('SCX-05: two tags at the ceiling, one of each kind: one is created, the other waits and is refused', async () => {
@@ -146,7 +160,7 @@ describe('two creates at a counted ceiling (SCX-05)', () => {
       ABSOLUTE.maxListItems,
     );
     // The second was held at the first one's lock until the first was let go.
-    expect(result.waited).toBe(true);
+    expect(result.waiting).toBe(1);
   });
 
   it('SCX-05: two alert addresses at the ceiling: one is added, the other waits and is refused', async () => {
@@ -176,7 +190,7 @@ describe('two creates at a counted ceiling (SCX-05)', () => {
       await countIn(org, (tx) => tx.query('SELECT count(*)::int AS n FROM alert_recipient')),
     ).toBe(MAX_ALERT_RECIPIENTS);
     // The second was held at the first one's lock until the first was let go.
-    expect(result.waited).toBe(true);
+    expect(result.waiting).toBe(1);
   });
 
   it('SCX-05: two invites at the ceiling: one is made, the other waits on the membership lock and is refused', async () => {
@@ -209,7 +223,7 @@ describe('two creates at a counted ceiling (SCX-05)', () => {
       ),
     ).toBe(ABSOLUTE.maxPendingInvites);
     // The second was held at the first one's lock until the first was let go.
-    expect(result.waited).toBe(true);
+    expect(result.waiting).toBe(1);
   });
 
   it('SCX-05: two uploads that each fit the storage quota but not together: one is stored, the other waits and is refused', async () => {
@@ -224,7 +238,7 @@ describe('two creates at a counted ceiling (SCX-05)', () => {
     });
     expect(await countIn(org, (tx) => tx.query('SELECT count(*)::int AS n FROM media'))).toBe(1);
     // The second was held at the first one's lock until the first was let go.
-    expect(result.waited).toBe(true);
+    expect(result.waiting).toBe(1);
   });
 });
 

@@ -5,9 +5,10 @@ import { configDefaults, defineConfig } from 'vitest/config';
  * tinnox_app for the application, tinnox_migrator only to arrange organisations).
  *   npm run test:integration -w @tinnox/api
  * Unit tests in src/ run with the repository's `npm test`.
- * The global setup applies pending migrations but does not wipe the database, so this
- * suite can run next to the repository-level integration suite; every test creates its
- * own organisations with random ids.
+ * The global setup applies pending migrations but does not wipe the database. Do not run it
+ * alongside the repository-level integration suite, which resets the same database and changes
+ * the audit-debt guard; that suite already runs these files. Every test creates its own
+ * organisations with random ids.
  */
 export default defineConfig({
   test: {

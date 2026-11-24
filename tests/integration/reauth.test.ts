@@ -338,11 +338,16 @@ describe('signing in again after the sessions were ended', () => {
     }
   });
 
-  it("a sign-in during a people route's wait for the member row has no working session afterwards (RCX-02)", async () => {
+  // The hold stops the route before lockTarget is sent, so the route never waits on the row in
+  // the database, and the 0013 body of sec.session_revoke_membership passes this too. What it
+  // checks is the API's order. That the function itself stamps after its own wait for the row
+  // (migration 0015) is shown by packages/db/test/migration-0015.integration.test.ts and
+  // tests/integration/session-revoke-all.test.ts (TST-6).
+  it("a sign-in while a people route holds before lockTarget is cut off: the route's cut-off is taken after lockTarget, not at transaction start (RCX-02, API order)", async () => {
     const target = await addMember(org, 'editor');
     const sub = idp.sub;
     idp.sub = target.oidcSub;
-    // "Sign out everywhere" by the Owner, stopped where lockTarget would wait for the member row.
+    // "Sign out everywhere" by the Owner, stopped just before lockTarget locks the member row.
     const held = holds.hold(
       (text) => text.includes('FROM membership') && text.includes('FOR NO KEY UPDATE'),
     );

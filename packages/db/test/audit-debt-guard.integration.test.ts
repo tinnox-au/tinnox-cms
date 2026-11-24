@@ -492,9 +492,19 @@ describe('the writes the step 20 ruling leaves unaudited owe nothing, in their s
     // tinnox_app has no privilege on the table, so a throwaway function of tinnox_definer makes
     // the write: an expiry alone, as the pairing functions make it, or one that also changes the
     // client key. It is dropped before the test ends, so no later invariant check sees it.
-    await migrator.query(
-      `BEGIN;
-       SET LOCAL ROLE tinnox_definer;
+    // The shared migrator client is rolled back when a statement fails, so the later tests of
+    // this file report their own outcome, not "current transaction is aborted" (TST-8).
+    const definerDdl = async (ddl: string): Promise<void> => {
+      try {
+        await migrator.query(`BEGIN; SET LOCAL ROLE tinnox_definer; ${ddl} RESET ROLE; COMMIT`);
+      } catch (error) {
+        await migrator.query('ROLLBACK');
+        throw error;
+      }
+    };
+    // IF EXISTS: one left by an attempt that was killed before its DROP does not fail this one.
+    await definerDdl(
+      `DROP FUNCTION IF EXISTS sec.guard_probe_expire(uuid, boolean);
        CREATE FUNCTION sec.guard_probe_expire(p_id uuid, p_touch boolean) RETURNS void
          LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
          UPDATE public.pairing_session
@@ -503,9 +513,7 @@ describe('the writes the step 20 ruling leaves unaudited owe nothing, in their s
          WHERE id = p_id
        $$;
        REVOKE ALL ON FUNCTION sec.guard_probe_expire(uuid, boolean) FROM PUBLIC;
-       GRANT EXECUTE ON FUNCTION sec.guard_probe_expire(uuid, boolean) TO tinnox_app;
-       RESET ROLE;
-       COMMIT`,
+       GRANT EXECUTE ON FUNCTION sec.guard_probe_expire(uuid, boolean) TO tinnox_app;`,
     );
     const expire = async (id: string, touch: boolean): Promise<void> => {
       const client = await judged.connect();
@@ -528,13 +536,7 @@ describe('the writes the step 20 ruling leaves unaudited owe nothing, in their s
       expect(touching).toContain('public.pairing_session (UPDATE)');
       expect(await status(touched.id)).toBe('pending');
     } finally {
-      await migrator.query(
-        `BEGIN;
-         SET LOCAL ROLE tinnox_definer;
-         DROP FUNCTION sec.guard_probe_expire(uuid, boolean);
-         RESET ROLE;
-         COMMIT`,
-      );
+      await definerDdl('DROP FUNCTION IF EXISTS sec.guard_probe_expire(uuid, boolean);');
     }
   });
 });

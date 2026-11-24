@@ -904,8 +904,11 @@ export const isRoleCheck = (text: string): boolean =>
   text.includes('FROM membership WHERE id = $1 AND org_id = app_org_id() FOR SHARE');
 
 export interface StatementHold {
-  /** Resolves when the held statement arrives; it is not sent until `release`. */
-  readonly reached: Promise<void>;
+  /**
+   * Resolves when the held statement arrives, with the backend pid of the connection that sent
+   * it (for waitForLockWaiters of @tinnox/db/testing); it is not sent until `release`.
+   */
+  readonly reached: Promise<number>;
   release(): void;
 }
 
@@ -930,7 +933,7 @@ export function statementHolds(): StatementHolds {
   };
   let armed: {
     matches: (text: string) => boolean;
-    reached: () => void;
+    reached: (pid: number) => void;
     released: Promise<void>;
   } | null = null;
   return {
@@ -947,7 +950,10 @@ export function statementHolds(): StatementHolds {
                   const hold = armed;
                   if (hold !== null && typeof text === 'string' && hold.matches(text)) {
                     armed = null;
-                    hold.reached();
+                    // node-postgres keeps the backend's pid from the connection handshake.
+                    const pid: unknown = Reflect.get(real, 'processID');
+                    if (typeof pid !== 'number') throw new Error('the held connection has no pid');
+                    hold.reached(pid);
                     await hold.released;
                   }
                   return real.query(text, values);
@@ -958,9 +964,9 @@ export function statementHolds(): StatementHolds {
         },
       }),
     hold(matches) {
-      let reached: () => void = () => undefined;
+      let reached: (pid: number) => void = () => undefined;
       let release: () => void = () => undefined;
-      const atStatement = new Promise<void>((resolve) => {
+      const atStatement = new Promise<number>((resolve) => {
         reached = resolve;
       });
       const released = new Promise<void>((resolve) => {

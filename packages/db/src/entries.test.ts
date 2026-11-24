@@ -111,6 +111,7 @@ describe('the entries of @tinnox/db (AG-1.10)', () => {
       'testOrgId',
       'twoTransactions',
       'unjudgedSql',
+      'waitForLockWaiters',
       'watchAuditDebt',
       'whileAuditFails',
       'whileUnauditedAllowed',

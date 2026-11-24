@@ -104,7 +104,8 @@ test('an accepted pairing code can be cancelled from the screen page before a pl
   await openScreenPage(page, id, 'pairing');
   await page.getByTestId('screen-detail-pairing-code').fill(pairing.code);
   await page.getByTestId('screen-detail-pair').click();
-  await expect(page.getByText('Code accepted')).toBeVisible();
+  // Exact: the pending-pairing note below the form also contains the words "code accepted".
+  await expect(page.getByText('Code accepted', { exact: true })).toBeVisible();
 
   // No player holds a credential yet, and the action is offered all the same.
   const cancel = page.getByTestId('screen-detail-revoke');

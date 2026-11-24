@@ -123,7 +123,7 @@ test('the Owner adds an alert address and its owner confirms it from the e-mail 
   try {
     const ownerPage = await owner.newPage();
     await ownerPage.goto(link ?? '');
-    await expect(ownerPage.getByText('Alerts confirmed')).toBeVisible();
+    await expect(ownerPage.getByText('Alerts confirmed', { exact: true })).toBeVisible();
     // The token leaves the address bar (and history) once read.
     expect(ownerPage.url()).toBe(`${PORTAL_URL}/alerts/confirm`);
   } finally {
