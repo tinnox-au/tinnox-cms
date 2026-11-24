@@ -2,8 +2,8 @@
  * scripts/seed.ts run for real, as a child process the way `npm run db:seed` and the e2e
  * setup run it. It connects through connectMigrator, so before it writes it refuses a
  * connection whose session does not act as tinnox_migrator (session_user and current_user;
- * poteto adoption plan, D4), and it writes each
- * organisation in one withOrg transaction (D25).
+ * poteto adoption plan, D4), and it writes each organisation in one changeOrgAsMigrator
+ * transaction under seedStatement(), with no audit row (development_seed; D25, step 20).
  *
  * Each case uses its own database, tinnox_seedcheck_test, never the shared integration-test
  * database: the seed's organisation ids are fixed and membership.oidc_sub is unique, so its
@@ -86,18 +86,30 @@ async function seed(
   );
 }
 
-/** Counts the seed's rows as the superuser, who bypasses row-level security. */
-async function seededRows(): Promise<{ orgs: number; sites: number; members: number }> {
+interface SeededRows {
+  readonly orgs: number;
+  readonly sites: number;
+  readonly members: number;
+  readonly audits: number;
+}
+
+/**
+ * Counts the seed's rows as the superuser, who bypasses row-level security. The audit rows are
+ * every row of this database's audit_event, scoped or not: the seed writes none (development_seed,
+ * the D3 ruling of step 20), and nothing else writes here.
+ */
+async function seededRows(): Promise<SeededRows> {
   const client = new pg.Client({ connectionString: superuserUrl(SEED_DB).toString() });
   await client.connect();
   try {
-    const { rows } = await client.query<{ orgs: number; sites: number; members: number }>(
+    const { rows } = await client.query<SeededRows>(
       `SELECT (SELECT count(*)::int FROM organization WHERE id = ANY($1)) AS orgs,
               (SELECT count(*)::int FROM site WHERE org_id = ANY($1)) AS sites,
-              (SELECT count(*)::int FROM membership WHERE org_id = ANY($1)) AS members`,
+              (SELECT count(*)::int FROM membership WHERE org_id = ANY($1)) AS members,
+              (SELECT count(*)::int FROM audit_event) AS audits`,
       [[PRIMARY_ORG, SECOND_ORG]],
     );
-    return rows[0] ?? { orgs: -1, sites: -1, members: -1 };
+    return rows[0] ?? { orgs: -1, sites: -1, members: -1, audits: -1 };
   } finally {
     await client.end();
   }
@@ -159,21 +171,21 @@ describe('scripts/seed.ts', () => {
       expect(outcome.code).toBe(1);
       expect(outcome.stderr).toMatch(/must log in and act as role tinnox_migrator/);
     }
-    expect(await seededRows()).toEqual({ orgs: 0, sites: 0, members: 0 });
+    expect(await seededRows()).toEqual({ orgs: 0, sites: 0, members: 0, audits: 0 });
   });
 
-  it('as the migrator writes both organisations once, and a second run adds nothing (D25)', async () => {
+  it('as the migrator writes both organisations once with no audit row, and a second run adds nothing (D25, D3)', async () => {
     const env = subjects();
     const first = await seed(migratorUrl().toString(), env);
     expect(first).toMatchObject({ code: 0, stderr: '' });
     expect(first.stdout).toMatch(/TINNOX Internal: .*owner membership created/);
     expect(first.stdout).toMatch(/Isolation Test Organisation: .*owner membership created/);
-    expect(await seededRows()).toEqual({ orgs: 2, sites: 2, members: 5 });
+    expect(await seededRows()).toEqual({ orgs: 2, sites: 2, members: 5, audits: 0 });
 
     const again = await seed(migratorUrl().toString(), env);
     expect(again).toMatchObject({ code: 0, stderr: '' });
     expect(again.stdout).not.toMatch(/created/);
-    expect(await seededRows()).toEqual({ orgs: 2, sites: 2, members: 5 });
+    expect(await seededRows()).toEqual({ orgs: 2, sites: 2, members: 5, audits: 0 });
 
     // Each subject landed in its organisation with its role.
     expect(await seededMembers()).toEqual(

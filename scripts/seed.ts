@@ -13,8 +13,14 @@
 // this script creates the matching membership rows. A subject without a membership cannot
 // sign in. Customers' members come from scripts/provision-member.ts instead.
 import type { Role } from '@tinnox/contracts';
-import { withOrg, type OrgId, type OrgTx } from '@tinnox/db';
-import { connectMigrator, newOrgId, type MigratorPool } from '@tinnox/db/migrate';
+import { unaudited, type OrgId, type OrgTx } from '@tinnox/db';
+import {
+  changeOrgAsMigrator,
+  connectMigrator,
+  newOrgId,
+  seedStatement,
+  type MigratorPool,
+} from '@tinnox/db/migrate';
 import { loadEnv, requireEnv } from './lib/env.ts';
 
 loadEnv();
@@ -106,8 +112,10 @@ async function seedMember(
 async function seedOrganisation(pool: MigratorPool, org: SeedOrg): Promise<string> {
   const subjects = org.members.map((member) => requireEnv(member.subjectEnv));
   // Row-level security is forced even for the table owner, so the seed sets the
-  // tenant context exactly like the application does: one withOrg transaction.
-  return withOrg(pool, org.orgId, async (tx) => {
+  // tenant context exactly like the application does: one transaction for the organisation.
+  // It writes no audit row, as today (development_seed, the step 20 ruling): the data is
+  // synthetic, and seedStatement() is the one statement changeOrgAsMigrator lets say so.
+  return changeOrgAsMigrator(pool, org.orgId, seedStatement(), async (tx) => {
     await tx.query(
       'INSERT INTO organization (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING',
       [org.orgId, org.orgName],
@@ -120,7 +128,10 @@ async function seedOrganisation(pool: MigratorPool, org: SeedOrg): Promise<strin
     for (const [index, member] of org.members.entries()) {
       notes.push(await seedMember(tx, org.orgId, member, subjects[index] ?? ''));
     }
-    return `${org.orgName}: site "${org.siteName}" (${org.timezone}); ${notes.join(', ')}`;
+    return {
+      value: `${org.orgName}: site "${org.siteName}" (${org.timezone}); ${notes.join(', ')}`,
+      audit: unaudited('development_seed'),
+    };
   });
 }
 

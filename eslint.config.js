@@ -786,12 +786,15 @@ const PERMIT_MAKERS = ['issueWritePermit', 'legacyAudit'];
 // actions, so only the files whose helpers read a statement from its table may import it, each
 // with its reason. A route, a job or a tool never writes its own: a new table of statements is
 // a new entry here, decided in its pull request. Test files are outside the rule. Not seen: the
-// names taken from a dynamic import.
+// names taken from a dynamic import. The last entry is in packages/db, which the import rule does
+// not read: packages/db/src/entries.test.ts holds that no other file of the package makes one.
 export const STATEMENT_ISSUERS = {
   'apps/api/src/route-audit.ts':
     'the audit tables of the routes and the jobs: routeStatement reads the entry of a route in OTHER_ROUTE_AUDIT, jobStatement the row of a job in JOB_AUDIT, and refusalStatement the guards of a route with the actions of its row that D2 lets a refusal record on its own (ATTEMPT_AUDITED_ACTIONS: an upload)',
   'scripts/lib/provision.ts':
     'the provisioning commands: provisionStatement reads the audits of a command from its row in PROVISION_COMMANDS, the table the audit-failure cases of tests/integration/provision-member.test.ts go through',
+  'packages/db/src/migrate.ts':
+    "the development seed's statement (step 20): seedStatement names no action, and changeOrgAsMigrator grants unaudited('development_seed') to that statement alone, by identity; the API cannot import this entry (AG-1.10), and only scripts/seed.ts names seedStatement (scripts/lib/legacy-transaction-lint.test.ts)",
 };
 const STATEMENT_MAKERS = ['issueAuditStatement'];
 
@@ -896,8 +899,6 @@ export const LEGACY_TRANSACTION_FILES = [
   // changeOrg; withOrgDecision), deleted when their last caller has moved.
   'apps/api/src/auth/permissions.ts',
   'apps/api/src/db-helpers.ts',
-  // The offline tool that is left: the development seed.
-  'scripts/seed.ts',
 ];
 
 // OTH-12: the two places in packages/db that hand query() a statement another file wrote, and

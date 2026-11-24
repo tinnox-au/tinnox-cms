@@ -89,6 +89,7 @@ describe('the entries of @tinnox/db (AG-1.10)', () => {
         'newOrgId',
         'resetTestDatabase',
         'runMigrations',
+        'seedStatement',
       ]),
     );
     expect(Object.keys(testing).sort()).toEqual([
@@ -160,8 +161,9 @@ describe('the entries of @tinnox/db (AG-1.10)', () => {
   });
 
   // Step 20 review: the same for an audit statement, which lint keeps to the files of
-  // STATEMENT_ISSUERS. This package takes the statement it is given and makes none.
-  it('no module of the package makes an audit statement', () => {
+  // STATEMENT_ISSUERS. This package takes the statement it is given and makes one only: the
+  // development seed's (seedStatement of src/migrate.ts, step 20), the last entry of that list.
+  it('only the migrator entry makes an audit statement inside the package: the seed’s', () => {
     const sources = readdirSync(SRC).filter(
       (name) => name.endsWith('.ts') && !name.endsWith('.test.ts'),
     );
@@ -169,8 +171,9 @@ describe('the entries of @tinnox/db (AG-1.10)', () => {
       sources.filter((name) =>
         /\bissueAuditStatement\(/.test(readFileSync(join(SRC, name), 'utf8')),
       ),
-      'a statement is read from the table of its route, job or command (STATEMENT_ISSUERS in eslint.config.js); this package only checks the one it is given. src/change.ts defines the maker',
-    ).toEqual(['change.ts']);
+      'a statement is read from the table of its route, job or command (STATEMENT_ISSUERS in eslint.config.js); this package only checks the one it is given, and makes the development seed’s alone (seedStatement, src/migrate.ts). src/change.ts defines the maker',
+    ).toEqual(['change.ts', 'migrate.ts']);
+    expect(reachable('index.ts').has(join(SRC, 'migrate.ts'))).toBe(false);
   });
 
   // D25 (adoption plan step 20): one statement writes its own audit rows, provisioning's

@@ -6,6 +6,7 @@
  * packages/db/test/change.integration.test.ts. The type cases are checked by
  * `npm run typecheck`, which reads this file: an unused @ts-expect-error is an error there.
  */
+import type { GrantedUnauditedReason } from '@tinnox/contracts';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
   auditScoped,
@@ -320,7 +321,7 @@ describe('what a change records against what its route states (D3)', () => {
           Promise.resolve({ value: 1, audit: unaudited('counter_under_threshold') }),
         ),
       ).rejects.toThrow(
-        `changeOrg: the change returned unaudited('counter_under_threshold'), but ${STATED_IN} does not grant it. 'counter_under_threshold' leaves a write unaudited on purpose, which only the route, job or tool that makes that write may do: its entry in OTHER_ROUTE_AUDIT or its row of JOB_AUDIT (apps/api/src/route-audit.ts) grants the reason (D3; UNAUDITED_REASONS in packages/contracts/src/audit.ts says who makes each). Return the audit event of what changed, or unaudited('nothing_changed') when this run changed nothing. Nothing was committed.`,
+        `changeOrg: the change returned unaudited('counter_under_threshold'), but ${STATED_IN} does not grant it. 'counter_under_threshold' leaves a write unaudited on purpose, which only the route, job or tool that makes that write may do: its entry in OTHER_ROUTE_AUDIT or its row of JOB_AUDIT (apps/api/src/route-audit.ts) grants the reason, and for development_seed changeOrgAsMigrator grants it to seedStatement() of @tinnox/db/migrate alone (D3; UNAUDITED_REASONS in packages/contracts/src/audit.ts says who makes each). Return the audit event of what changed, or unaudited('nothing_changed') when this run changed nothing. Nothing was committed.`,
       );
     }
     expect(statements).not.toContain('COMMIT');
@@ -372,6 +373,33 @@ describe('what a change records against what its route states (D3)', () => {
       ).rejects.toThrow(`but ${STATED_IN} does not grant it`);
       expect(statements, reason).not.toContain('COMMIT');
     }
+  });
+
+  it('lets no table grant development_seed: only changeOrgAsMigrator gives it, to seedStatement() (step 20)', () => {
+    // A provisioning command, a route or a job makes its statement here, so none can give the
+    // seed's reason, whatever its table says; the type refuses it, and the call for a caller the
+    // type checker did not read.
+    const terms = { stated: { actions: [] }, statedIn: 'the audits of a command (fixture)' };
+    expect(() =>
+      // @ts-expect-error development_seed is granted by no table.
+      issueAuditStatement({ ...terms, grants: ['development_seed'] }),
+    ).toThrow(
+      "issueAuditStatement: the audits of a command (fixture) grants development_seed, which no table may grant. Only the development seed (scripts/seed.ts) writes rows with no audit row under it, through changeOrgAsMigrator(pool, orgId, seedStatement(), fn) of @tinnox/db/migrate, which grants it to that statement alone. A route, a job or a provisioning command returns the audit events of what it changed, or unaudited('nothing_changed') when a run changed nothing.",
+    );
+    const widened: readonly GrantedUnauditedReason[] = [
+      'counter_under_threshold',
+      'development_seed',
+    ];
+    expect(() => issueAuditStatement({ ...terms, grants: widened as never })).toThrow(
+      /grants development_seed, which no table may grant/,
+    );
+    // The other granted reasons stay the tables' to give.
+    expect(
+      termsOfStatement(
+        'test',
+        issueAuditStatement({ ...terms, grants: ['counter_under_threshold'] }),
+      ).grants,
+    ).toEqual(['counter_under_threshold']);
   });
 
   it('names a statement with no action as such, not as an empty list (step 20 review)', async () => {

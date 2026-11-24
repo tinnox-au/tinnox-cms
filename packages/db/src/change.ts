@@ -159,8 +159,8 @@ export interface StatementTerms {
   /**
    * The reasons of GRANTED_UNAUDITED_REASONS the route, job or tool lets one run give: the
    * `grants` of its entry in OTHER_ROUTE_AUDIT or its row of JOB_AUDIT
-   * (apps/api/src/route-audit.ts), or what `changeOrgAsMigrator` adds for the seed. None when
-   * absent.
+   * (apps/api/src/route-audit.ts). None when absent. `development_seed` is never here:
+   * `changeOrgAsMigrator` adds it to the permit of the seed's statement alone.
    */
   readonly grants?: readonly GrantedUnauditedReason[];
 }
@@ -189,8 +189,23 @@ export interface AuditStatement {
  * Makes a statement. For the helpers that read it from a table alone: lint refuses this import
  * in every other file (STATEMENT_ISSUERS in eslint.config.js), and a cast to `AuditStatement`
  * everywhere.
+ *
+ * No table grants `development_seed`: changeOrgAsMigrator grants it to the seed's statement
+ * (`seedStatement` of @tinnox/db/migrate) alone, so a route, a job or a provisioning command
+ * cannot give it (step 20). The type refuses it, and so does the call, for a caller the type
+ * checker did not read.
  */
-export function issueAuditStatement(held: StatementTerms): AuditStatement {
+export function issueAuditStatement(
+  held: StatementTerms & {
+    readonly grants?: readonly Exclude<GrantedUnauditedReason, 'development_seed'>[];
+  },
+): AuditStatement {
+  const granted: readonly string[] = held.grants ?? [];
+  if (granted.includes('development_seed')) {
+    throw new Error(
+      `issueAuditStatement: ${held.statedIn} grants development_seed, which no table may grant. Only the development seed (scripts/seed.ts) writes rows with no audit row under it, through changeOrgAsMigrator(pool, orgId, seedStatement(), fn) of @tinnox/db/migrate, which grants it to that statement alone. A route, a job or a provisioning command returns the audit events of what it changed, or unaudited('nothing_changed') when a run changed nothing.`,
+    );
+  }
   return Object.freeze({ [fromTheTable]: Object.freeze({ ...held }) });
 }
 
@@ -335,7 +350,7 @@ async function record<T>(
   }
   if (givenBy === 'granted' && !(held.grants ?? []).some((granted) => granted === reason)) {
     throw new Error(
-      `${opener}: the change returned unaudited('${String(reason)}'), but ${statedIn} does not grant it. '${String(reason)}' leaves a write unaudited on purpose, which only the route, job or tool that makes that write may do: its entry in OTHER_ROUTE_AUDIT or its row of JOB_AUDIT (apps/api/src/route-audit.ts) grants the reason (D3; UNAUDITED_REASONS in packages/contracts/src/audit.ts says who makes each). Return the audit event of what changed, or unaudited('nothing_changed') when this run changed nothing. Nothing was committed.`,
+      `${opener}: the change returned unaudited('${String(reason)}'), but ${statedIn} does not grant it. '${String(reason)}' leaves a write unaudited on purpose, which only the route, job or tool that makes that write may do: its entry in OTHER_ROUTE_AUDIT or its row of JOB_AUDIT (apps/api/src/route-audit.ts) grants the reason, and for development_seed changeOrgAsMigrator grants it to seedStatement() of @tinnox/db/migrate alone (D3; UNAUDITED_REASONS in packages/contracts/src/audit.ts says who makes each). Return the audit event of what changed, or unaudited('nothing_changed') when this run changed nothing. Nothing was committed.`,
     );
   }
   return change.value;

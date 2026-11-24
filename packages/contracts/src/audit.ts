@@ -98,8 +98,9 @@ export type NoAuditReason = keyof typeof NO_AUDIT_REASONS;
  *  - a reason of GRANTED_UNAUDITED_REASONS is a run that did change something and is
  *    deliberately not audited, so a change may give it only where it is granted: the `grants`
  *    of a route's entry in OTHER_ROUTE_AUDIT or of a job's row in JOB_AUDIT
- *    (apps/api/src/route-audit.ts), or, for `development_seed`, the permit of an offline tool
- *    whose statement names no action (`changeOrgAsMigrator` of @tinnox/db/migrate);
+ *    (apps/api/src/route-audit.ts), or, for `development_seed`, the permit of the offline tools
+ *    (`changeOrgAsMigrator` of @tinnox/db/migrate), which grants it to the seed's statement
+ *    (`seedStatement`) alone;
  *  - a reason in `NO_AUDIT_REASONS` alone (`read_only`, `login_state`) is never given by a
  *    change, and `unaudited` does not take it: a route that only reads opens `readOrg`, whose
  *    transaction refuses a write, and the login state is stored through the sec.* wrappers

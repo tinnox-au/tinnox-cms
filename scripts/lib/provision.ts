@@ -1218,8 +1218,8 @@ export function provisionStatement(command: ProvisionCommand): AuditStatement {
 type ProvisionCommandTable = {
   readonly [C in Command]: {
     readonly run: (pool: MigratorPool, idp: IdpDirectory, args: CommandArgs[C]) => Promise<Result>;
-    // At least one: changeOrgAsMigrator lets only a statement with no action (the seed's) give
-    // unaudited('development_seed'), so no command may state none (step 20).
+    // At least one: every command changes tenant or security state, which D3 audits. Only the
+    // seed's statement (seedStatement of @tinnox/db/migrate) states none (step 20).
     readonly audits: readonly [ProvisionAuditAction, ...ProvisionAuditAction[]];
   };
 };

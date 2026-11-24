@@ -5,10 +5,12 @@
 // AuditStatement. Each case takes the entry the config resolves for a path, so a block that took
 // a rule away from a file group would fail here. The rule's own cases are in
 // scripts/eslint-rules/no-legacy-transaction.test.ts.
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { ESLint, type Linter } from 'eslint';
+import ts from 'typescript';
 import tseslint from 'typescript-eslint';
 import { describe, expect, it } from 'vitest';
 import tinnox from '../eslint-rules/index.ts';
@@ -78,17 +80,51 @@ async function legacyFiles(): Promise<string[]> {
 
 const source = (path: string): string => readFileSync(join(repoRoot, path), 'utf8');
 
+/** A module specifier of the migrate entry: the package's, or a relative one inside packages/db. */
+const MIGRATE_ENTRY = /^@tinnox\/db\/migrate$|^\.{1,2}\/(.*\/)?migrate(\.ts)?$/;
+
+/**
+ * True when `text` takes the seed's statement: the name seedStatement written as code (an
+ * identifier, or the string of an element read such as m['seedStatement']), or a wildcard
+ * re-export of the migrate entry. Read from the syntax tree, so a comment or a message that
+ * mentions the name does not count.
+ */
+function takesSeedStatement(path: string, text: string): boolean {
+  const kind = path.endsWith('.tsx')
+    ? ts.ScriptKind.TSX
+    : /\.[cm]?js$/.test(path)
+      ? ts.ScriptKind.JS
+      : ts.ScriptKind.TS;
+  const tree = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, false, kind);
+  const visit = (node: ts.Node): boolean => {
+    if (ts.isIdentifier(node) && node.text === 'seedStatement') return true;
+    if (
+      (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) &&
+      node.text === 'seedStatement'
+    ) {
+      return true;
+    }
+    if (
+      ts.isExportDeclaration(node) &&
+      (node.exportClause === undefined || ts.isNamespaceExport(node.exportClause)) &&
+      node.moduleSpecifier !== undefined &&
+      ts.isStringLiteral(node.moduleSpecifier) &&
+      MIGRATE_ENTRY.test(node.moduleSpecifier.text)
+    ) {
+      return true;
+    }
+    return ts.forEachChild(node, visit) ?? false;
+  };
+  return visit(tree);
+}
+
 /**
  * The files that used the legacy API when step 19 landed the new one. NEVER ADD TO THIS LIST:
  * it is what "only shrinks" is measured against. A file that leaves LEGACY_TRANSACTION_FILES
  * leaves this list in the same change (step 20, one file per pull request), and the day both
  * are empty the rule, its two lists and this test's allow-list cases can go.
  */
-const FOUND_BY_STEP_19 = [
-  'apps/api/src/auth/permissions.ts',
-  'apps/api/src/db-helpers.ts',
-  'scripts/seed.ts',
-];
+const FOUND_BY_STEP_19 = ['apps/api/src/auth/permissions.ts', 'apps/api/src/db-helpers.ts'];
 
 const LEGACY_CODE = `
 import { auditScoped, withOrg, type OrgTx } from '@tinnox/db';
@@ -126,6 +162,8 @@ describe('the legacy transaction API (AG-3.1, SCR-34)', { timeout: 30_000 }, () 
     'scripts/provision-member.ts',
     // Left the list in step 20: its commands return { value, audit }.
     'scripts/lib/provision.ts',
+    // Left the list in step 20: it runs in changeOrgAsMigrator under seedStatement().
+    'scripts/seed.ts',
     'scripts/migrate.ts',
     'scripts/lib/fixture.ts',
     'scripts/fixture.ts',
@@ -479,7 +517,9 @@ describe('the maker of an AuditStatement (SCR-34)', { timeout: 30_000 }, () => {
     "import { changePreOrg, issueAuditStatement, type AuditStatement } from '@tinnox/db';";
   const REFUSED =
     /^'issueAuditStatement' import from '@tinnox\/db' is restricted from being used by a pattern\. Only the helpers that read a statement from its table make an AuditStatement \(SCR-34; the files of STATEMENT_ISSUERS in eslint\.config\.js\), so a change is never held to a statement its caller wrote\. A route outside the operator table passes routeStatement\(request\) to changePreOrg, .* a provisioning command passes provisionStatement\(command\) from scripts\/lib\/provision\.ts to changeOrgAsMigrator or changePreOrg\. A new table of statements is decided in its pull request, as a new entry of STATEMENT_ISSUERS\.$/;
-  const ISSUERS = ['apps/api/src/route-audit.ts', 'scripts/lib/provision.ts'];
+  /** The issuers the import rule reads: the API's and the offline tools', not packages/db. */
+  const LINTED_ISSUERS = ['apps/api/src/route-audit.ts', 'scripts/lib/provision.ts'];
+  const ISSUERS = [...LINTED_ISSUERS, 'packages/db/src/migrate.ts'];
 
   it.each([
     'apps/api/src/routes/auth.ts',
@@ -513,7 +553,7 @@ describe('the maker of an AuditStatement (SCR-34)', { timeout: 30_000 }, () => {
   });
 
   it.each([
-    ...ISSUERS,
+    ...LINTED_ISSUERS,
     'apps/api/src/route-audit.test.ts',
     'apps/api/test/fixture.integration.test.ts',
     'tests/integration/fixture.test.ts',
@@ -541,6 +581,69 @@ describe('the maker of an AuditStatement (SCR-34)', { timeout: 30_000 }, () => {
         `${file} re-exports the maker of a statement`,
       ).toBe(false);
     }
+  });
+
+  // Step 20: changeOrgAsMigrator lets a change say unaudited('development_seed') only under the
+  // seed's statement, so a provisioning command that took that statement could skip its audit
+  // rows. The API cannot import @tinnox/db/migrate at all; among the other files, only the seed
+  // may name seedStatement, read from the syntax tree of every tracked or untracked file (not
+  // ignored ones) that is not a test: a named, aliased or destructured import, static or dynamic,
+  // a re-export, a property or an element read through the namespace, and a wildcard re-export of
+  // the entry, which hands the name on unwritten. Not seen: a name built at run time, and a
+  // namespace of the entry passed on to another file. Tests are outside the rule.
+  it.each([
+    ['a named import', "import { seedStatement } from '@tinnox/db/migrate';"],
+    ['an aliased import', "import { seedStatement as s2 } from '@tinnox/db/migrate';"],
+    [
+      'a destructured dynamic import',
+      "const { seedStatement } = await import('@tinnox/db/migrate');",
+    ],
+    [
+      'a renamed destructured dynamic import',
+      "const { seedStatement: s } = await import('@tinnox/db/migrate');",
+    ],
+    ['a namespace read', "import * as m from '@tinnox/db/migrate'; m.seedStatement();"],
+    ['a dynamic import read', "(await import('@tinnox/db/migrate')).seedStatement();"],
+    ['an element read', "import * as m from '@tinnox/db/migrate'; m['seedStatement']();"],
+    ['a re-export', "export { seedStatement } from '@tinnox/db/migrate';"],
+    ['a wildcard re-export', "export * from '@tinnox/db/migrate';"],
+    ['a wildcard namespace re-export', "export * as m from '@tinnox/db/migrate';"],
+    ['a relative import in packages/db', "import { seedStatement } from './migrate.ts';"],
+  ])('sees the seed’s statement taken as %s', (_name, code) => {
+    expect(takesSeedStatement('scripts/lib/fixture.ts', code)).toBe(true);
+  });
+
+  it('leaves the name in comments and messages, and the entry’s other exports', () => {
+    const code = [
+      '// the seed passes seedStatement() of @tinnox/db/migrate',
+      "import { changeOrgAsMigrator, newOrgId } from '@tinnox/db/migrate';",
+      "const { asDefiner } = await import('@tinnox/db/migrate');",
+      "export { connectMigrator } from '@tinnox/db/migrate';",
+      'throw new Error(`only the seed takes seedStatement() of @tinnox/db/migrate`);',
+      "const why = 'seedStatement is the development seed’s';",
+    ].join('\n');
+    expect(takesSeedStatement('scripts/lib/fixture.ts', code)).toBe(false);
+  });
+
+  it('gives the seed’s statement to the seed alone: only scripts/seed.ts names seedStatement', () => {
+    const listed = spawnSync(
+      'git',
+      ['-C', repoRoot, 'ls-files', '-z', '--cached', '--others', '--exclude-standard'],
+      { encoding: 'utf8' },
+    );
+    if (listed.status !== 0) throw new Error(`git ls-files failed: ${listed.stderr}`);
+    const taking = listed.stdout
+      .split('\0')
+      .filter((path) => /\.(ts|tsx|js|mjs|cjs)$/.test(path))
+      .filter((path) => !/(^|\/)tests?\/|\.test(-support)?\.tsx?$/.test(path))
+      // Where it is defined.
+      .filter((path) => path !== 'packages/db/src/migrate.ts')
+      .filter((path) => existsSync(join(repoRoot, path)))
+      .filter((path) => takesSeedStatement(path, source(path)));
+    expect(
+      taking,
+      "seedStatement is the development seed's statement, the one changeOrgAsMigrator lets write rows with no audit row (development_seed). A provisioning command passes provisionStatement(command) from scripts/lib/provision.ts and returns the audit events of what it changed; another tool gets a table of statements of its own, decided in its pull request (STATEMENT_ISSUERS in eslint.config.js). Import the other exports of @tinnox/db/migrate by name, not with export *",
+    ).toEqual(['scripts/seed.ts']);
   });
 
   const STATEMENT_CAST =

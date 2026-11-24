@@ -11,9 +11,15 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { inviteReference } from '@tinnox/contracts';
-import { withOrg, withoutOrg, type OrgId } from '@tinnox/db';
-import { asDefiner, connectMigrator, type MigratorPool } from '@tinnox/db/migrate';
-import { removeAuditFault, whileAuditFails } from '@tinnox/db/testing';
+import { unaudited, withOrg, withoutOrg, type OrgId } from '@tinnox/db';
+import {
+  asDefiner,
+  changeOrgAsMigrator,
+  connectMigrator,
+  seedStatement,
+  type MigratorPool,
+} from '@tinnox/db/migrate';
+import { removeAuditFault, testOrgId, whileAuditFails } from '@tinnox/db/testing';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { IdpAccount, IdpDirectory } from '../../scripts/lib/idp.ts';
@@ -24,6 +30,7 @@ import {
   mfaReset,
   orgCreate,
   pending,
+  provisionStatement,
   restoreOwner,
   setName,
   type ProvisionAuditAction,
@@ -1312,6 +1319,29 @@ describe('provision-member, every command', () => {
         [...failed].sort(),
         `every audit action PROVISION_COMMANDS declares for ${command} needs a run in AUDIT_FAILURE_CASES that writes it, and a run writes nothing the table does not declare (scripts/lib/provision.ts)`,
       ).toEqual([...declared].sort());
+    },
+  );
+
+  // Step 20: only the development seed writes rows with no audit row under them, and only under
+  // seedStatement(); no command's statement lets a change say so.
+  it.each(Object.keys(PROVISION_COMMANDS) as ProvisionCommand[])(
+    '%s cannot leave its writes unaudited as the development seed (step 20 ruling, DEC-38)',
+    async (command) => {
+      // An organisation with no rows: nothing is written, and the refusal comes before COMMIT.
+      const orgId = testOrgId(randomUUID());
+      await expect(
+        changeOrgAsMigrator(pool, orgId, provisionStatement(command), () =>
+          Promise.resolve({ value: 'provisioned', audit: unaudited('development_seed') }),
+        ),
+      ).rejects.toThrow(
+        `changeOrg: the change returned unaudited('development_seed'), but the audits of ${command} in PROVISION_COMMANDS (scripts/lib/provision.ts) does not grant it.`,
+      );
+      // The seed's own statement, on the same pool and organisation, may say it.
+      await expect(
+        changeOrgAsMigrator(pool, orgId, seedStatement(), () =>
+          Promise.resolve({ value: 'seeded', audit: unaudited('development_seed') }),
+        ),
+      ).resolves.toBe('seeded');
     },
   );
 
