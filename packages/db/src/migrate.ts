@@ -24,8 +24,10 @@ import {
 } from './schema-invariants.ts';
 import type { OrgId, OrgTx } from './tx.ts';
 
-// The definer switch belongs to this entry too: it needs the MigratorPool (D25).
-export { asDefiner, type DefinerTx } from './definer.ts';
+// The definer switch belongs to this entry too: it needs the MigratorPool (D25). So does
+// auditedInSql, for the one statement that writes its own audit rows (provisioning's `pending`):
+// it is exported here and nowhere else, so the API cannot give it (AG-1.10).
+export { asDefiner, auditedInSql, type DefinerTx } from './definer.ts';
 
 /**
  * The id of an organisation that is being created: a fresh one for provisioning's org-create,

@@ -19,7 +19,7 @@ export async function lockOrgMembership(tx: OrgTx): Promise<void> {
   );
   if (rows[0]?.in_org !== true) {
     throw new Error(
-      'lockOrgMembership requires an organisation context: in an API route, pass { lockMembership: true } to changeAsOperator(ctx, request, fn, options) from apps/api/src/auth/permissions.ts; elsewhere, call it on the tx of changeOrg, or of enterOrg inside withResolvedOrg',
+      'lockOrgMembership requires an organisation context: in an API route, pass { lockMembership: true } to changeAsOperator(ctx, request, fn, options) from apps/api/src/auth/permissions.ts; in an offline tool, call it first on the tx of changeOrgAsMigrator (@tinnox/db/migrate), or on the one enterOrg returns inside changePreOrg',
     );
   }
 }

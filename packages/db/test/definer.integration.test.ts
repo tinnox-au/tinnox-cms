@@ -181,7 +181,7 @@ describe('asDefiner (D25)', () => {
 
   it('refuses a tx that was not opened on the pool it is given, before it sends anything', async () => {
     const NOT_THIS_POOL =
-      'asDefiner needs the tx of a transaction opened on the same MigratorPool: call it inside the callback of withOrg, withoutOrg or withResolvedOrg that was given this pool, with the tx that callback received';
+      'asDefiner needs the tx of a transaction opened on the same MigratorPool: call it inside the callback of changePreOrg (@tinnox/db) or changeOrgAsMigrator (@tinnox/db/migrate) that was given this pool, with the tx that callback received or the one its enterOrg returned';
     // The API's pool: the database would refuse the switch too, but this refusal comes first.
     await expect(withoutOrg(app, (tx) => asDefiner(migrator, tx, currentUser))).rejects.toThrow(
       NOT_THIS_POOL,

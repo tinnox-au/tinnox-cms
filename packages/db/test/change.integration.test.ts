@@ -5,6 +5,7 @@
  * `unaudited` that is not true) is caught by the audit-debt guard. The statements and the types
  * are in ../src/change.test.ts and ../src/tx.test.ts.
  */
+import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -25,7 +26,13 @@ import {
   type Pool,
   type WritePermit,
 } from '../src/index.ts';
-import { changeOrgAsMigrator, connectMigrator, type MigratorPool } from '../src/migrate.ts';
+import {
+  asDefiner,
+  auditedInSql,
+  changeOrgAsMigrator,
+  connectMigrator,
+  type MigratorPool,
+} from '../src/migrate.ts';
 import {
   AUDIT_DEBT_SQLSTATE,
   ensureAuditDebtGuard,
@@ -384,6 +391,122 @@ describe('changeOrgAsMigrator against the database (AG-3.1, SCR-34)', () => {
       folders: 0,
       audited: [],
     });
+  });
+});
+
+// Adoption plan step 20, D25: provisioning's `pending` expires invites and writes their audit
+// rows in one statement, as tinnox_definer. Its change returns auditedInSql(result, action) in
+// place of events, and the wrapper takes that only for a statement that did write a row: the
+// count is the server's own answer to the statement (INSERT 0 n), since neither role can read
+// audit_event across organisations to count again.
+describe('auditedInSql against the database (D25)', () => {
+  let pool: MigratorPool;
+  const PENDING = issueAuditStatement({
+    stated: { actions: ['invite.cancel'] },
+    statedIn: 'the audits of pending in PROVISION_COMMANDS (test)',
+  });
+  /** The shape of provisioning's expiry, for one invite: its row and its audit row together. */
+  const EXPIRE_ONE = `
+    WITH closed AS (
+      UPDATE public.member_invite i SET status = 'expired'
+      WHERE i.id = $1 AND i.status = 'pending'
+      RETURNING i.id, i.org_id, i.role
+    )
+    INSERT INTO public.audit_event (org_id, actor_type, actor_id, action, object_type, object_id, result, detail)
+    SELECT closed.org_id, 'system', NULL, 'invite.cancel', 'invite', closed.id::text, 'success',
+           jsonb_build_object('role', closed.role, 'reason', 'expired', 'executedBy', $2::text)
+    FROM closed`;
+
+  beforeAll(async () => {
+    pool = await connectMigrator(migratorUrl(), { applicationName: 'tinnox-test-audited-in-sql' });
+  });
+  afterAll(async () => {
+    await pool.end();
+  });
+
+  const invite = (name: string): Promise<string> =>
+    withOrg(pool, org.orgId, async (tx) => {
+      const { rows } = await tx.query<{ id: string }>(
+        `INSERT INTO member_invite (org_id, role, name, email, invited_by, expires_at)
+         VALUES (app_org_id(), 'viewer', $1, $2, $3, now() + interval '1 day') RETURNING id`,
+        [name, `${name.toLowerCase().replaceAll(' ', '.')}@example.com`, org.membershipId],
+      );
+      const id = rows[0]?.id;
+      if (id === undefined) throw new Error('invite insert returned no row');
+      return id;
+    });
+
+  /** What the organisation's own member would see of the invite and its audit rows. */
+  const inviteState = (id: string): Promise<{ status: string | undefined; audited: string[] }> =>
+    withOrg(testSql, org.orgId, async (tx) => {
+      const found = await tx.query<{ status: string }>(
+        'SELECT status FROM member_invite WHERE id = $1',
+        [id],
+      );
+      const audit = await tx.query<{ action: string }>(
+        `SELECT action FROM audit_event WHERE object_type = 'invite' AND object_id = $1 ORDER BY id`,
+        [id],
+      );
+      return { status: found.rows[0]?.status, audited: audit.rows.map((row) => row.action) };
+    });
+
+  it('takes the rows the statement wrote: the invite closes with one audit row, and the wrapper adds none', async () => {
+    const id = await invite('Lapsed Example');
+    const expired = await changePreOrg(pool, PENDING, async (pre) => {
+      const result = await asDefiner(pool, pre, (definer) =>
+        definer.query(EXPIRE_ONE, [id, 'sam.staff']),
+      );
+      return { value: result.rowCount, audit: auditedInSql(result, 'invite.cancel') };
+    });
+    expect(expired).toBe(1);
+    expect(await inviteState(id)).toEqual({ status: 'expired', audited: ['invite.cancel'] });
+  });
+
+  it('cannot be used to skip an audit row: a statement that wrote none is refused, and nothing commits', async () => {
+    const id = await invite('Kept Example');
+    const error = await rejection(
+      changePreOrg(pool, PENDING, async (pre, enterOrg) => {
+        // The statement finds no invite under this id, so it inserts no audit row...
+        const result = await asDefiner(pool, pre, (definer) =>
+          definer.query(EXPIRE_ONE, [randomUUID(), 'sam.staff']),
+        );
+        // ...and the change closes a real invite all the same, with no event of its own.
+        const tx = await enterOrg(org.orgId);
+        await tx.query(
+          "UPDATE member_invite SET status = 'cancelled' WHERE id = $1 AND org_id = app_org_id()",
+          [id],
+        );
+        return { value: undefined, audit: auditedInSql(result, 'invite.cancel') };
+      }),
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(
+      /^changePreOrg: the change returned auditedInSql\(result, 'invite\.cancel'\), but that statement wrote no audit row: the database counted 0 inserted\./,
+    );
+    expect(await inviteState(id)).toEqual({ status: 'pending', audited: [] });
+  });
+
+  it('is held to the statement of its command like any other audit row', async () => {
+    const id = await invite('Unstated Example');
+    const error = await rejection(
+      changePreOrg(
+        pool,
+        issueAuditStatement({
+          stated: { actions: ['membership.create'] },
+          statedIn: termsOfStatement('a test', PENDING).statedIn,
+        }),
+        async (pre) => {
+          const result = await asDefiner(pool, pre, (definer) =>
+            definer.query(EXPIRE_ONE, [id, 'sam.staff']),
+          );
+          return { value: undefined, audit: auditedInSql(result, 'invite.cancel') };
+        },
+      ),
+    );
+    expect((error as Error).message).toMatch(
+      /^changePreOrg: the change recorded invite\.cancel, which the audits of pending in PROVISION_COMMANDS \(test\) does not state: it states membership\.create\./,
+    );
+    expect(await inviteState(id)).toEqual({ status: 'pending', audited: [] });
   });
 });
 

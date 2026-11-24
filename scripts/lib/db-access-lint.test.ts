@@ -587,7 +587,6 @@ describe('the unscoped helpers (AG-2.2)', { timeout: 30_000 }, () => {
     'apps/api/src/media/pipeline.ts',
     'apps/api/src/routes/auth.ts',
     'apps/api/src/routes/player.ts',
-    'scripts/lib/provision.ts',
   ];
 
   it.each([
@@ -601,6 +600,8 @@ describe('the unscoped helpers (AG-2.2)', { timeout: 30_000 }, () => {
     'apps/api/scripts/fixture.mjs',
     'scripts/seed.ts',
     'scripts/provision-member.ts',
+    // Left the list in step 20: `pending` runs in changePreOrg, as the other commands do.
+    'scripts/lib/provision.ts',
     'scripts/lib/fixture.ts',
     'scripts/fixture.mjs',
   ])('are refused in %s', async (path) => {
@@ -653,7 +654,7 @@ describe('the unscoped helpers (AG-2.2)', { timeout: 30_000 }, () => {
     },
   );
 
-  it('lists seven files, each with its reason', async () => {
+  it('lists six files, each with its reason', async () => {
     const list = await exported('UNSCOPED_HELPER_FILES');
     expect(Object.keys(list).sort()).toEqual(ALLOW_LIST);
     for (const [file, reason] of Object.entries(list)) {
@@ -661,7 +662,7 @@ describe('the unscoped helpers (AG-2.2)', { timeout: 30_000 }, () => {
         true,
       );
     }
-    // AG-2.2: three of the seven are not "before the organisation is known", and say so.
+    // AG-2.2: three of the six are not "before the organisation is known", and say so.
     const acrossAll = Object.entries(list)
       .filter(([, reason]) => String(reason).startsWith('not before the organisation is known'))
       .map(([file]) => file);
@@ -725,15 +726,14 @@ describe('newOrgId (D25)', { timeout: 30_000 }, () => {
     },
   );
 
-  it('keeps the other import rules of the two tools: the seed still gets no unscoped helper', async () => {
+  it('keeps the other import rules of the two tools: neither gets an unscoped helper', async () => {
     const code = `${CODE} import { poolAsTx, withOrg } from '@tinnox/db'; import pg from 'pg';`;
-    expect(await flagged('scripts/seed.ts', code, IMPORTS)).toEqual([
-      expect.stringMatching(/withoutOrg and poolAsTx run without an organisation/),
-      expect.stringMatching(/^'pg' import is restricted/),
-    ]);
-    expect(await flagged('scripts/lib/provision.ts', code, IMPORTS)).toEqual([
-      expect.stringMatching(/^'pg' import is restricted/),
-    ]);
+    for (const path of MAKERS) {
+      expect(await flagged(path, code, IMPORTS), path).toEqual([
+        expect.stringMatching(/withoutOrg and poolAsTx run without an organisation/),
+        expect.stringMatching(/^'pg' import is restricted/),
+      ]);
+    }
   });
 
   it('the API cannot import the entry it comes from at all', async () => {

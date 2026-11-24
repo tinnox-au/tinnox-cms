@@ -25,6 +25,11 @@
  * Every permit carries what its route, job or tool says it audits, and the change is refused
  * before COMMIT when it recorded an action that statement does not name.
  *
+ * One change writes its audit rows in its own SQL, in the statement that makes the change:
+ * provisioning's `pending` (D25). It returns `auditedInSql(result, action)` of
+ * '@tinnox/db/migrate', which the API cannot import, and the change is refused before COMMIT
+ * when that statement wrote no row (./sql-audit.ts, ./definer.ts).
+ *
  * `changePreOrg` takes no permit: its `enterOrg` gives a handle that writes for any `OrgId`,
  * `operatorOf(request).orgId` included. Lint holds it instead: only the files of
  * PRE_ORG_CHANGE_FILES in eslint.config.js, whose transactions start before the organisation is
@@ -50,7 +55,8 @@ import type {
 import { auditRowsOn } from './audit-note.ts';
 import type { Pool } from './pool.ts';
 import { auditScoped, auditUnscoped, type AuditInput } from './sec.ts';
-import { withOrg, withResolvedOrg, type OrgId, type OrgTx, type PreOrgTx } from './tx.ts';
+import { isAuditedInSql, receiptOf, type AuditedInSql } from './sql-audit.ts';
+import { withOrg, withResolvedOrg, type OrgId, type OrgTx, type PreOrgTx, type Tx } from './tx.ts';
 
 /** Marks what `unaudited` returns. Not exported, so only `unaudited` makes one. */
 const unauditedBecause: unique symbol = Symbol('unaudited');
@@ -123,9 +129,11 @@ export function legacyAudit(): LegacyAudit {
 
 /**
  * The audit rows of a change: one event, several, or `unaudited(reason)`. An empty list is
- * refused when the change runs, because it gives no reason.
+ * refused when the change runs, because it gives no reason. An offline tool whose one statement
+ * wrote the change and its audit rows together gives `auditedInSql(result, action)` of
+ * '@tinnox/db/migrate' instead (D25): the wrapper then writes nothing and checks the count.
  */
-export type Audit = AuditInput | readonly AuditInput[] | Unaudited | LegacyAudit;
+export type Audit = AuditInput | readonly AuditInput[] | Unaudited | LegacyAudit | AuditedInSql;
 
 /** What the callback of `changeOrg` and `changePreOrg` returns. */
 export interface Change<T> {
@@ -259,19 +267,35 @@ const describeStated = (stated: StatedAudit): string => {
 
 /**
  * Writes the audit rows a change returned and checks what its transaction recorded, before
- * COMMIT. Throws to roll the change back. `rows` gives every action written on the
- * transaction: the ones `write` just wrote, and any the callback wrote by hand.
+ * COMMIT. Throws to roll the change back. `handles` are the handles of the transaction: the
+ * audit writers note on them every action written, the ones `write` just wrote and any the
+ * callback wrote by hand.
  */
 async function record<T>(
   opener: string,
   change: Change<T>,
   write: (event: AuditInput) => Promise<void>,
-  rows: () => readonly AuditAction[],
+  handles: readonly Tx[],
   held: StatementTerms,
 ): Promise<T> {
   const { audit } = change;
   const reason = isUnaudited(audit) ? audit[unauditedBecause] : undefined;
-  if (!isUnaudited(audit) && !isLegacy(audit)) {
+  // D25: the change's own statement wrote its audit rows. Nothing is written for it here, and
+  // it is taken only for what the database counted: at least one row, on this transaction.
+  const inSql = isAuditedInSql(audit) ? receiptOf(audit) : undefined;
+  if (inSql !== undefined) {
+    if (!handles.some((handle) => handle === inSql.on)) {
+      throw new Error(
+        `${opener}: the change returned auditedInSql(result, '${inSql.action}') for a statement that ran on another transaction, so its audit rows are not this change's. Send the statement inside this change, on the handle of asDefiner(pool, tx, work) (@tinnox/db/migrate) given the tx of this callback, and pass its result. Nothing was committed.`,
+      );
+    }
+    if (inSql.rows < 1) {
+      throw new Error(
+        `${opener}: the change returned auditedInSql(result, '${inSql.action}'), but that statement wrote no audit row: the database counted ${String(inSql.rows)} inserted. A run that found nothing to change returns { value, audit: unaudited('nothing_changed') }; a change whose statement does not write its own audit rows returns its events as { value, audit }. Nothing was committed.`,
+      );
+    }
+  }
+  if (!isUnaudited(audit) && !isLegacy(audit) && !isAuditedInSql(audit)) {
     const events = 'action' in audit ? [audit] : audit;
     if (events.length === 0) {
       throw new Error(
@@ -281,7 +305,12 @@ async function record<T>(
     for (const event of events) await write(event);
   }
 
-  const written = rows();
+  const written = [
+    ...handles.flatMap((handle) => auditRowsOn(handle)),
+    // Held to the statement like a row the wrapper wrote: a command that does not name the
+    // action cannot give it this way either.
+    ...(inSql === undefined ? [] : [inSql.action]),
+  ];
   if (reason !== undefined && written.length > 0) {
     throw new Error(
       `${opener}: the change returned unaudited('${reason}'), yet its callback wrote audit rows itself (${written.join(', ')}). Return those events as { value, audit } and let ${opener} write them, or return no unaudited(...). Nothing was committed.`,
@@ -340,13 +369,7 @@ export async function changeOrg<T, Granted>(
     async (tx) => {
       const granted = await held.recheck(tx);
       const change = await fn(tx, granted);
-      return record(
-        'changeOrg',
-        change,
-        (event) => auditScoped(tx, event),
-        () => auditRowsOn(tx),
-        held,
-      );
+      return record('changeOrg', change, (event) => auditScoped(tx, event), [tx], held);
     },
     'changeOrg',
   );
@@ -388,7 +411,7 @@ export async function changePreOrg<T>(
         'changePreOrg',
         change,
         (event) => (org === undefined ? auditUnscoped(pre, event) : auditScoped(org, event)),
-        () => [pre, ...entered].flatMap((tx) => auditRowsOn(tx)),
+        [pre, ...entered],
         held,
       );
     },

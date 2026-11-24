@@ -31,7 +31,7 @@ import {
   type Unaudited,
   type WritePermit,
 } from './index.ts';
-import { changeOrgAsMigrator, type MigratorPool } from './migrate.ts';
+import { asDefiner, auditedInSql, changeOrgAsMigrator, type MigratorPool } from './migrate.ts';
 import { testOrgId } from './testing.ts';
 
 const ORG = testOrgId('00000000-0000-4000-8000-000000000001');
@@ -726,5 +726,154 @@ describe('a change by an offline tool needs the migrator connection (SCR-34)', (
       'changeOrgAsMigrator requires the pool that connectMigrator returned: call connectMigrator(connectionString, { applicationName }) from @tinnox/db/migrate and pass that pool. The API has no migrator connection: an operator route calls changeAsOperator(ctx, request, fn) (apps/api/src/auth/permissions.ts)',
     );
     expect(statements).toEqual([]);
+  });
+});
+
+// Adoption plan step 20, D25: provisioning's `pending` expires invites and writes their audit
+// rows in one statement, so its change returns the answer to that statement in place of events.
+// The database's half is in packages/db/test/change.integration.test.ts.
+describe("the audit rows a change's own statement wrote (D25)", () => {
+  const EXPIRY =
+    "WITH closed AS (UPDATE public.member_invite SET status = 'expired' RETURNING id, org_id) INSERT INTO public.audit_event (org_id, action, object_id) SELECT org_id, 'invite.cancel', id FROM closed";
+  const PENDING = issueAuditStatement({
+    stated: { actions: ['invite.cancel'] },
+    statedIn: 'the audits of pending in PROVISION_COMMANDS (fixture)',
+  });
+
+  /** A pool whose connection answers each statement with a command tag, as the server does. */
+  function answering(tags: Readonly<Record<string, { command: string; rowCount: number }>>) {
+    const statements: string[] = [];
+    const client = {
+      on: () => undefined,
+      removeListener: () => undefined,
+      query: (text: string) => {
+        statements.push(text);
+        return Promise.resolve({ rows: [], command: 'SELECT', rowCount: 0, ...tags[text] });
+      },
+      release: () => undefined,
+    };
+    const pool = { connect: () => Promise.resolve(client) } as unknown as Pool;
+    return { pool, statements };
+  }
+
+  /** `pending` as provisioning runs it: the expiry as the definer, then what it answered. */
+  const expire = (pool: Pool, statement: AuditStatement = PENDING): Promise<number | null> =>
+    changePreOrg(pool, statement, async (pre) => {
+      const expired = await asDefiner(pool as never, pre, (definer) => definer.query(EXPIRY));
+      return { value: expired.rowCount, audit: auditedInSql(expired, 'invite.cancel') };
+    });
+
+  it('commits with the rows the statement wrote, and writes none of its own', async () => {
+    const { pool, statements } = answering({ [EXPIRY]: { command: 'INSERT', rowCount: 2 } });
+    expect(await expire(pool)).toBe(2);
+    expect(statements).toEqual([
+      'BEGIN',
+      'SET LOCAL ROLE tinnox_definer',
+      EXPIRY,
+      'RESET ROLE',
+      'COMMIT',
+    ]);
+  });
+
+  it('is taken by changeOrg too, for the transaction of the handle the definer was given', async () => {
+    const { pool, statements } = answering({ [EXPIRY]: { command: 'INSERT', rowCount: 1 } });
+    const permit = issueWritePermit({
+      recheck: () => Promise.resolve(),
+      stated: { actions: ['invite.cancel'] },
+      statedIn: STATED_IN,
+    });
+    await changeOrg(pool, ORG, permit, async (tx) => {
+      const expired = await asDefiner(pool as never, tx, (definer) => definer.query(EXPIRY));
+      return { value: undefined, audit: auditedInSql(expired, 'invite.cancel') };
+    });
+    expect(statements.at(-1)).toBe('COMMIT');
+    expect(statements.filter((text) => text.includes('audit_event'))).toEqual([EXPIRY]);
+  });
+
+  it('refuses a statement that wrote no audit row, and commits nothing', async () => {
+    const { pool, statements } = answering({ [EXPIRY]: { command: 'INSERT', rowCount: 0 } });
+    await expect(expire(pool)).rejects.toThrow(
+      "changePreOrg: the change returned auditedInSql(result, 'invite.cancel'), but that statement wrote no audit row: the database counted 0 inserted. A run that found nothing to change returns { value, audit: unaudited('nothing_changed') }; a change whose statement does not write its own audit rows returns its events as { value, audit }. Nothing was committed.",
+    );
+    expect(statements.at(-1)).toBe('ROLLBACK');
+  });
+
+  it('goes by what the database answered, not by the result the caller holds', async () => {
+    const { pool, statements } = answering({ [EXPIRY]: { command: 'INSERT', rowCount: 0 } });
+    await expect(
+      changePreOrg(pool, PENDING, async (pre) => {
+        const expired = await asDefiner(pool as never, pre, (definer) => definer.query(EXPIRY));
+        expired.rowCount = 3;
+        return { value: undefined, audit: auditedInSql(expired, 'invite.cancel') };
+      }),
+    ).rejects.toThrow(/that statement wrote no audit row: the database counted 0 inserted/);
+    expect(statements.at(-1)).toBe('ROLLBACK');
+  });
+
+  it('refuses it under a command that does not name the action', async () => {
+    const { pool, statements } = answering({ [EXPIRY]: { command: 'INSERT', rowCount: 2 } });
+    const fulfil = issueAuditStatement({
+      stated: { actions: ['membership.create'] },
+      statedIn: 'the audits of fulfil in PROVISION_COMMANDS (fixture)',
+    });
+    await expect(expire(pool, fulfil)).rejects.toThrow(
+      /^changePreOrg: the change recorded invite\.cancel, which the audits of fulfil in PROVISION_COMMANDS \(fixture\) does not state: it states membership\.create\./,
+    );
+    expect(statements.at(-1)).toBe('ROLLBACK');
+  });
+
+  it('refuses the answer to a statement that ran on another transaction', async () => {
+    const { pool, statements } = answering({ [EXPIRY]: { command: 'INSERT', rowCount: 2 } });
+    const earlier = await changePreOrg(pool, PENDING, async (pre) => {
+      const expired = await asDefiner(pool as never, pre, (definer) => definer.query(EXPIRY));
+      const audit = auditedInSql(expired, 'invite.cancel');
+      return { value: audit, audit };
+    });
+    statements.length = 0;
+    await expect(
+      changePreOrg(pool, PENDING, () => Promise.resolve({ value: undefined, audit: earlier })),
+    ).rejects.toThrow(
+      /^changePreOrg: the change returned auditedInSql\(result, 'invite\.cancel'\) for a statement that ran on another transaction, so its audit rows are not this change's\./,
+    );
+    expect(statements).toEqual(['BEGIN', 'ROLLBACK']);
+  });
+
+  it('is made only from the result a definer handle gave back, of an INSERT into audit_event that carries the action', async () => {
+    const OTHER_TABLE = "INSERT INTO public.folder (name) VALUES ('invite.cancel')";
+    const OTHER_ACTION = EXPIRY.replace("'invite.cancel'", "'invite.create'");
+    const { pool } = answering({
+      [EXPIRY]: { command: 'INSERT', rowCount: 2 },
+      [OTHER_TABLE]: { command: 'INSERT', rowCount: 1 },
+      [OTHER_ACTION]: { command: 'INSERT', rowCount: 1 },
+      // The text of an insert, answered as something else.
+      [`${EXPIRY} -- `]: { command: 'UPDATE', rowCount: 2 },
+    });
+    const NOT_SENT =
+      'auditedInSql takes the result of the statement that wrote the audit rows, as definer.query returned it inside asDefiner(pool, tx, work): pass that result itself, not a copy and not the result of another handle. A change whose audit rows no statement of its own writes returns its events as { value, audit } and lets the wrapper write them';
+    const NOT_AN_AUDIT_INSERT =
+      /^auditedInSql\('invite\.cancel'\): the statement of this result does not write audit rows of invite\.cancel\. It must be an INSERT that names public\.audit_event as its target and carries 'invite\.cancel' as a literal \(the database answered (INSERT|UPDATE|SELECT)\)\./;
+    await changePreOrg(pool, PENDING, async (pre) => {
+      await asDefiner(pool as never, pre, async (definer) => {
+        const expired = await definer.query(EXPIRY);
+        expect(() => auditedInSql({ ...expired }, 'invite.cancel')).toThrow(NOT_SENT);
+        for (const text of ['SELECT 1', OTHER_TABLE, OTHER_ACTION, `${EXPIRY} -- `]) {
+          const result = await definer.query(text);
+          expect(() => auditedInSql(result, 'invite.cancel'), text).toThrow(NOT_AN_AUDIT_INSERT);
+        }
+      });
+      return { value: undefined, audit: unaudited('nothing_changed') };
+    });
+  });
+
+  it('does not type-check as something the runtime entry makes: no event, no reason', () => {
+    const cases = (audit: ReturnType<typeof auditedInSql>): void => {
+      const taken: Audit = audit;
+      // @ts-expect-error it is not an event: the wrapper writes nothing for it
+      const event: AuditInput = audit;
+      // @ts-expect-error nor a reason: rows were written
+      const reason: Unaudited = audit;
+      expect([taken, event, reason]).toHaveLength(3);
+    };
+    expect(cases).toBeTypeOf('function');
   });
 });

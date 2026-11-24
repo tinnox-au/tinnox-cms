@@ -12,6 +12,7 @@ import * as root from './index.ts';
 import * as migrate from './migrate.ts';
 import * as orgId from './org-id.ts';
 import * as preOrg from './pre-org.ts';
+import * as sqlAudit from './sql-audit.ts';
 import * as testing from './testing.ts';
 
 const SRC = dirname(fileURLToPath(import.meta.url));
@@ -82,6 +83,7 @@ describe('the entries of @tinnox/db (AG-1.10)', () => {
     expect(Object.keys(migrate)).toEqual(
       expect.arrayContaining([
         'asDefiner',
+        'auditedInSql',
         'changeOrgAsMigrator',
         'connectMigrator',
         'newOrgId',
@@ -169,6 +171,34 @@ describe('the entries of @tinnox/db (AG-1.10)', () => {
       ),
       'a statement is read from the table of its route, job or command (STATEMENT_ISSUERS in eslint.config.js); this package only checks the one it is given. src/change.ts defines the maker',
     ).toEqual(['change.ts']);
+  });
+
+  // D25 (adoption plan step 20): one statement writes its own audit rows, provisioning's
+  // `pending`, and its change says so with auditedInSql in place of its events. That value
+  // skips the wrapper's own audit rows, so only the definer switch makes it, from what the
+  // database answered, and only the migrator entry hands it out.
+  it('only the definer switch says that a statement wrote its own audit rows', () => {
+    const sources = readdirSync(SRC).filter(
+      (name) => name.endsWith('.ts') && !name.endsWith('.test.ts'),
+    );
+    expect(
+      sources
+        .filter((name) => imported(join(SRC, name)).includes(join(SRC, 'sql-audit.ts')))
+        .sort(),
+      'src/sql-audit.ts makes the value a change returns when its own statement wrote its audit rows. Only auditedInSql of src/definer.ts makes one, from the result of a statement it sent, and src/change.ts reads it; a change returns its events as { value, audit }',
+    ).toEqual(['change.ts', 'definer.ts']);
+    expect(
+      sources.filter((name) => /\bissueSqlAudit\(/.test(readFileSync(join(SRC, name), 'utf8'))),
+      'issueSqlAudit takes the count on its caller’s word. Only auditedInSql of src/definer.ts calls it, with what the database answered for the statement; src/sql-audit.ts defines it',
+    ).toEqual(['definer.ts', 'sql-audit.ts']);
+
+    const fromRoot = Object.keys(root);
+    for (const name of [...Object.keys(sqlAudit), 'auditedInSql']) {
+      expect(fromRoot, `${name} must not be exported by the runtime entry`).not.toContain(name);
+    }
+    expect(Object.keys(sqlAudit).sort()).toEqual(['isAuditedInSql', 'issueSqlAudit', 'receiptOf']);
+    expect(Object.keys(migrate)).toContain('auditedInSql');
+    expect(Object.keys(migrate)).not.toContain('issueSqlAudit');
   });
 
   it('the runtime entry has no MigratorPool type either (checked by npm run typecheck)', () => {

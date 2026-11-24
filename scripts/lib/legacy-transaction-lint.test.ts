@@ -87,7 +87,6 @@ const source = (path: string): string => readFileSync(join(repoRoot, path), 'utf
 const FOUND_BY_STEP_19 = [
   'apps/api/src/auth/permissions.ts',
   'apps/api/src/db-helpers.ts',
-  'scripts/lib/provision.ts',
   'scripts/seed.ts',
 ];
 
@@ -125,6 +124,8 @@ describe('the legacy transaction API (AG-3.1, SCR-34)', { timeout: 30_000 }, () 
     'apps/api/src/media/rows.ts',
     // D25: the offline tools, with no exception.
     'scripts/provision-member.ts',
+    // Left the list in step 20: its commands return { value, audit }.
+    'scripts/lib/provision.ts',
     'scripts/migrate.ts',
     'scripts/lib/fixture.ts',
     'scripts/fixture.ts',

@@ -682,6 +682,29 @@ describe('provision-member pending', () => {
       ),
     ).toBe(true);
   });
+
+  // Adoption plan step 20: the expiry statement writes its own audit rows, and a run whose
+  // statement wrote none says that nothing changed. It still commits and lists.
+  it('with nothing past its date, expires nothing, writes no audit row and lists the rest', async () => {
+    const org = await createOrg('Provision pending, nothing due');
+    const waiting = await invite(org, {
+      name: 'Robin Example',
+      email: 'robin@example.com',
+      invitedBy: org.membershipId,
+    });
+    // Whatever earlier cases left past its date goes with this run.
+    await pending(pool, directory(), { executedBy: STAFF });
+
+    const result = await pending(pool, directory(), { executedBy: STAFF });
+
+    expect(result.expired).toBe(0);
+    expect(result.lines[0]).toBe(
+      'Expired 0 invite(s); their names and e-mail addresses are deleted.',
+    );
+    expect(result.invites.map((item) => item.id)).toContain(waiting);
+    expect(await inviteRow(org, waiting)).toMatchObject({ status: 'pending' });
+    expect(await audits(org.orgId, 'invite.cancel')).toEqual([]);
+  });
 });
 
 describe('provision-member set-name and mfa-reset', () => {
