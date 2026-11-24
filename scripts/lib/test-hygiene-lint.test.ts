@@ -222,3 +222,86 @@ describe('module mocks in integration and e2e tests (OTH-13)', () => {
     );
   });
 });
+
+const RANGE_STATUS =
+  /^Assert the exact status: .*expectError\(response, 'not_found'\).*\(RCX-03\)\.$/;
+
+describe('a status asserted as a range or a negation (RCX-03)', { timeout: 30_000 }, () => {
+  it.each([
+    'expect(response.status).toBeGreaterThanOrEqual(400);',
+    'expect(response.status).toBeLessThan(500);',
+    "expect(saved.status, 'what').toBeGreaterThan(399);",
+    'expect(reply.statusCode).toBeLessThanOrEqual(499);',
+    'expect((await claim(bob, id, code)).status).toBeGreaterThanOrEqual(400);',
+    'expect(response?.status).toBeGreaterThanOrEqual(400);',
+    'expect(again.status()).toBeGreaterThanOrEqual(400);',
+    'expect.soft(response.status).toBeLessThan(500);',
+    'expect(response.status).not.toBe(401);',
+    'expect(response.status).not.toEqual(200);',
+    'expect(await manifestStatus(current)).not.toBe(401);',
+    'expect(status).not.toBe(500);',
+    'expect(responseStatus).toBeGreaterThanOrEqual(400);',
+    'expect(response.status).toBeLessThan(serverError);',
+    'expect(response.status).not.toBeLessThan(400);',
+    'expect(response.status).not.toBeGreaterThanOrEqual(500);',
+    'expect.soft(response.status).not.toBeGreaterThan(499);',
+    'expect(status).not.toBeLessThan(400);',
+    'expect(response.status >= 400).toBe(true);',
+    'expect(500 > reply.statusCode).toBe(true);',
+    'expect.soft(status < 500).toBe(true);',
+    'expect(response.status >= 400 && response.status < 500).toBe(true);',
+    'expect(response.status < 200 || response.status >= 300).toBe(true);',
+    'expect(ok && 400 <= response.status && response.status < 500).toBe(true);',
+    'expect(response.status >= serverError).toBe(true);',
+    'expect(limit > reply.statusCode).toBe(true);',
+    'expect(response.status).toSatisfy((s) => s >= 400);',
+    'expect(status).not.toSatisfy(isServerError);',
+  ])('flags %s', async (code) => {
+    const messages = await flagged('tests/integration/fixture.test.ts', code);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatch(RANGE_STATUS);
+  });
+
+  it.each([
+    'apps/api/test/fixture.integration.test.ts',
+    'apps/api/src/fixture.test.ts',
+    'packages/db/test/fixture.integration.test.ts',
+    'tests/e2e/fixture.spec.ts',
+    'apps/portal/src/fixture.test.tsx',
+    'apps/portal/src/testFrame.test-support.ts',
+    'apps/api/test/support.ts',
+  ])('applies in %s', async (path) => {
+    expect(await flagged(path, 'expect(response.status).not.toBe(401);')).toEqual([
+      expect.stringMatching(RANGE_STATUS),
+    ]);
+  });
+
+  it('leaves exact statuses, other numbers and non-HTTP statuses alone', async () => {
+    const code = [
+      'expect(response.status).toBe(404);',
+      'expect(response.status, what).toBe(200);',
+      'expect([200, 204]).toContain(manifest.status);',
+      'expect(run.status).not.toBe(0);',
+      "expect(status).not.toBe('ready');",
+      "expect(row?.statusKind).not.toBe('in_sync');",
+      'expect(elapsedMs).toBeLessThan(500);',
+      'expect(lifetimeMs).toBeGreaterThan(9 * 60 * 1000);',
+      'expect(response.status).not.toBe(other);',
+      'expect(run.status).toBeGreaterThan(0);',
+      'expect(run.status).not.toBeLessThan(1);',
+      'expect(run.status > 0).toBe(true);',
+      'expect(run.status >= 0 && run.status <= 1).toBe(true);',
+      'expect(status > limit).toBe(true);',
+      'expect(elapsedMs < 500 && done).toBe(true);',
+      'expect(response.status === 404).toBe(true);',
+      'expect(response.status).toBeOneOf([200, 204]);',
+    ].join('\n');
+    expect(await flagged('tests/integration/fixture.test.ts', code)).toEqual([]);
+  });
+
+  it('leaves product code alone', async () => {
+    expect(
+      await flagged('apps/api/src/fixture.ts', 'expect(response.status).toBeLessThan(500);'),
+    ).toEqual([]);
+  });
+});

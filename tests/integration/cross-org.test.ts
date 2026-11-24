@@ -13,16 +13,22 @@ import {
   createLayout,
   createOrg,
   createSchedule,
+  ERROR_STATUS,
+  expectError,
   heartbeatBody,
   layoutZones,
+  newPairing,
   pairPlayer,
   publishImages,
   readyImage,
+  registeredRoutes,
   requestMediaUrls,
   scheduleEvent,
   sendHeartbeat,
+  signedMediaUrl,
   signIn,
   startTestApp,
+  type AnsweredErrorCode,
   type Operator,
   type PairedPlayer,
   type TestApp,
@@ -540,8 +546,8 @@ describe('organisation isolation through the API', () => {
       method: 'PUT',
       json: { name: 'mine', items: [{ mediaId: a.mediaId, durationMs: 5000, fit: null }] },
     });
-    expect(smuggle.status).toBeGreaterThanOrEqual(400);
-    expect(smuggle.status).toBeLessThan(500);
+    const smuggled = await expectError(smuggle, 'validation_failed');
+    expect(JSON.stringify(smuggled.details)).toContain('media_missing');
     const own = (await (await bob.fetch(`/api/playlists/${b.playlistId}`)).json()) as {
       items: { mediaId: string }[];
     };
@@ -679,16 +685,32 @@ describe('organisation isolation through the API', () => {
     // A device credential is not a way into the media route either.
     const withBearer = new URL(good);
     withBearer.searchParams.delete('sig');
-    expect(
-      (await fetch(local(withBearer), { headers: b.player.headers })).status,
-    ).toBeGreaterThanOrEqual(400);
+    await expectError(
+      await fetch(local(withBearer), { headers: b.player.headers }),
+      'url_signature_invalid',
+    );
 
     // Reports about A's display or A's publication are rejected and change nothing.
     const statusBefore = (await (
       await alice.fetch(`/api/displays/${a.displayId}/status`)
     ).json()) as { asOf: string };
-    const forDisplay = await sendHeartbeat(t, b.player, heartbeatBody(a.displayId, 999_999));
-    expect(forDisplay.status).toBeGreaterThanOrEqual(400);
+    // The heartbeat refuses a displayId other than the credential's with 403 `forbidden`, decided
+    // by comparing it with the credential's, with no lookup: another organisation's display, an
+    // id never issued and a second display of the player's own organisation get the same answer
+    // (D1; docs/player-protocol-v1.md section 10 tells a player what to do on it).
+    const ownSecond = await createDisplay(bob, orgB, 'Second isolation display');
+    const refusals = [];
+    for (const displayId of [a.displayId, randomUUID(), ownSecond.id]) {
+      const refused = await sendHeartbeat(t, b.player, heartbeatBody(displayId, 999_999));
+      refusals.push({ ...(await expectError(refused, 'forbidden')), requestId: null });
+    }
+    expect(refusals).toEqual(
+      Array.from({ length: 3 }, () => ({
+        code: 'forbidden',
+        message: 'This credential cannot report for that display.',
+        requestId: null,
+      })),
+    );
     const forPublication = await sendHeartbeat(
       t,
       b.player,
@@ -699,7 +721,7 @@ describe('organisation isolation through the API', () => {
         playerState: 'playing',
       }),
     );
-    expect(forPublication.status).toBeGreaterThanOrEqual(400);
+    await expectError(forPublication, 'conflict');
     const statusAfter = (await (
       await alice.fetch(`/api/displays/${a.displayId}/status`)
     ).json()) as {
@@ -724,6 +746,487 @@ describe('organisation isolation through the API', () => {
     });
     // Strict schemas: an unknown key is a validation error, not a hint.
     expect(withBody.status).toBe(400);
+  });
+
+  /**
+   * D1 (adoption plan step 23): on every route the application registers, another organisation's
+   * id gets exactly the answer of an id that was never issued, apart from the request id. Each
+   * probe sends one id a route takes, in its path or its body, once as an object of organisation
+   * A and once as a fresh UUID, both as organisation B, and names the answer both must be. A
+   * route that takes no such id says why. A route without a case fails the test, so a new route
+   * cannot skip the question.
+   */
+  it('answers another organisation’s id exactly like an id that was never issued, on every route (D1)', async () => {
+    interface Ids {
+      readonly siteId: string;
+      readonly displayId: string;
+      readonly mediaId: string;
+      readonly playlistId: string;
+      readonly publicationId: string;
+      readonly folderId: string;
+      readonly mediaTagId: string;
+      readonly displayTagId: string;
+      readonly appId: string;
+      readonly scheduleId: string;
+      readonly layoutId: string;
+      readonly memberId: string;
+      readonly inviteId: string;
+      readonly recipientId: string;
+      readonly pairingId: string;
+    }
+    // A 400 says only that something in the body was refused: the details it must carry prove the
+    // refusal came from the reference lookup and not from a body that no longer parses.
+    type Detail = Readonly<Record<string, string>>;
+    type Details = readonly Detail[];
+    type Probe = readonly [AnsweredErrorCode, (x: Ids) => Promise<Response>, Details?];
+    type CrossOrgCase = { readonly none: string } | { readonly probes: readonly Probe[] };
+
+    // A code A's operator claimed for a screen of A and no player has collected: the one kind of
+    // pairing session that belongs to an organisation. B polls it with a polling token of its own.
+    const pairingTarget = await createDisplay(alice, orgA, 'Isolation pairing target');
+    const claimedByA = await newPairing(t);
+    const claimed = await alice.fetch(`/api/displays/${pairingTarget.id}/claim`, {
+      method: 'POST',
+      json: { code: claimedByA.code },
+    });
+    expect(claimed.status).toBe(200);
+    const bPolling = await newPairing(t);
+
+    const foreign: Ids = {
+      siteId: orgA.siteId,
+      displayId: a.displayId,
+      mediaId: a.mediaId,
+      playlistId: a.playlistId,
+      publicationId: a.publicationId,
+      folderId: a.folderId,
+      mediaTagId: a.mediaTagId,
+      displayTagId: a.displayTagId,
+      appId: a.appId,
+      scheduleId: a.scheduleId,
+      layoutId: a.layoutId,
+      memberId: orgA.membershipId,
+      inviteId: a.inviteId,
+      recipientId: a.recipientId,
+      pairingId: claimedByA.pairingId,
+    };
+    const unknown = Object.fromEntries(
+      Object.keys(foreign).map((key) => [key, randomUUID()]),
+    ) as unknown as Ids;
+
+    const as = (method: string, path: string, json?: unknown): Promise<Response> =>
+      bob.fetch(path, {
+        method,
+        ...(json === undefined ? {} : { json }),
+        ...(method === 'POST' && (path === '/api/push' || path.endsWith('/publish'))
+          ? { headers: { 'idempotency-key': randomUUID() } }
+          : {}),
+      });
+    const notFound = (send: (x: Ids) => Promise<Response>): Probe => ['not_found', send];
+    const invalid = (details: Details, send: (x: Ids) => Promise<Response>): Probe => [
+      'validation_failed',
+      send,
+      details,
+    ];
+    // The schedule and layout routes name the field whose playlist they did not find.
+    const PLAYLIST_NOT_FOUND = (path: string): Detail => ({
+      path,
+      message: 'The playlist was not found.',
+    });
+    const probes = (...list: Probe[]): CrossOrgCase => ({ probes: list });
+    const none = (reason: string): CrossOrgCase => ({ none: reason });
+    const LIST = 'reads or adds to the caller’s own organisation and names no object';
+    const NO_ORG = 'answers the same for everyone and names no object';
+    const player = b.player;
+
+    const cases: Readonly<Record<string, CrossOrgCase>> = {
+      'GET /api/sites': none(LIST),
+      'GET /api/displays': none(LIST),
+      'POST /api/displays': probes(
+        notFound((x) =>
+          as('POST', '/api/displays', {
+            siteId: x.siteId,
+            name: 'planted',
+            canvas: { width: 640, height: 360 },
+          }),
+        ),
+      ),
+      'GET /api/displays/status': none(LIST),
+      'GET /api/displays/:id': probes(notFound((x) => as('GET', `/api/displays/${x.displayId}`))),
+      'PATCH /api/displays/:id': probes(
+        notFound((x) => as('PATCH', `/api/displays/${x.displayId}`, { name: 'taken' })),
+        notFound((x) =>
+          as('PATCH', `/api/displays/${b.displayId}`, { assignedPlaylistId: x.playlistId }),
+        ),
+        notFound((x) =>
+          as('PATCH', `/api/displays/${b.displayId}`, { assignedScheduleId: x.scheduleId }),
+        ),
+        notFound((x) =>
+          as('PATCH', `/api/displays/${b.displayId}`, { assignedLayoutId: x.layoutId }),
+        ),
+        notFound((x) => as('PATCH', `/api/displays/${b.displayId}`, { tagIds: [x.displayTagId] })),
+      ),
+      // A fresh code each time, so the display is what decides the answer.
+      'POST /api/displays/:id/claim': probes(
+        notFound(async (x) =>
+          as('POST', `/api/displays/${x.displayId}/claim`, { code: (await newPairing(t)).code }),
+        ),
+      ),
+      'POST /api/displays/:id/revoke-player': probes(
+        notFound((x) => as('POST', `/api/displays/${x.displayId}/revoke-player`)),
+      ),
+      'GET /api/displays/:id/status': probes(
+        notFound((x) => as('GET', `/api/displays/${x.displayId}/status`)),
+      ),
+
+      'GET /api/media': none(LIST),
+      'POST /api/media': none('an upload carries a file and names no object'),
+      'GET /api/media/:id': probes(notFound((x) => as('GET', `/api/media/${x.mediaId}`))),
+      'PATCH /api/media/:id': probes(
+        notFound((x) => as('PATCH', `/api/media/${x.mediaId}`, { name: 'taken' })),
+        notFound((x) => as('PATCH', `/api/media/${b.mediaId}`, { folderId: x.folderId })),
+        notFound((x) => as('PATCH', `/api/media/${b.mediaId}`, { tagIds: [x.mediaTagId] })),
+      ),
+      'DELETE /api/media/:id': probes(notFound((x) => as('DELETE', `/api/media/${x.mediaId}`))),
+      'GET /api/media/:id/preview': probes(
+        notFound((x) => as('GET', `/api/media/${x.mediaId}/preview`)),
+      ),
+      'GET /api/media/:id/thumbnail': probes(
+        notFound((x) => as('GET', `/api/media/${x.mediaId}/thumbnail`)),
+      ),
+      'GET /api/media/:id/usage': probes(
+        notFound((x) => as('GET', `/api/media/${x.mediaId}/usage`)),
+      ),
+
+      'GET /api/apps': none(LIST),
+      'POST /api/apps': none('app content names no object (packages/contracts/src/app.ts)'),
+      'GET /api/apps/:id': probes(notFound((x) => as('GET', `/api/apps/${x.appId}`))),
+      'PATCH /api/apps/:id': probes(
+        notFound((x) => as('PATCH', `/api/apps/${x.appId}`, { name: 'taken' })),
+      ),
+      'DELETE /api/apps/:id': probes(notFound((x) => as('DELETE', `/api/apps/${x.appId}`))),
+
+      'GET /api/schedules': none(LIST),
+      'POST /api/schedules': probes(
+        invalid([PLAYLIST_NOT_FOUND('defaultPlaylistId')], (x) =>
+          as('POST', '/api/schedules', {
+            name: 'mine',
+            defaultPlaylistId: x.playlistId,
+            events: [],
+          }),
+        ),
+        invalid([PLAYLIST_NOT_FOUND('events.0.playlistId')], (x) =>
+          as('POST', '/api/schedules', {
+            name: 'mine',
+            defaultPlaylistId: b.playlistId,
+            events: [scheduleEvent(x.playlistId)],
+          }),
+        ),
+      ),
+      'GET /api/schedules/:id': probes(
+        notFound((x) => as('GET', `/api/schedules/${x.scheduleId}`)),
+      ),
+      'PUT /api/schedules/:id': probes(
+        notFound((x) =>
+          as('PUT', `/api/schedules/${x.scheduleId}`, {
+            name: 'taken',
+            defaultPlaylistId: b.playlistId,
+            events: [],
+          }),
+        ),
+        invalid([PLAYLIST_NOT_FOUND('defaultPlaylistId')], (x) =>
+          as('PUT', `/api/schedules/${b.scheduleId}`, {
+            name: 'mine',
+            defaultPlaylistId: x.playlistId,
+            events: [],
+          }),
+        ),
+        invalid([PLAYLIST_NOT_FOUND('events.0.playlistId')], (x) =>
+          as('PUT', `/api/schedules/${b.scheduleId}`, {
+            name: 'mine',
+            defaultPlaylistId: b.playlistId,
+            events: [scheduleEvent(x.playlistId)],
+          }),
+        ),
+      ),
+      'DELETE /api/schedules/:id': probes(
+        notFound((x) => as('DELETE', `/api/schedules/${x.scheduleId}`)),
+      ),
+
+      'GET /api/layouts': none(LIST),
+      'POST /api/layouts': probes(
+        invalid([PLAYLIST_NOT_FOUND('zones.0.playlistId')], (x) =>
+          as('POST', '/api/layouts', {
+            name: 'mine',
+            zones: layoutZones(x.playlistId, b.playlistId),
+          }),
+        ),
+        invalid([PLAYLIST_NOT_FOUND('zones.1.playlistId')], (x) =>
+          as('POST', '/api/layouts', {
+            name: 'mine',
+            zones: layoutZones(b.playlistId, x.playlistId),
+          }),
+        ),
+      ),
+      'GET /api/layouts/:id': probes(notFound((x) => as('GET', `/api/layouts/${x.layoutId}`))),
+      'PUT /api/layouts/:id': probes(
+        notFound((x) =>
+          as('PUT', `/api/layouts/${x.layoutId}`, {
+            name: 'taken',
+            zones: layoutZones(b.playlistId, b.playlistId),
+          }),
+        ),
+        invalid([PLAYLIST_NOT_FOUND('zones.0.playlistId')], (x) =>
+          as('PUT', `/api/layouts/${b.layoutId}`, {
+            name: 'mine',
+            zones: layoutZones(x.playlistId, b.playlistId),
+          }),
+        ),
+        invalid([PLAYLIST_NOT_FOUND('zones.1.playlistId')], (x) =>
+          as('PUT', `/api/layouts/${b.layoutId}`, {
+            name: 'mine',
+            zones: layoutZones(b.playlistId, x.playlistId),
+          }),
+        ),
+      ),
+      'DELETE /api/layouts/:id': probes(
+        notFound((x) => as('DELETE', `/api/layouts/${x.layoutId}`)),
+      ),
+
+      'GET /api/tags': none(LIST),
+      'POST /api/tags': none(LIST),
+      'PATCH /api/tags/:id': probes(
+        notFound((x) => as('PATCH', `/api/tags/${x.mediaTagId}`, { name: 'taken' })),
+        notFound((x) => as('PATCH', `/api/tags/${x.displayTagId}`, { name: 'taken' })),
+      ),
+      'DELETE /api/tags/:id': probes(
+        notFound((x) => as('DELETE', `/api/tags/${x.mediaTagId}`)),
+        notFound((x) => as('DELETE', `/api/tags/${x.displayTagId}`)),
+      ),
+
+      'GET /api/folders': none(LIST),
+      'POST /api/folders': none(LIST),
+      'PATCH /api/folders/:id': probes(
+        notFound((x) => as('PATCH', `/api/folders/${x.folderId}`, { name: 'taken' })),
+      ),
+      'DELETE /api/folders/:id': probes(
+        notFound((x) => as('DELETE', `/api/folders/${x.folderId}`)),
+      ),
+
+      'GET /api/playlists': none(LIST),
+      'POST /api/playlists': none(LIST),
+      'GET /api/playlists/:id': probes(
+        notFound((x) => as('GET', `/api/playlists/${x.playlistId}`)),
+      ),
+      'PUT /api/playlists/:id': probes(
+        notFound((x) => as('PUT', `/api/playlists/${x.playlistId}`, { name: 'taken', items: [] })),
+        invalid([{ path: 'items[0]', code: 'media_missing' }], (x) =>
+          as('PUT', `/api/playlists/${b.playlistId}`, {
+            name: 'mine',
+            items: [{ mediaId: x.mediaId, durationMs: 5000, fit: null }],
+          }),
+        ),
+        invalid([{ path: 'items[0]', code: 'app_missing' }], (x) =>
+          as('PUT', `/api/playlists/${b.playlistId}`, {
+            name: 'mine',
+            items: [{ appId: x.appId, durationMs: 5000 }],
+          }),
+        ),
+      ),
+      'DELETE /api/playlists/:id': probes(
+        notFound((x) => as('DELETE', `/api/playlists/${x.playlistId}`)),
+      ),
+      'POST /api/playlists/:id/duplicate': probes(
+        notFound((x) => as('POST', `/api/playlists/${x.playlistId}/duplicate`)),
+      ),
+      'POST /api/playlists/:id/publish': probes(
+        notFound((x) =>
+          as('POST', `/api/playlists/${x.playlistId}/publish`, { displayId: b.displayId }),
+        ),
+        notFound((x) =>
+          as('POST', `/api/playlists/${b.playlistId}/publish`, { displayId: x.displayId }),
+        ),
+      ),
+
+      'GET /api/push': none(LIST),
+      'POST /api/push': probes(
+        notFound((x) => as('POST', '/api/push', { displayIds: [x.displayId] })),
+        notFound((x) => as('POST', '/api/push', { displayIds: [b.displayId, x.displayId] })),
+      ),
+      'GET /api/overview': none(LIST),
+      'GET /api/audit': none('its filters are a category, a result and a page; no object'),
+
+      'GET /api/members': none(LIST),
+      'GET /api/members/names': none(LIST),
+      'PATCH /api/members/:id': probes(
+        notFound((x) => as('PATCH', `/api/members/${x.memberId}`, { displayName: 'Taken' })),
+        notFound((x) => as('PATCH', `/api/members/${x.memberId}`, { role: 'viewer' })),
+      ),
+      'POST /api/members/:id/remove': probes(
+        notFound((x) => as('POST', `/api/members/${x.memberId}/remove`)),
+      ),
+      'POST /api/members/:id/sign-out': probes(
+        notFound((x) => as('POST', `/api/members/${x.memberId}/sign-out`)),
+      ),
+      'GET /api/invites': none(LIST),
+      'POST /api/invites': none('an invite names a person by e-mail address, not an object'),
+      'POST /api/invites/:id/cancel': probes(
+        notFound((x) => as('POST', `/api/invites/${x.inviteId}/cancel`)),
+      ),
+      'GET /api/alert-recipients': none(LIST),
+      'POST /api/alert-recipients': none(LIST),
+      'DELETE /api/alert-recipients/:id': probes(
+        notFound((x) => as('DELETE', `/api/alert-recipients/${x.recipientId}`)),
+      ),
+
+      'GET /healthz': none(NO_ORG),
+      'GET /readyz': none(NO_ORG),
+      'GET /api/auth/login': none(NO_ORG),
+      'GET /api/auth/callback': none('a login state and a provider code, not an object'),
+      'GET /api/session': none('the caller’s own session'),
+      'POST /api/auth/logout': none('the caller’s own session'),
+      'POST /api/alert-recipients/confirm': none('a confirmation token, not an id'),
+
+      'POST /player/pairing': none(NO_ORG),
+      'GET /player/pairing/:id': probes(
+        notFound((x) =>
+          fetch(`${t.url}/player/pairing/${x.pairingId}`, {
+            headers: { authorization: `Bearer ${bPolling.pollingToken}` },
+          }),
+        ),
+      ),
+      'DELETE /player/registration': none('the device credential names the registration'),
+      'GET /player/manifest': none('the device credential names the display'),
+      'POST /player/media-urls': probes(
+        notFound((x) => requestMediaUrls(t, player, x.publicationId, [b.mediaId])),
+        notFound((x) => requestMediaUrls(t, player, b.publicationId, [x.mediaId])),
+      ),
+      'GET /player/media/:assetId': probes(
+        // A valid address of B's player with the asset swapped: the signature no longer holds.
+        [
+          'url_signature_invalid',
+          async (x) => {
+            const issued = (await (
+              await requestMediaUrls(t, player, b.publicationId, [b.mediaId])
+            ).json()) as { urls: { url: string }[] };
+            const url = new URL(issued.urls[0]?.url ?? '');
+            return fetch(`${t.url}${url.pathname.replace(b.mediaId, x.mediaId)}${url.search}`);
+          },
+        ],
+        // Signed by the server (which only signs the current publication's assets, so no client
+        // can make these): the lookup behind the signature still finds nothing of A's.
+        // The `reg` claim is not probed: like the device token it stands for, it is the
+        // credential that names the organisation, not an object asked for under one. A's live
+        // registration makes the request A's (so B's publication then answers 404), and one never
+        // issued answers 401 device_revoked (docs/player-protocol-v1.md section 6, check 3). Only
+        // a holder of the signing secret can put either in a URL.
+        notFound((x) =>
+          fetch(
+            signedMediaUrl(t, {
+              registrationId: player.registrationId,
+              publicationId: b.publicationId,
+              assetId: x.mediaId,
+            }),
+          ),
+        ),
+        notFound((x) =>
+          fetch(
+            signedMediaUrl(t, {
+              registrationId: player.registrationId,
+              publicationId: x.publicationId,
+              assetId: b.mediaId,
+            }),
+          ),
+        ),
+      ),
+      'POST /player/heartbeat': probes(
+        ['forbidden', (x) => sendHeartbeat(t, player, heartbeatBody(x.displayId, 2_000_000))],
+        [
+          'conflict',
+          (x) =>
+            sendHeartbeat(
+              t,
+              player,
+              heartbeatBody(b.displayId, 2_000_000, {
+                downloadedPublicationId: x.publicationId,
+                activePublicationId: x.publicationId,
+                activeItemIndex: 0,
+                playerState: 'playing',
+              }),
+            ),
+        ],
+      ),
+    };
+
+    // Every registered route has a case, and every case a registered route.
+    const routes = registeredRoutes(t.app);
+    const gaps = [
+      ...routes
+        .filter((route) => !Object.hasOwn(cases, route))
+        .map(
+          (route) =>
+            `No cross-organisation case for ${route}: add one to the cases of this test, a probe for each id the route takes in its path or body, or none(reason) when it takes none`,
+        ),
+      ...Object.keys(cases)
+        .filter((route) => !routes.includes(route))
+        .map((route) => `The cross-organisation case for ${route} matches no registered route`),
+      ...Object.entries(cases)
+        .filter(([route, c]) => 'none' in c && route.includes('/:'))
+        .map(([route]) => `${route} takes an id in its path: give it a probe, not none()`),
+    ];
+    expect(gaps).toEqual([]);
+
+    /** Status and body, without the request id: everything else must not depend on the id. */
+    const answerOf = async (response: Response): Promise<{ status: number; body: unknown }> => {
+      const text = await response.text();
+      let body: unknown = text;
+      try {
+        const parsed = JSON.parse(text) as { error?: Record<string, unknown> };
+        body =
+          parsed.error === undefined ? parsed : { error: { ...parsed.error, requestId: null } };
+      } catch {
+        // Not JSON: compared as text.
+      }
+      return { status: response.status, body };
+    };
+    const wrong: string[] = [];
+    let probed = 0;
+    for (const [route, c] of Object.entries(cases)) {
+      if ('none' in c) continue;
+      for (const [index, [code, send, details]] of c.probes.entries()) {
+        probed += 1;
+        const what = `${route} probe ${index + 1}`;
+        const real = await answerOf(await send(foreign));
+        const none = await answerOf(await send(unknown));
+        if (JSON.stringify(real) !== JSON.stringify(none)) {
+          wrong.push(
+            `${what}: another organisation's id answered ${JSON.stringify(real)}, an unknown id ${JSON.stringify(none)}`,
+          );
+        }
+        const error = (real.body as { error?: { code?: string; details?: Detail[] } }).error;
+        if (real.status !== ERROR_STATUS[code] || error?.code !== code) {
+          wrong.push(`${what}: answered ${real.status} ${String(error?.code)}, expected ${code}`);
+        }
+        if (details !== undefined) {
+          // Each expected detail names the keys it checks; the answer carries those and no more.
+          const given = (error?.details ?? []).map((detail, n) =>
+            Object.fromEntries(Object.keys(details[n] ?? {}).map((key) => [key, detail[key]])),
+          );
+          if (JSON.stringify(given) !== JSON.stringify(details)) {
+            wrong.push(
+              `${what}: details ${JSON.stringify(error?.details)}, expected ${JSON.stringify(details)}`,
+            );
+          }
+        }
+      }
+    }
+    expect(wrong).toEqual([]);
+    expect(probed).toBeGreaterThan(60);
+
+    // Nothing of A's was changed by the probes, and A's pairing is still waiting for its player.
+    expect((await alice.fetch(`/api/displays/${a.displayId}`)).status).toBe(200);
+    expect((await fetch(`${t.url}/player/manifest`, { headers: a.player.headers })).status).toBe(
+      200,
+    );
   });
 
   it('holds at the database: the runtime role sees nothing without a context and only its own rows with one', async () => {

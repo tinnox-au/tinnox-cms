@@ -342,13 +342,10 @@ describe('operator session, CSRF and origin checks', () => {
       expect(response.headers.get('set-cookie') ?? '').not.toMatch(
         /tinnox_session=[A-Za-z0-9_-]{20,}/,
       );
-      if (response.status >= 300 && response.status < 400) {
-        const location = response.headers.get('location') ?? '';
-        expect(location.startsWith(`${PORTAL_ORIGIN}/`)).toBe(true);
-        expect(location).toContain('authError=');
-      } else {
-        expect(response.status).toBeGreaterThanOrEqual(400);
-      }
+      // Every refusal sends the browser back to the portal with the reason (failureRedirect in
+      // apps/api/src/routes/auth.ts): none of these started here, so the reason is the state.
+      expect(response.status, query).toBe(303);
+      expect(response.headers.get('location')).toBe(`${PORTAL_ORIGIN}/?authError=state`);
     }
     // The return path cannot send the browser to another site.
     const open = await fetch(`${t.url}/api/auth/login?returnTo=//attacker.example`, {

@@ -9,6 +9,7 @@ import {
   asMigratorIn,
   createDisplay,
   createOrg,
+  expectError,
   heartbeatBody,
   newPairing,
   pairPlayer,
@@ -80,9 +81,7 @@ describe('pairing codes and device credentials', () => {
       "UPDATE public.pairing_session SET expires_at = now() - interval '1 second' WHERE id = $1",
       [pairing.pairingId],
     );
-    const late = await claim(alice, display.id, pairing.code);
-    expect(late.status).toBeGreaterThanOrEqual(400);
-    expect(late.status).toBeLessThan(500);
+    await expectError(await claim(alice, display.id, pairing.code), 'pairing_code_invalid');
     // The poll marks the session expired and writes no audit row, as today: step 20 kept it as built and
     // names it pairing_expired_by_time, and the audit-debt guard lets that shape through
     // (EXEMPT_SHAPES; whether it is audited is open, CMS-36).
@@ -107,12 +106,10 @@ describe('pairing codes and device credentials', () => {
       [alice, first.id],
       [alice, second.id],
     ] as const) {
-      const again = await claim(operator, displayId, pairing.code);
-      expect(again.status).toBeGreaterThanOrEqual(400);
-      expect(again.status).toBeLessThan(500);
+      await expectError(await claim(operator, displayId, pairing.code), 'pairing_code_invalid');
     }
     const otherOrgDisplay = await createDisplay(bob, orgB);
-    expect((await claim(bob, otherOrgDisplay.id, pairing.code)).status).toBeGreaterThanOrEqual(400);
+    await expectError(await claim(bob, otherOrgDisplay.id, pairing.code), 'pairing_code_invalid');
 
     // Ten polls at once: one receives the credential, none of the others does.
     const polls = await Promise.all(Array.from({ length: 10 }, () => pollPairing(t, pairing)));
@@ -154,8 +151,7 @@ describe('pairing codes and device credentials', () => {
       (code) => code !== real.code,
     );
     for (const code of wrongCodes) {
-      const response = await claim(mallory, display.id, code);
-      expect(response.status).toBeGreaterThanOrEqual(400);
+      await expectError(await claim(mallory, display.id, code), 'pairing_code_invalid');
     }
     // Now even the right code is refused for this operator.
     const blocked = await claim(mallory, display.id, real.code);
@@ -174,7 +170,7 @@ describe('pairing codes and device credentials', () => {
     // Locked: the genuine token gets the same answer as a stranger, and the code is dead.
     expect((await pollPairing(t, session)).status).toBe(404);
     const dead = await createDisplay(alice, orgA);
-    expect((await claim(alice, dead.id, session.code)).status).toBeGreaterThanOrEqual(400);
+    await expectError(await claim(alice, dead.id, session.code), 'pairing_code_invalid');
   });
 
   async function playing(
@@ -217,8 +213,8 @@ describe('pairing codes and device credentials', () => {
     expect((await sendHeartbeat(t, player, heartbeatBody(displayId, Date.now()))).status).toBe(401);
     // A signed URL issued before revocation, still inside its lifetime, is dead too.
     const media = await fetch(mediaUrl);
-    expect(media.status).toBeGreaterThanOrEqual(400);
-    expect((await media.text()).length).toBeLessThan(600);
+    expect((await media.clone().text()).length).toBeLessThan(600);
+    await expectError(media, 'device_revoked');
   }
 
   it('cuts off a revoked player at once: no manifest, no URLs, no media, no reports', async () => {
@@ -283,7 +279,8 @@ describe('pairing codes and device credentials', () => {
     const late = await pollPairing(t, older);
     expect(late.status).toBe(200);
     expect(await late.json()).toEqual({ status: 'expired' });
-    expect(await manifestStatus(current)).not.toBe(401);
+    // Nothing is published to this screen, so its manifest is empty, not refused.
+    expect(await manifestStatus(current)).toBe(204);
 
     // Revocation: a claim the player has not collected is cancelled by revoking.
     const dormant = await newPairing(t);

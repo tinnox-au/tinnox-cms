@@ -24,6 +24,8 @@ import {
   LayoutDtoSchema,
   ScheduleDtoSchema,
   type AppContent,
+  type ApiError,
+  type ApiErrorCode,
   type AuditAction,
   type AppDto,
   type LayoutDto,
@@ -57,6 +59,7 @@ import { LocalObjectStorage } from '@tinnox/storage';
 import type { FastifyInstance } from 'fastify';
 import pg from 'pg';
 import sharp from 'sharp';
+import { expect } from 'vitest';
 import { runDisplayAlerts, type DisplayAlertDeps, type DisplayAlertResult } from '../src/alerts.ts';
 import { buildApp } from '../src/app.ts';
 import { IdentityProviderError, type IdentityProvider } from '../src/auth/oidc.ts';
@@ -65,6 +68,7 @@ import { loadConfig, RUNTIME_ENV_NAMES, type AppConfig } from '../src/config.ts'
 import type { AppContext } from '../src/context.ts';
 import type { MailMessage, Mailer } from '../src/mail.ts';
 import { MediaPipeline } from '../src/media/pipeline.ts';
+import { buildMediaUrl } from '../src/security.ts';
 import {
   actionsOf,
   declaredRouteAudit,
@@ -108,6 +112,104 @@ export function declaredAudits(): {
 /** What writes `action` outside the routes (a job, provisioning, a migration), or undefined. */
 export function offRouteWriter(action: AuditAction): string | undefined {
   return OFF_ROUTE_AUDIT[action];
+}
+
+/**
+ * Every route the application registers, as `${METHOD} ${pattern}` (HEAD read as GET, OPTIONS
+ * left out): the keys of ROUTE_PERMISSIONS and OTHER_ROUTE_AUDIT. The start-up checks on Fastify's
+ * onRoute hook (createRouteCheck, createRouteAuditCheck) refuse to start when a registered route
+ * is missing from them or a key matches no route, so these are the registered routes; `app`
+ * confirms each one is served.
+ */
+export function registeredRoutes(app: FastifyInstance): string[] {
+  const routes = [...Object.keys(ROUTE_PERMISSIONS), ...Object.keys(OTHER_ROUTE_AUDIT)];
+  for (const route of routes) {
+    const [method = '', url = ''] = route.split(' ');
+    if (!app.hasRoute({ method, url })) {
+      throw new Error(`${route} has a row in the route tables but is not served`);
+    }
+  }
+  return routes;
+}
+
+/**
+ * The status each error code is answered with today (apps/api/src/errors.ts and the HttpError
+ * sites). Step 28 of the adoption plan moves the table to packages/contracts as STATUS_OF, and
+ * the API derives the status from it. No route answers `pairing_expired`: a poll of an expired
+ * pairing answers 200 with `{ status: 'expired' }`.
+ */
+export const ERROR_STATUS = Object.freeze({
+  bad_request: 400,
+  validation_failed: 400,
+  pairing_code_invalid: 400,
+  unauthenticated: 401,
+  device_revoked: 401,
+  forbidden: 403,
+  csrf_failed: 403,
+  origin_not_allowed: 403,
+  url_expired: 403,
+  url_signature_invalid: 403,
+  not_found: 404,
+  conflict: 409,
+  idempotency_conflict: 409,
+  media_not_ready: 409,
+  media_in_use: 409,
+  playlist_in_use: 409,
+  app_in_use: 409,
+  schedule_in_use: 409,
+  layout_in_use: 409,
+  last_owner: 409,
+  payload_too_large: 413,
+  storage_quota_exceeded: 413,
+  unsupported_media_type: 415,
+  range_not_satisfiable: 416,
+  publication_rejected: 422,
+  rate_limited: 429,
+  pairing_locked: 429,
+  internal_error: 500,
+  service_unavailable: 503,
+  mail_not_configured: 503,
+  confirmation_not_sent: 503,
+} satisfies Record<Exclude<ApiErrorCode, 'pairing_expired'>, number>);
+export type AnsweredErrorCode = keyof typeof ERROR_STATUS;
+
+/**
+ * Asserts that `response` is the error `code`, with the status that code is answered with, and
+ * returns the error envelope. A test asserts the exact answer, never a range or "not 401": those
+ * pass on a crash or a rate limit (RCX-03; the lint is NO_RANGE_STATUS in eslint.config.js).
+ */
+export async function expectError(
+  response: Response,
+  code: AnsweredErrorCode,
+): Promise<ApiError['error']> {
+  const text = await response.text();
+  const what = `${response.status} ${text.slice(0, 300)}`;
+  expect(response.status, what).toBe(ERROR_STATUS[code]);
+  const body = JSON.parse(text) as ApiError;
+  expect(body.error.code, what).toBe(code);
+  return body.error;
+}
+
+/**
+ * A media address signed with the application's own secret, on its own listener: what
+ * POST /player/media-urls would hand out for these claims, valid for a minute from now.
+ */
+export function signedMediaUrl(
+  t: TestApp,
+  claims: {
+    readonly registrationId: string;
+    readonly publicationId: string;
+    readonly assetId: string;
+  },
+): string {
+  const expiresAtSeconds = Math.floor(t.ctx.now().getTime() / 1000) + 60;
+  const url = new URL(
+    buildMediaUrl(t.config.apiPublicOrigin, t.config.mediaUrlHmacSecret, {
+      ...claims,
+      expiresAtSeconds,
+    }),
+  );
+  return `${t.url}${url.pathname}${url.search}`;
 }
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');

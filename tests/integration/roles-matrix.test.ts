@@ -10,8 +10,8 @@
  * - An Admin and an Owner may do everything; the rank rule is tested in
  *   apps/api/test/members.integration.test.ts.
  *
- * A refusal by role is decided before any lookup, so it is the same 403 for an unknown id and
- * for the caller's own objects.
+ * A refusal by role is decided before any lookup, so it is the same 403 for an unknown id, for
+ * the caller's own objects and for another organisation's (DEC-35, D1).
  */
 import { randomUUID } from 'node:crypto';
 import { ROLES, type Role } from '@tinnox/contracts';
@@ -93,6 +93,8 @@ describe('the role-by-route matrix', () => {
   const operators = new Map<Role, Operator>();
   let ownDisplayId: string;
   let ownPlaylistId: string;
+  let foreignDisplayId: string;
+  let foreignPlaylistId: string;
 
   beforeAll(async () => {
     t = await startTestApp();
@@ -104,6 +106,10 @@ describe('the role-by-route matrix', () => {
     }
     ownDisplayId = (await createDisplay(owner, org, 'Matrix screen')).id;
     ownPlaylistId = await createPlaylist(owner, 'Matrix playlist');
+    const other = await createOrg('Roles matrix, another organisation');
+    const otherOwner = await signIn(t, other);
+    foreignDisplayId = (await createDisplay(otherOwner, other, 'Foreign screen')).id;
+    foreignPlaylistId = await createPlaylist(otherOwner, 'Foreign playlist');
   });
   afterAll(async () => {
     await t.close();
@@ -140,11 +146,17 @@ describe('the role-by-route matrix', () => {
     expect(wrong).toEqual([]);
   });
 
-  it('refuses a write with the same 403 for an unknown id and for the caller’s own objects', async () => {
+  it('refuses a write with the same 403 for an unknown id, the caller’s own objects and another organisation’s (D1)', async () => {
     for (const role of ROLES) {
       for (const [method, pattern] of OPERATOR_ROUTE_PATTERNS) {
         if (!pattern.includes(':id') || allowed(role, method, pattern)) continue;
-        for (const id of [randomUUID(), ownDisplayId, ownPlaylistId]) {
+        for (const id of [
+          randomUUID(),
+          ownDisplayId,
+          ownPlaylistId,
+          foreignDisplayId,
+          foreignPlaylistId,
+        ]) {
           const response = await operator(role).fetch(pattern.replace(':id', id), { method });
           expect(await refusal(response), `${role} ${method} ${pattern} ${id}`).toEqual(FORBIDDEN);
         }

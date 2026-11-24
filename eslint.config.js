@@ -197,6 +197,83 @@ const NO_RANDOM_IN_TESTS = [
   },
 ];
 
+// RCX-03 (adoption plan step 23): a status asserted as a range or as "not 401" passes on a 500, a
+// 429 or any other answer nobody meant. Matched on expect(...) and expect.soft(...) whose subject
+// reads a status: a `.status` or `.statusCode` member (optional, awaited or Playwright's
+// `.status()` call included), or a name or a call whose name ends in "status"
+// (`await manifestStatus(player)`). The forms: a comparison matcher, negated or not
+// (`.not.toBeLessThan(400)` is `>= 400`); a negated toBe; a comparison inside expect()
+// (`expect(response.status >= 400).toBe(true)`, alone or joined by && or ||); and toSatisfy,
+// which can hold any range. A comparison on a member, by matcher or inside expect(), is refused
+// unless its bound is a number that is not a status; the
+// named forms and the negations only with a three-digit status literal, so a process's
+// `expect(run.status).toBeGreaterThan(0)`, `expect(run.status).not.toBe(0)` and
+// `expect(status).not.toBe('ready')` stay allowed. A list of exact answers
+// (`expect([200, 204]).toContain(...)`, `toBeOneOf`) names what proves the code ran and is allowed.
+const RANGE_STATUS_MESSAGE =
+  "Assert the exact status: expect(response.status).toBe(204), or for an error expectError(response, 'not_found') from apps/api/test/support.ts (also exported by tests/integration/support.ts), which checks the status and the error code. A range or a 'not 401' passes on a crash or a rate limit (RCX-03).";
+const STATUS_READ = (path) =>
+  `:matches([${path}.property.name=/^(status|statusCode)$/], [${path}.expression.property.name=/^(status|statusCode)$/], [${path}.argument.property.name=/^(status|statusCode)$/], [${path}.callee.property.name='status'], [${path}.argument.callee.property.name='status'])`;
+const STATUS_NAMED = (path) =>
+  `:matches([${path}.name=/^status$|Status$/], [${path}.callee.name=/^status$|Status$/], [${path}.argument.callee.name=/^status$|Status$/])`;
+const STATUS_SUBJECT = (path) => `:matches(${STATUS_READ(path)}, ${STATUS_NAMED(path)})`;
+const HTTP_STATUS_LITERAL = (path) => `[${path}.raw=/^[1-5][0-9][0-9]$/]`;
+const HTTP_STATUS_ARGUMENT = HTTP_STATUS_LITERAL('arguments.0');
+// Anything but a literal that is not a status: `toBeLessThan(500)` and `toBeLessThan(limit)`, not
+// an exit code's `toBeGreaterThan(0)`.
+const NOT_OTHER_LITERAL = (path) =>
+  `:not([${path}.type='Literal']:not([${path}.raw=/^[1-5][0-9][0-9]$/]))`;
+const NOT_OTHER_LITERAL_ARGUMENT = NOT_OTHER_LITERAL('arguments.0');
+const EXPECT_CALL = (path) =>
+  `:matches([${path}.callee.name='expect'], [${path}.callee.object.name='expect'])`;
+const COMPARISON_MATCHER =
+  'CallExpression[callee.property.name=/^(toBeGreaterThan|toBeGreaterThanOrEqual|toBeLessThan|toBeLessThanOrEqual)$/]';
+const STATUS_COMPARISON = `${COMPARISON_MATCHER}${EXPECT_CALL('callee.object')}`;
+const STATUS_NEGATED_COMPARISON = `${COMPARISON_MATCHER}[callee.object.property.name='not']${EXPECT_CALL('callee.object.object')}`;
+const STATUS_NEGATION = `CallExpression[callee.property.name=/^(toBe|toEqual|toStrictEqual)$/][callee.object.property.name='not']${EXPECT_CALL('callee.object.object')}`;
+const STATUS_SATISFY = `CallExpression[callee.property.name='toSatisfy']:matches(${EXPECT_CALL('callee.object')}, [callee.object.property.name='not']${EXPECT_CALL('callee.object.object')})`;
+const RELATIONAL = (path) => `[${path}.type='BinaryExpression'][${path}.operator=/^[<>]=?$/]`;
+// A comparison inside expect() takes the same bounds as the matcher forms: a status member against
+// anything but a literal that is not a status (`>= serverError`, not `> 0`), a status name only
+// against a status literal. It is found alone or as an operand of && or ||, two levels deep, so
+// `expect(response.status >= 400 && response.status < 500).toBe(true)` is one report.
+const RELATIONAL_STATUS = (path) =>
+  `${RELATIONAL(path)}:matches(${STATUS_READ(`${path}.left`)}${NOT_OTHER_LITERAL(`${path}.right`)}, ${STATUS_READ(`${path}.right`)}${NOT_OTHER_LITERAL(`${path}.left`)}, ${STATUS_NAMED(`${path}.left`)}${HTTP_STATUS_LITERAL(`${path}.right`)}, ${STATUS_NAMED(`${path}.right`)}${HTTP_STATUS_LITERAL(`${path}.left`)})`;
+const RELATIONAL_STATUS_WITHIN = (path, depth) =>
+  depth === 0
+    ? RELATIONAL_STATUS(path)
+    : `:matches(${RELATIONAL_STATUS(path)}, [${path}.type='LogicalExpression']:matches(${RELATIONAL_STATUS_WITHIN(`${path}.left`, depth - 1)}, ${RELATIONAL_STATUS_WITHIN(`${path}.right`, depth - 1)}))`;
+const NO_RANGE_STATUS = [
+  {
+    selector: `${STATUS_COMPARISON}${NOT_OTHER_LITERAL_ARGUMENT}${STATUS_READ('callee.object.arguments.0')}`,
+    message: RANGE_STATUS_MESSAGE,
+  },
+  {
+    selector: `${STATUS_COMPARISON}${HTTP_STATUS_ARGUMENT}${STATUS_NAMED('callee.object.arguments.0')}`,
+    message: RANGE_STATUS_MESSAGE,
+  },
+  {
+    selector: `${STATUS_NEGATED_COMPARISON}${NOT_OTHER_LITERAL_ARGUMENT}${STATUS_READ('callee.object.object.arguments.0')}`,
+    message: RANGE_STATUS_MESSAGE,
+  },
+  {
+    selector: `${STATUS_NEGATED_COMPARISON}${HTTP_STATUS_ARGUMENT}${STATUS_NAMED('callee.object.object.arguments.0')}`,
+    message: RANGE_STATUS_MESSAGE,
+  },
+  {
+    selector: `${STATUS_NEGATION}${HTTP_STATUS_ARGUMENT}${STATUS_SUBJECT('callee.object.object.arguments.0')}`,
+    message: RANGE_STATUS_MESSAGE,
+  },
+  {
+    selector: `${STATUS_SATISFY}:matches(${STATUS_SUBJECT('callee.object.arguments.0')}, ${STATUS_SUBJECT('callee.object.object.arguments.0')})`,
+    message: RANGE_STATUS_MESSAGE,
+  },
+  {
+    selector: `CallExpression:matches([callee.name='expect'], [callee.object.name='expect'])${RELATIONAL_STATUS_WITHIN('arguments.0', 2)}`,
+    message: RANGE_STATUS_MESSAGE,
+  },
+];
+
 // Every test file: the unit, component and integration projects, Playwright specs, their
 // support files and the setup files vitest.config.ts names.
 const TEST_FILES = [
@@ -1981,6 +2058,7 @@ export default tseslint.config(
         'error',
         ...NO_SKIPPED_TESTS,
         ...NO_RANDOM_IN_TESTS,
+        ...NO_RANGE_STATUS,
         ...NO_BRAND_CAST,
         ...NO_HTML_SINK_CALLS,
       ],
@@ -1995,6 +2073,7 @@ export default tseslint.config(
         ...NO_RAW_HTML,
         ...NO_SKIPPED_TESTS,
         ...NO_RANDOM_IN_TESTS,
+        ...NO_RANGE_STATUS,
         ...NO_BARE_KEYBOARD,
         ...NO_BRAND_CAST,
         ...NO_HTML_SINK_CALLS,
@@ -2012,6 +2091,7 @@ export default tseslint.config(
         ...NO_RAW_HTML,
         ...NO_SKIPPED_TESTS,
         ...NO_RANDOM_IN_TESTS,
+        ...NO_RANGE_STATUS,
         ...NO_BRAND_CAST,
         ...NO_HTML_SINK_CALLS,
       ],
