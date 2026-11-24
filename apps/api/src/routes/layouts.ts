@@ -20,7 +20,7 @@ import { changeAsOperator, type ConstraintAnswers } from '../auth/permissions.ts
 import { operatorOf, type OperatorSession } from '../auth/session.ts';
 import type { AppContext } from '../context.ts';
 import { bigintToNumber, iso } from '../db-helpers.ts';
-import { HttpError, notFound, parseInput } from '../errors.ts';
+import { found, HttpError, notFound, parseInput } from '../errors.ts';
 
 interface LayoutZoneRow {
   id: string;
@@ -128,7 +128,6 @@ async function saveLayout(
   );
   if (missing.length > 0) {
     throw new HttpError(
-      400,
       'validation_failed',
       'A playlist in this layout does not exist or was deleted.',
       { details: missing.map((path) => ({ path, message: 'The playlist was not found.' })) },
@@ -195,7 +194,6 @@ async function saveLayout(
  */
 const playlistDeletedMeanwhile = (): HttpError =>
   new HttpError(
-    409,
     'conflict',
     'A playlist in this layout was deleted meanwhile. Reload and try again.',
   );
@@ -205,7 +203,7 @@ const PLAYLIST_GONE = {
 } as const satisfies ConstraintAnswers;
 
 const layoutInUse = (message: string, details?: { path: string; message: string }[]): HttpError =>
-  new HttpError(409, 'layout_in_use', message, details === undefined ? {} : { details });
+  new HttpError('layout_in_use', message, details === undefined ? {} : { details });
 
 /** A display took the layout between the check of its delete and the DELETE. */
 const ASSIGNED_MEANWHILE = {
@@ -260,8 +258,7 @@ export function registerLayoutRoutes(app: FastifyInstance, ctx: AppContext): voi
       ctx,
       request,
       async (tx) => {
-        const saved = await saveLayout(tx, session, id, input);
-        if (saved === null) throw notFound('The layout');
+        const saved = found(await saveLayout(tx, session, id, input), 'The layout');
         return saved;
       },
       { constraints: PLAYLIST_GONE },

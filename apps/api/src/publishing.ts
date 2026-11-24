@@ -210,7 +210,6 @@ export function issueDetails(issues: readonly PublishIssue[]): PushIssue[] {
 export function publicationRejected(issues: readonly PublishIssue[]): HttpError {
   const first = issues[0];
   return new HttpError(
-    422,
     'publication_rejected',
     issues.length === 1 && first !== undefined
       ? first.message
@@ -223,7 +222,7 @@ export function publicationRejected(issues: readonly PublishIssue[]): HttpError 
 export function idempotencyKeyOf(request: FastifyRequest, action: string): string {
   const raw = request.headers[HEADERS.idempotencyKey];
   if (typeof raw !== 'string') {
-    throw new HttpError(400, 'bad_request', `The Idempotency-Key header is required to ${action}.`);
+    throw new HttpError('bad_request', `The Idempotency-Key header is required to ${action}.`);
   }
   return parseInput(IdempotencyKeySchema, raw, 'Idempotency-Key header');
 }

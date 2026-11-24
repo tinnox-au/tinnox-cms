@@ -24,7 +24,7 @@ import { changeAsOperator, type ConstraintAnswers } from '../auth/permissions.ts
 import { operatorOf, type OperatorSession } from '../auth/session.ts';
 import type { AppContext } from '../context.ts';
 import { bigintToNumber, iso } from '../db-helpers.ts';
-import { HttpError, notFound, parseInput } from '../errors.ts';
+import { found, HttpError, parseInput } from '../errors.ts';
 
 interface ScheduleRow {
   id: string;
@@ -141,7 +141,6 @@ async function saveSchedule(
   ];
   if (missing.length > 0) {
     throw new HttpError(
-      400,
       'validation_failed',
       'A playlist in this schedule does not exist or was deleted.',
       { details: missing.map((path) => ({ path, message: 'The playlist was not found.' })) },
@@ -220,7 +219,6 @@ async function saveSchedule(
  */
 const playlistDeletedMeanwhile = (): HttpError =>
   new HttpError(
-    409,
     'conflict',
     'A playlist in this schedule was deleted meanwhile. Reload and try again.',
   );
@@ -232,7 +230,7 @@ const PLAYLIST_GONE = {
 } as const satisfies ConstraintAnswers;
 
 const scheduleInUse = (message: string, details?: { path: string; message: string }[]): HttpError =>
-  new HttpError(409, 'schedule_in_use', message, details === undefined ? {} : { details });
+  new HttpError('schedule_in_use', message, details === undefined ? {} : { details });
 
 /** A display took the schedule between the check of its delete and the DELETE. */
 const ASSIGNED_MEANWHILE = {
@@ -284,8 +282,7 @@ export function registerScheduleRoutes(app: FastifyInstance, ctx: AppContext): v
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     return readOrg(db, session.orgId, async (tx) => {
-      const dto = await loadScheduleDto(tx, id);
-      if (dto === null) throw notFound('The schedule');
+      const dto = found(await loadScheduleDto(tx, id), 'The schedule');
       return dto;
     });
   });
@@ -301,8 +298,7 @@ export function registerScheduleRoutes(app: FastifyInstance, ctx: AppContext): v
       ctx,
       request,
       async (tx) => {
-        const saved = await saveSchedule(tx, session, id, input);
-        if (saved === null) throw notFound('The schedule');
+        const saved = found(await saveSchedule(tx, session, id, input), 'The schedule');
         return saved;
       },
       { constraints: PLAYLIST_GONE },
@@ -325,8 +321,7 @@ export function registerScheduleRoutes(app: FastifyInstance, ctx: AppContext): v
            FROM schedule s WHERE s.id = $1 AND s.org_id = app_org_id() FOR UPDATE`,
           [id],
         );
-        const current = locked.rows[0];
-        if (current === undefined) throw notFound('The schedule');
+        const current = found(locked.rows[0], 'The schedule');
         const assigned = await tx.query<{ name: string }>(
           `SELECT d.name FROM display d
            WHERE d.assigned_schedule_id = $1 AND d.org_id = app_org_id()

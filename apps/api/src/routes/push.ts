@@ -20,7 +20,7 @@ import type { ConstraintAnswers } from '../auth/permissions.ts';
 import { operatorOf, type OperatorSession } from '../auth/session.ts';
 import { perMinute, type AppContext } from '../context.ts';
 import { iso } from '../db-helpers.ts';
-import { HttpError, notFound, parseInput } from '../errors.ts';
+import { found, HttpError, notFound, parseInput } from '../errors.ts';
 import {
   assessDisplays,
   auditRejectedPublication,
@@ -44,7 +44,6 @@ import {
 const PUSH_RACES = {
   publication_asset_media_id_org_id_fkey: () =>
     new HttpError(
-      409,
       'conflict',
       "Something used by a screen's assigned content changed meanwhile. Nothing is lost: try again.",
     ),
@@ -99,8 +98,7 @@ export function registerPushRoutes(app: FastifyInstance, ctx: AppContext): void 
         audit: unaudited('idempotent_replay'),
       }),
       publish: async (tx) => {
-        const display = await lockDisplayForPublish(tx, displayId);
-        if (display === null) throw notFound('The screen');
+        const display = found(await lockDisplayForPublish(tx, displayId), 'The screen');
         const [assessment] = await assessDisplays(tx, ctx, [display], {
           lock: true,
           keepDraft: true,

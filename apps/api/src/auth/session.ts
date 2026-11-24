@@ -122,14 +122,13 @@ export function requireOperator(ctx: AppContext) {
   return async function requireOperatorHook(request: FastifyRequest): Promise<void> {
     const session = await readSession(ctx, request);
     if (session === null) {
-      throw new HttpError(401, 'unauthenticated', 'Sign in to continue.');
+      throw new HttpError('unauthenticated', 'Sign in to continue.');
     }
     if (!SAFE_METHODS.has(request.method)) {
       const originHeader = request.headers.origin;
       if (typeof originHeader !== 'string' || originHeader !== ctx.config.portalOrigin) {
         await recordCsrfRejection(ctx, request, session, 'origin');
         throw new HttpError(
-          403,
           'origin_not_allowed',
           'This request did not come from the TINNOX portal.',
         );
@@ -138,7 +137,6 @@ export function requireOperator(ctx: AppContext) {
       if (typeof fetchSite === 'string' && fetchSite !== 'same-origin' && fetchSite !== 'none') {
         await recordCsrfRejection(ctx, request, session, 'fetch_site');
         throw new HttpError(
-          403,
           'origin_not_allowed',
           'This request did not come from the TINNOX portal.',
         );
@@ -147,7 +145,6 @@ export function requireOperator(ctx: AppContext) {
       if (typeof token !== 'string' || !safeEqual(token, session.csrfToken)) {
         await recordCsrfRejection(ctx, request, session, 'token');
         throw new HttpError(
-          403,
           'csrf_failed',
           'The security token is missing or out of date. Reload the page and try again.',
         );
@@ -161,7 +158,7 @@ export function requireOperator(ctx: AppContext) {
 export function operatorOf(request: FastifyRequest): OperatorSession {
   if (request.operator === null) {
     // A route was registered without the hook: fail closed.
-    throw new HttpError(401, 'unauthenticated', 'Sign in to continue.');
+    throw new HttpError('unauthenticated', 'Sign in to continue.');
   }
   return request.operator;
 }

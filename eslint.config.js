@@ -758,6 +758,85 @@ const NO_HAND_KEYED_PUBLISH = [
   },
 ];
 
+// Step 28 (adoption plan section 2.2 item 4, D1, D20): a 403 is built only in apps/api/src/auth/,
+// so no route answers 403 after its own lookup. Row-level security hides another organisation's
+// row, so a route answers "no row" with found() or notFound() (apps/api/src/errors.ts), and the
+// 403s are named constructors of three files (API_403_BUILDERS): the role guard's (forbidden,
+// before the handler runs) and assertStillAllowed's (PermissionDeniedError, after reading only the
+// caller's own member row) in auth/permissions.ts, the origin and CSRF checks in auth/session.ts
+// and the player protocol's three in auth/player-refusals.ts. NO_API_403 is in the API's list, so
+// every other API file, not only the routes, is refused (D1). HttpError takes its status from its
+// code (STATUS_OF of @tinnox/contracts), so the codes this refuses are read from that table, not
+// written here: a new 403 code is refused here once it is added there.
+// ROUTE_FILES are the route files and publishing.ts, where route code lives outside routes/.
+// The role refusals may not be imported there either, so a route cannot refuse by role after its
+// own lookup; ROUTE_REFUSAL_IMPORTERS names the two files that may, and why. That ban is written
+// as selectors here, not in no-restricted-imports as the plan has it: that rule's lists are built
+// per combination of facets (importBoundaryBlocks), where an allow-list by file would double the
+// API's blocks; the selectors also see a re-export. A namespace import, an `export *` or a dynamic
+// import of auth/permissions.ts is refused there outright, since a name taken from it is not seen.
+// What this cannot see, a constructor of auth/ called after a lookup, the cross-organisation
+// conformance test holds (tests/integration/cross-org.test.ts, step 23). Not seen: a code held in
+// a variable or chosen by a condition (`new HttpError(code, ...)`), HttpError reached through a
+// namespace (`new errors.HttpError(...)`), and a refusal built in auth/ under another name and
+// imported into a route.
+const { STATUS_OF } = await import('./packages/contracts/src/errors.ts');
+const CODES_WITH_STATUS_403 = Object.keys(STATUS_OF).filter((code) => STATUS_OF[code] === 403);
+const API_403_BUILDERS = [
+  'apps/api/src/auth/permissions.ts',
+  'apps/api/src/auth/session.ts',
+  'apps/api/src/auth/player-refusals.ts',
+];
+const ROUTE_FILES = ['apps/api/src/routes/**/*.ts', 'apps/api/src/publishing.ts'];
+const ROLE_REFUSALS = ['forbidden', 'requirePermission', 'PermissionDeniedError'];
+const CODE_403 = `/^(${CODES_WITH_STATUS_403.join('|')})$/`;
+// The first argument as a string literal or as a template literal with no substitution.
+const CODE_403_ARGUMENT = `:matches([arguments.0.value=${CODE_403}], [arguments.0.quasis.0.value.cooked=${CODE_403}][arguments.0.expressions.length=0])`;
+const NO_API_403 = [
+  {
+    selector: [
+      `NewExpression[callee.name='HttpError']${CODE_403_ARGUMENT}`,
+      `:matches(ClassDeclaration, ClassExpression)[superClass.name='HttpError'] CallExpression[callee.type='Super']${CODE_403_ARGUMENT}`,
+    ].join(', '),
+    message: `Only apps/api/src/auth/ builds a 403 (step 28, D1): a row of another organisation is invisible, so answer a missing row with found(row, 'The thing') or notFound('The thing') from apps/api/src/errors.ts. The codes with status 403 (${CODES_WITH_STATUS_403.join(', ')}; STATUS_OF in packages/contracts/src/errors.ts) are built by named constructors decided before any lookup: the role guard (auth/permissions.ts), the origin and CSRF checks (auth/session.ts) and the player protocol's refusals (auth/player-refusals.ts). A new refusal of that kind is a named constructor in apps/api/src/auth/, its file in API_403_BUILDERS in eslint.config.js.`,
+  },
+];
+/** The step 28 import ban of a route file that may import the role refusals in `allowed`. */
+function noRouteRefusal(allowed = []) {
+  const banned = ROLE_REFUSALS.filter((name) => !allowed.includes(name));
+  const name = `/^(${banned.join('|')})$/`;
+  const permissions = '/auth.permissions(\\.ts)?$/';
+  return [
+    {
+      selector: [
+        `ImportSpecifier[imported.name=${name}]`,
+        `ExportSpecifier[local.name=${name}]`,
+      ].join(', '),
+      message: `A route file does not refuse by role itself (step 28, D20): ${banned.join(', ')} of apps/api/src/auth/permissions.ts are for the role guard, which decides from ROUTE_PERMISSIONS before the handler runs. Give the route the keys it needs in its ROUTE_PERMISSIONS row (all(...) for keys it needs together); changeAsOperator(ctx, request, fn) checks them again inside the write. A refusal decided after the target is read is allowed only for the people routes' rank, self and grant rules (docs/portal-v2/stage-c.md section 1.6), in routes/members.ts: ROUTE_REFUSAL_IMPORTERS in eslint.config.js.`,
+    },
+    {
+      selector: [
+        `ImportDeclaration[source.value=${permissions}] > ImportNamespaceSpecifier`,
+        `ExportAllDeclaration[source.value=${permissions}]`,
+        `ImportExpression[source.value=${permissions}]`,
+      ].join(', '),
+      message: `A route file imports apps/api/src/auth/permissions.ts by name (step 28, D20): import { changeAsOperator, ... } from '../auth/permissions.ts', so the lint can see that none of the names is a role refusal (${ROLE_REFUSALS.join(', ')}), which only the role guard uses. A route gets the keys it needs from its ROUTE_PERMISSIONS row.`,
+    },
+  ];
+}
+const NO_ROUTE_REFUSAL = noRouteRefusal();
+// The route files that may import a role refusal, which one, and why (step 28, section 2.2 item 4).
+const ROUTE_REFUSAL_IMPORTERS = {
+  // The people routes' rank, self and grant rules are the one 403 allowed after a lookup
+  // (docs/portal-v2/stage-c.md section 1.6, D20). refused() builds it as a PermissionDeniedError,
+  // which carries the audit row's record. The target is read under row-level security first, so
+  // another organisation's id still answers 404 (tests/integration/cross-org.test.ts).
+  'apps/api/src/routes/members.ts': ['PermissionDeniedError'],
+  // GET /api/audit refuses a session whose role it cannot read. Unreachable: the role guard has
+  // already refused an unknown role, before the handler (auth/permissions.ts, permissionGuard).
+  'apps/api/src/routes/audit.ts': ['forbidden'],
+};
+
 // The API files that may ask the predicate, and why.
 const COMMIT_OUTCOME_ANSWERERS = [
   // The error handler: the last reader of every error of a request. It answers a COMMIT that did
@@ -1793,6 +1872,7 @@ const API_SYNTAX = [
   ...NO_COMMIT_OUTCOME_TEST,
   ...NO_COMMIT_OUTCOME_PREDICATE,
   ...NO_HAND_KEYED_PUBLISH,
+  ...NO_API_403,
 ];
 // The list of the offline tools (D25: scripts get the database rules too). The tools that read
 // the migrator URL get it as it is; every other script also gets NO_MIGRATOR_URL.
@@ -1836,11 +1916,13 @@ const DB_ONE_PLACES = {
 };
 
 // The API files that are the one place for something the rest of the API may not write, and the
-// list each is excused from (D5, EAX-08, D9). A file may be in more than one.
+// list each is excused from (D5, EAX-08, D9, D1). A file may be in more than one.
 const API_ONE_PLACES = [
   [CREDENTIAL_NAME_REFUSERS, NO_CREDENTIAL_NAMES],
   [LOOPBACK_NAME_ALLOWED, NO_LOOPBACK_NAME],
   [COMMIT_OUTCOME_ANSWERERS, NO_COMMIT_OUTCOME_PREDICATE],
+  // Step 28 (D1): the named constructors of the 403s.
+  [API_403_BUILDERS, NO_API_403],
 ];
 const API_ONE_PLACE_FILES = [...new Set(API_ONE_PLACES.flatMap(([files]) => files))];
 const apiExcusals = (file) =>
@@ -2074,6 +2156,31 @@ export default tseslint.config(
     },
   },
   {
+    // Step 28: the route files also refuse an import of the role refusals (NO_ROUTE_REFUSAL).
+    files: ROUTE_FILES,
+    ignores: [...TEST_FILES, ...Object.keys(ROUTE_REFUSAL_IMPORTERS)],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...API_SYNTAX,
+        ...NO_ROUTE_REFUSAL,
+        ...outboundSyntax('apps/api', null),
+      ],
+    },
+  },
+  ...Object.entries(ROUTE_REFUSAL_IMPORTERS).map(([file, allowed]) => ({
+    // Each keeps the rest of the route files' list, and may import only its own refusal.
+    files: [file],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...API_SYNTAX,
+        ...noRouteRefusal(allowed),
+        ...outboundSyntax('apps/api', null),
+      ],
+    },
+  })),
+  {
     // CHK-4: the two entry points keep the rest of the API's list (the loopback-name and
     // organisation-from-request rules included); only the clock rule is off, since they make it.
     files: ['apps/api/src/main.ts', 'apps/api/src/alerts-once.ts'],
@@ -2092,8 +2199,8 @@ export default tseslint.config(
       'no-restricted-syntax': ['error', ...API_SYNTAX, ...outboundSyntax('apps/api', name)],
     },
   })),
-  // D5, EAX-08 and D9: a file that refuses the credential names, may name a loopback host, or
-  // answers an unknown commit outcome keeps the rest of the API's list. One block per file,
+  // D5, EAX-08, D9 and D1: a file that refuses the credential names, may name a loopback host,
+  // answers an unknown commit outcome or builds a 403 keeps the rest of the API's list. One block per file,
   // because flat config replaces the option list and a file may be in more than one list.
   ...API_ONE_PLACE_FILES.map((file) => {
     const excused = apiExcusals(file);

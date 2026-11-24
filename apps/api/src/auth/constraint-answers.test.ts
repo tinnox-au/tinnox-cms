@@ -61,7 +61,7 @@ function serverError(code: string, constraint?: string): pg.DatabaseError {
   return error;
 }
 
-const nameTaken = (): HttpError => new HttpError(409, 'conflict', 'Taken.');
+const nameTaken = (): HttpError => new HttpError('conflict', 'Taken.');
 const ANSWERS = { folder_org_name_key: nameTaken } as const satisfies ConstraintAnswers;
 
 /** Runs a folder write that fails with `failure`, and returns what it threw. */

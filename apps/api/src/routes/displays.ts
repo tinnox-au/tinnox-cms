@@ -40,7 +40,7 @@ import { operatorOf } from '../auth/session.ts';
 import { perMinute, type AppContext } from '../context.ts';
 import { accept, iso, refuse, type Decision } from '../db-helpers.ts';
 import { contentRectOf, loadStatusViews } from '../display-state.ts';
-import { HttpError, notFound, parseInput } from '../errors.ts';
+import { found, HttpError, notFound, parseInput } from '../errors.ts';
 import { replaceTags, UNKNOWN_TAG } from '../tags.ts';
 
 interface DisplayRow {
@@ -199,19 +199,14 @@ function assertCanvasWithinLimits(canvas: Canvas, limits: Limits): void {
     ['height', canvas.height],
   ] as const) {
     if (value < limits.minCanvasSidePx || value > limits.maxCanvasSidePx) {
-      throw new HttpError(
-        400,
-        'validation_failed',
-        'The canvas size is outside the allowed range.',
-        {
-          details: [
-            {
-              path: `canvas.${side}`,
-              message: `must be between ${limits.minCanvasSidePx} and ${limits.maxCanvasSidePx} pixels`,
-            },
-          ],
-        },
-      );
+      throw new HttpError('validation_failed', 'The canvas size is outside the allowed range.', {
+        details: [
+          {
+            path: `canvas.${side}`,
+            message: `must be between ${limits.minCanvasSidePx} and ${limits.maxCanvasSidePx} pixels`,
+          },
+        ],
+      });
     }
   }
 }
@@ -301,8 +296,7 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     return readOrg(db, session.orgId, async (tx) => {
-      const row = await loadDisplay(tx, id);
-      if (row === null) throw notFound('The screen');
+      const row = found(await loadDisplay(tx, id), 'The screen');
       return toDisplayDto(row);
     });
   });
@@ -347,8 +341,7 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
            FROM display d WHERE d.id = $1 AND d.org_id = app_org_id() FOR UPDATE`,
           [id],
         );
-        const current = locked.rows[0];
-        if (current === undefined) throw notFound('The screen');
+        const current = found(locked.rows[0], 'The screen');
         // The combined result is re-checked: a canvas change can push an existing rectangle out of bounds.
         const spec = parseInput(
           CanvasSpecSchema,
@@ -536,7 +529,6 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
             return {
               value: refuse(
                 new HttpError(
-                  429,
                   'pairing_locked',
                   'Too many incorrect pairing codes. Wait a few minutes before trying again.',
                 ),
@@ -547,7 +539,6 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
           return {
             value: refuse(
               new HttpError(
-                400,
                 'pairing_code_invalid',
                 'That pairing code is not valid. It may have expired or already been used; ask the player for a new code.',
               ),

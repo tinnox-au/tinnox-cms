@@ -2,12 +2,18 @@
  * The error handler's answer to a COMMIT the database did not confirm (review round 3, SCX-03;
  * adoption plan step 24, D9), on a bare Fastify instance with the handler of every API route.
  */
-import { ApiErrorSchema } from '@tinnox/contracts';
+import { API_ERROR_CODES, ApiErrorSchema, STATUS_OF } from '@tinnox/contracts';
 import { CommitOutcomeUnknownError } from '@tinnox/db';
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
 import pg from 'pg';
 import { afterEach, describe, expect, it } from 'vitest';
-import { COMMIT_OUTCOME_UNKNOWN_MESSAGE, HttpError, registerErrorHandling } from './errors.ts';
+import {
+  COMMIT_OUTCOME_UNKNOWN_MESSAGE,
+  found,
+  HttpError,
+  notFound,
+  registerErrorHandling,
+} from './errors.ts';
 import { createLogger } from './logger.ts';
 
 /** What PostgreSQL sends when it refuses a statement, as the pg driver parses it. */
@@ -103,12 +109,57 @@ describe('a COMMIT the database did not confirm (SCX-03, D9)', () => {
   });
 
   it('still answers an HttpError as it says', async () => {
-    const { app } = await throwing(() => new HttpError(409, 'conflict', 'Taken.'));
+    const { app } = await throwing(() => new HttpError('conflict', 'Taken.'));
     const response = await app.inject({ method: 'POST', url: '/thing' });
     expect(response.statusCode).toBe(409);
     expect(ApiErrorSchema.parse(response.json()).error).toMatchObject({
       code: 'conflict',
       message: 'Taken.',
+    });
+  });
+});
+
+describe('the status of an HttpError (step 28, section 2.2)', () => {
+  it('is the status of its code, for every code', () => {
+    for (const code of API_ERROR_CODES) {
+      expect(new HttpError(code, 'x').statusCode, code).toBe(STATUS_OF[code]);
+    }
+  });
+
+  it('cannot be given by the caller', () => {
+    // @ts-expect-error the status comes from the code; a call site passes none
+    const error = new HttpError(403, 'not_found', 'x');
+    expect(error).toBeInstanceOf(HttpError);
+  });
+
+  it('answers a code with its status, a 403 code included', async () => {
+    const { app } = await throwing(() => new HttpError('url_expired', 'Expired.'));
+    const response = await app.inject({ method: 'GET', url: '/thing' });
+    expect(response.statusCode).toBe(403);
+    expect(ApiErrorSchema.parse(response.json()).error.code).toBe('url_expired');
+  });
+});
+
+describe('found (step 28, section 2.2)', () => {
+  it('returns the row a lookup found', () => {
+    const row = { id: 'a' };
+    expect(found(row, 'The tag')).toBe(row);
+    expect(found(0, 'The count')).toBe(0);
+    expect(found('', 'The name')).toBe('');
+  });
+
+  it.each([undefined, null])('answers %s as 404 not_found naming what was looked up', (row) => {
+    let caught: unknown;
+    try {
+      found(row, 'The tag');
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toEqual(notFound('The tag'));
+    expect(caught).toMatchObject({
+      statusCode: 404,
+      code: 'not_found',
+      message: 'The tag was not found.',
     });
   });
 });

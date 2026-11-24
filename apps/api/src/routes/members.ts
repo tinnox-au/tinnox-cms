@@ -52,7 +52,7 @@ import {
 import { operatorOf, type OperatorSession } from '../auth/session.ts';
 import { perMinute, type AppContext } from '../context.ts';
 import { bigintToNumber, iso, isoOrNull } from '../db-helpers.ts';
-import { HttpError, notFound, parseInput } from '../errors.ts';
+import { found, HttpError, parseInput } from '../errors.ts';
 
 interface MemberRow {
   id: string;
@@ -107,7 +107,11 @@ function storedRole(value: string): Role {
   return role;
 }
 
-/** A refusal by the people-route rules: always written as security.permission_denied (6.4). */
+/**
+ * A refusal by the people-route rules: always written as security.permission_denied (6.4). The one
+ * 403 a route may decide after reading its target (stage-c.md 1.6, D20), so this file is the one
+ * route file that may import PermissionDeniedError (ROUTE_REFUSAL_IMPORTERS in eslint.config.js).
+ */
 function refused(
   reason: DenialReason,
   object: { type: 'membership' | 'invite'; id: string } | null,
@@ -132,7 +136,7 @@ class RefusedConflict extends HttpError {
     message: string,
     details?: ApiErrorDetail[],
   ) {
-    super(409, code, message, details === undefined ? {} : { details });
+    super(code, message, details === undefined ? {} : { details });
     this.reason = reason;
   }
 }
@@ -147,7 +151,7 @@ const lastOwner = (): RefusedConflict =>
 const NOT_SIGNED_IN_YET = 'Only someone who has signed in at least once can be made an Owner.';
 
 const fieldConflict = (path: string, message: string): HttpError =>
-  new HttpError(409, 'conflict', message, { details: [{ path, message }] });
+  new HttpError('conflict', message, { details: [{ path, message }] });
 
 const memberNameTaken = (): HttpError =>
   fieldConflict('displayName', 'Another person in this organisation has, or had, this name.');
@@ -206,11 +210,9 @@ async function lockTarget(
      WHERE id = $1 AND org_id = app_org_id() FOR NO KEY UPDATE`,
     [id],
   );
-  const row = rows[0];
-  if (row === undefined) throw notFound('The person');
+  const row = found(rows[0], 'The person');
   if (row.removed_at !== null) {
     throw new HttpError(
-      409,
       'conflict',
       'This person was removed. Invite them again to bring them back.',
     );
@@ -535,7 +537,6 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): voi
             max: ABSOLUTE.maxPendingInvites,
             whenFull: () => {
               throw new HttpError(
-                409,
                 'conflict',
                 `The organisation already has ${ABSOLUTE.maxPendingInvites} invites waiting for TINNOX. Cancel ones that are no longer needed.`,
               );
@@ -603,11 +604,9 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: AppContext): voi
            WHERE id = $1 AND org_id = app_org_id() FOR UPDATE`,
           [id],
         );
-        const invite = rows[0];
-        if (invite === undefined) throw notFound('The invite');
+        const invite = found(rows[0], 'The invite');
         if (invite.status !== 'pending') {
           throw new HttpError(
-            409,
             'conflict',
             'This invite is no longer waiting. TINNOX may have just set the person up.',
           );

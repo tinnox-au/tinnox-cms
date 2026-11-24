@@ -139,10 +139,11 @@ export function registeredRoutes(app: FastifyInstance): string[] {
 }
 
 /**
- * The status each error code is answered with today (apps/api/src/errors.ts and the HttpError
- * sites). Step 28 of the adoption plan moves the table to packages/contracts as STATUS_OF, and
- * the API derives the status from it. No route answers `pairing_expired`: a poll of an expired
- * pairing answers 200 with `{ status: 'expired' }`.
+ * The status each error code is answered with, written out here as the tests' own oracle. Since
+ * step 28 of the adoption plan the API takes the status of an HttpError from STATUS_OF
+ * (packages/contracts/src/errors.ts); this copy stays separate so that a wrong entry there fails
+ * the tests that use expectError instead of moving them with it. No route answers
+ * `pairing_expired`: a poll of an expired pairing answers 200 with `{ status: 'expired' }`.
  */
 export const ERROR_STATUS = Object.freeze({
   bad_request: 400,

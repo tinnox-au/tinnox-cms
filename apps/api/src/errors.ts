@@ -2,11 +2,21 @@
  * One error type and one envelope for every non-2xx response. Responses never
  * carry stack traces, SQL text or internal messages.
  */
-import { apiError, HEADERS, type ApiErrorCode, type ApiErrorDetail } from '@tinnox/contracts';
+import {
+  apiError,
+  HEADERS,
+  STATUS_OF,
+  type ApiErrorCode,
+  type ApiErrorDetail,
+} from '@tinnox/contracts';
 import { classifyDbError, errorField, isCommitOutcomeUnknown } from '@tinnox/db';
 import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { z } from 'zod';
 
+/**
+ * An answer with an error code. Its status is the code's (STATUS_OF of @tinnox/contracts, step
+ * 28), so no call site passes one and a code cannot go out with another code's status.
+ */
 export class HttpError extends Error {
   readonly statusCode: number;
   readonly code: ApiErrorCode;
@@ -14,14 +24,13 @@ export class HttpError extends Error {
   readonly headers: Readonly<Record<string, string>> | undefined;
 
   constructor(
-    statusCode: number,
     code: ApiErrorCode,
     message: string,
     options: { details?: ApiErrorDetail[]; headers?: Record<string, string> } = {},
   ) {
     super(message);
     this.name = 'HttpError';
-    this.statusCode = statusCode;
+    this.statusCode = STATUS_OF[code];
     this.code = code;
     this.details = options.details;
     this.headers = options.headers;
@@ -29,7 +38,17 @@ export class HttpError extends Error {
 }
 
 export const notFound = (what = 'The requested item'): HttpError =>
-  new HttpError(404, 'not_found', `${what} was not found.`);
+  new HttpError('not_found', `${what} was not found.`);
+
+/**
+ * The row a lookup found, or 404 `not_found` naming `what` when it found none. Row-level security
+ * hides another organisation's row, so its id gets this same answer as an id never issued
+ * (adoption plan section 2.2, D1).
+ */
+export function found<T>(row: T, what = 'The requested item'): NonNullable<T> {
+  if (row === null || row === undefined) throw notFound(what);
+  return row;
+}
 
 function clip(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
@@ -47,7 +66,7 @@ export function parseInput<S extends z.ZodType>(
     path: clip(issue.path.map(String).join('.') || what, 200),
     message: clip(issue.message, 500),
   }));
-  throw new HttpError(400, 'validation_failed', `The ${what} is not valid.`, { details });
+  throw new HttpError('validation_failed', `The ${what} is not valid.`, { details });
 }
 
 /**

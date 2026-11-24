@@ -2,7 +2,9 @@
  * Tags for media and for displays (portal v2, stage A). A tag belongs to one
  * scope for life; the database refuses a display tag on media and the reverse.
  * Media tags are content (content.write, content.delete); screen tags are screen set-up
- * (screen.setup). A change or deletion checks the stored tag's scope (stage-c.md 6.1).
+ * (screen.setup). A new tag needs its scope's key; a change or deletion needs the content key and
+ * screen.setup together, which the role guard decides before the handler runs (ROUTE_PERMISSIONS,
+ * adoption plan D20), so no handler here refuses by role.
  */
 import {
   ABSOLUTE,
@@ -18,16 +20,11 @@ import {
 } from '@tinnox/contracts';
 import { readOrg, withCountedLimit, type OrgReadTx } from '@tinnox/db';
 import type { FastifyInstance } from 'fastify';
-import {
-  changeAsOperator,
-  requirePermission,
-  tagScopeKey,
-  type ConstraintAnswers,
-} from '../auth/permissions.ts';
+import { changeAsOperator, type ConstraintAnswers } from '../auth/permissions.ts';
 import { operatorOf } from '../auth/session.ts';
 import type { AppContext } from '../context.ts';
 import { bigintToNumber } from '../db-helpers.ts';
-import { HttpError, notFound, parseInput } from '../errors.ts';
+import { found, HttpError, notFound, parseInput } from '../errors.ts';
 
 interface TagRow {
   id: string;
@@ -72,7 +69,7 @@ async function loadTag(tx: OrgReadTx, id: string): Promise<TagDto | null> {
 }
 
 const nameTaken = (): HttpError =>
-  new HttpError(409, 'conflict', 'Another tag of this kind already has that name.');
+  new HttpError('conflict', 'Another tag of this kind already has that name.');
 
 /** Another tag of the organisation and scope has the name, ignoring case: its unique key refuses. */
 const NAME_TAKEN = { tag_org_scope_name_key: nameTaken } as const satisfies ConstraintAnswers;
@@ -116,7 +113,6 @@ export function registerTagRoutes(app: FastifyInstance, ctx: AppContext): void {
             max: ABSOLUTE.maxListItems,
             whenFull: () => {
               throw new HttpError(
-                409,
                 'conflict',
                 `The organisation already has ${ABSOLUTE.maxListItems} tags, which is the most it can have. Delete tags that are no longer used.`,
               );
@@ -161,15 +157,7 @@ export function registerTagRoutes(app: FastifyInstance, ctx: AppContext): void {
     return changeAsOperator(
       ctx,
       request,
-      async (tx, role) => {
-        // The scope decides the key; the row stays locked until the change commits.
-        const stored = await tx.query<{ scope: string }>(
-          'SELECT scope FROM tag WHERE id = $1 AND org_id = app_org_id() FOR UPDATE',
-          [id],
-        );
-        const scope = stored.rows[0]?.scope;
-        if (scope === undefined) throw notFound('The tag');
-        requirePermission(role, { all: [tagScopeKey(TagScopeSchema.parse(scope), 'write')] });
+      async (tx) => {
         const updated = await tx.query(
           `UPDATE tag SET name = COALESCE($2, name), colour = COALESCE($3, colour)
            WHERE id = $1 AND org_id = app_org_id()`,
@@ -199,15 +187,13 @@ export function registerTagRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.delete(ROUTES.tagPattern, async (request, reply) => {
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
-    await changeAsOperator(ctx, request, async (tx, role) => {
+    await changeAsOperator(ctx, request, async (tx) => {
       const current = await tx.query<TagRow>(
         `SELECT ${TAG_COLUMNS} FROM tag t
          WHERE t.id = $1 AND t.org_id = app_org_id() FOR UPDATE OF t`,
         [id],
       );
-      const row = current.rows[0];
-      if (row === undefined) throw notFound('The tag');
-      requirePermission(role, { all: [tagScopeKey(TagScopeSchema.parse(row.scope), 'delete')] });
+      const row = found(current.rows[0], 'The tag');
       await tx.query('DELETE FROM tag WHERE id = $1 AND org_id = app_org_id()', [id]);
       return {
         value: undefined,

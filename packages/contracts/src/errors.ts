@@ -44,6 +44,50 @@ export const API_ERROR_CODES = [
 export const ApiErrorCodeSchema = z.enum(API_ERROR_CODES);
 export type ApiErrorCode = z.infer<typeof ApiErrorCodeSchema>;
 
+/**
+ * The one HTTP status of each code (adoption plan section 2.2, step 28). The API's HttpError takes
+ * its status from here, so a code cannot be sent with a status it does not have
+ * (`not_found` with 403, say). eslint.config.js reads the 403 codes from this table for its lint
+ * of the route files, so a new 403 code is covered there as soon as it is added here.
+ */
+export const STATUS_OF = Object.freeze({
+  bad_request: 400,
+  validation_failed: 400,
+  unauthenticated: 401,
+  forbidden: 403,
+  csrf_failed: 403,
+  origin_not_allowed: 403,
+  not_found: 404,
+  conflict: 409,
+  idempotency_conflict: 409,
+  payload_too_large: 413,
+  unsupported_media_type: 415,
+  rate_limited: 429,
+  storage_quota_exceeded: 413,
+  media_not_ready: 409,
+  media_in_use: 409,
+  playlist_in_use: 409,
+  app_in_use: 409,
+  schedule_in_use: 409,
+  layout_in_use: 409,
+  last_owner: 409,
+  publication_rejected: 422,
+  pairing_code_invalid: 400,
+  // No route answers it today: a poll of an expired pairing answers 200 { status: 'expired' },
+  // and a claim of an expired code answers pairing_code_invalid. 400, as that code.
+  pairing_expired: 400,
+  pairing_locked: 429,
+  device_revoked: 401,
+  url_expired: 403,
+  url_signature_invalid: 403,
+  range_not_satisfiable: 416,
+  service_unavailable: 503,
+  mail_not_configured: 503,
+  confirmation_not_sent: 503,
+  commit_outcome_unknown: 500,
+  internal_error: 500,
+} as const satisfies Record<ApiErrorCode, number>);
+
 export const ApiErrorDetailSchema = z
   .object({
     /** Dotted path to the offending field, or an item reference such as items[2]. */

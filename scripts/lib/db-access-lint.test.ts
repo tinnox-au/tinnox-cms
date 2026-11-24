@@ -401,8 +401,12 @@ describe('the role switch (D25)', { timeout: 30_000 }, () => {
 // place for what that entry refuses. An excusal whose file no longer does the thing would keep
 // the entry off it for nothing, so each excused entry must still fire on its file's own text.
 describe('the one-place excusals are each still needed (CHK-12)', { timeout: 30_000 }, () => {
-  it('lists the files of packages/db, the planner of @tinnox/domain, the API configuration and the error handler', async () => {
+  it('lists the files of packages/db, the planner of @tinnox/domain, the API configuration, the error handler and the 403 constructors', async () => {
     expect(Object.keys(await exported('ONE_PLACE_EXCUSALS')).sort()).toEqual([
+      // Step 28: the named constructors of the 403s (D1).
+      'apps/api/src/auth/permissions.ts',
+      'apps/api/src/auth/player-refusals.ts',
+      'apps/api/src/auth/session.ts',
       'apps/api/src/config.ts',
       // Step 27: the handler asks isCommitOutcomeUnknown (D9)...
       'apps/api/src/errors.ts',

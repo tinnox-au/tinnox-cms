@@ -17,7 +17,7 @@ import { changeAsOperator, type ConstraintAnswers } from '../auth/permissions.ts
 import { operatorOf } from '../auth/session.ts';
 import type { AppContext } from '../context.ts';
 import { bigintToNumber } from '../db-helpers.ts';
-import { HttpError, notFound, parseInput } from '../errors.ts';
+import { found, HttpError, notFound, parseInput } from '../errors.ts';
 
 interface FolderRow {
   id: string;
@@ -44,7 +44,7 @@ async function loadFolder(tx: OrgReadTx, id: string): Promise<FolderDto | null> 
 }
 
 const nameTaken = (): HttpError =>
-  new HttpError(409, 'conflict', 'Another folder already has that name.');
+  new HttpError('conflict', 'Another folder already has that name.');
 
 /** Another folder of the organisation has the name, ignoring case: its unique key refuses. */
 const NAME_TAKEN = { folder_org_name_key: nameTaken } as const satisfies ConstraintAnswers;
@@ -87,7 +87,6 @@ export function registerFolderRoutes(app: FastifyInstance, ctx: AppContext): voi
             max: ABSOLUTE.maxListItems,
             whenFull: () => {
               throw new HttpError(
-                409,
                 'conflict',
                 `The organisation already has ${ABSOLUTE.maxListItems} folders, which is the most it can have. Delete folders that are no longer used.`,
               );
@@ -166,8 +165,7 @@ export function registerFolderRoutes(app: FastifyInstance, ctx: AppContext): voi
          WHERE f.id = $1 AND f.org_id = app_org_id() FOR UPDATE OF f`,
         [id],
       );
-      const row = current.rows[0];
-      if (row === undefined) throw notFound('The folder');
+      const row = found(current.rows[0], 'The folder');
       await tx.query('DELETE FROM folder WHERE id = $1 AND org_id = app_org_id()', [id]);
       return {
         value: undefined,

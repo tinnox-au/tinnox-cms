@@ -54,7 +54,7 @@ import {
 } from './permission-audit.ts';
 import { operatorOf, type OperatorSession } from './session.ts';
 
-export type RefineName = 'displayPatchFields' | 'tagScopeFromBody' | 'tagScopeFromRow';
+export type RefineName = 'displayPatchFields' | 'tagScopeFromBody';
 /** The keys a route needs. */
 export type KeyRule =
   | { readonly all: readonly PermissionKey[] }
@@ -148,18 +148,18 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteRule>> = Object.fre
   [`DELETE ${ROUTES.layoutPattern}`]: write(all('content.delete'), 'layout.delete'),
 
   [`GET ${ROUTES.tags}`]: read(all('org.read')),
+  // A new tag needs its scope's key: the body names the scope, so the guard decides it before
+  // any lookup. A change or deletion needs both scopes' keys (D20): the scope is known only from
+  // the stored tag, and a refusal after that lookup is what step 28 removed. Every role with a
+  // content key also holds screen.setup (packages/domain/src/permissions.ts), so today's roles
+  // get the same answers; a later split of the keys refuses instead of widening. That POST stays
+  // per scope while PATCH and DELETE need both is recorded in D20.
   [`POST ${ROUTES.tags}`]: write(
     any('tagScopeFromBody', 'content.write', 'screen.setup'),
     'tag.create',
   ),
-  [`PATCH ${ROUTES.tagPattern}`]: write(
-    any('tagScopeFromRow', 'content.write', 'screen.setup'),
-    'tag.update',
-  ),
-  [`DELETE ${ROUTES.tagPattern}`]: write(
-    any('tagScopeFromRow', 'content.delete', 'screen.setup'),
-    'tag.delete',
-  ),
+  [`PATCH ${ROUTES.tagPattern}`]: write(all('content.write', 'screen.setup'), 'tag.update'),
+  [`DELETE ${ROUTES.tagPattern}`]: write(all('content.delete', 'screen.setup'), 'tag.delete'),
 
   [`GET ${ROUTES.folders}`]: read(all('org.read')),
   [`POST ${ROUTES.folders}`]: write(all('content.write'), 'folder.create'),
@@ -263,7 +263,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 /**
  * Narrow an any-of rule from the parsed (not yet validated) body. Null keeps the any-of
- * requirement; validation then answers 400, or the handler checks the stored row.
+ * requirement; validation then answers 400.
  */
 export const REFINES: {
   readonly [N in RefineName]: (body: unknown) => readonly PermissionKey[] | null;
@@ -276,8 +276,6 @@ export const REFINES: {
     const scope = body['scope'];
     return scope === 'media' || scope === 'display' ? [tagScopeKey(scope, 'write')] : null;
   },
-  // The scope is known only after the handler reads the tag (routes/tags.ts).
-  tagScopeFromRow: () => null,
 });
 
 // ------------------------------------------------------------------------ the test
@@ -350,13 +348,13 @@ export function createRouteCheck(): {
 // --------------------------------------------------------------------------- refusals
 
 export const forbidden = (): HttpError =>
-  new HttpError(403, 'forbidden', "Your role doesn't allow this.");
+  new HttpError('forbidden', "Your role doesn't allow this.");
 
 /** A refusal by role found inside a transaction or by a people-route rule. Carries what the audit row needs. */
 export class PermissionDeniedError extends HttpError {
   readonly record: DenialRecord;
   constructor(record: DenialRecord) {
-    super(403, 'forbidden', "Your role doesn't allow this.");
+    super('forbidden', "Your role doesn't allow this.");
     this.name = 'PermissionDeniedError';
     this.record = record;
   }
@@ -463,7 +461,7 @@ export async function assertStillAllowed(
 ): Promise<Role> {
   const row = await membershipForCheck(tx, session.membershipId, session.createdAt);
   if (row === null || row.removedAt !== null || row.cutOff) {
-    throw new HttpError(401, 'unauthenticated', 'Sign in to continue.');
+    throw new HttpError('unauthenticated', 'Sign in to continue.');
   }
   const role = parseRole(row.role);
   if (role === null || !meets(role, required)) {
@@ -497,7 +495,6 @@ export function lockTimeoutAsUnavailable(request: FastifyRequest, error: unknown
   if (!isLockTimeout(failure)) return error;
   request.log.warn({ pgCode: failure.sqlstate }, 'a write waited too long for a lock');
   return new HttpError(
-    503,
     'service_unavailable',
     'Another change is being saved. Try again in a moment.',
     { headers: { 'retry-after': '2' } },

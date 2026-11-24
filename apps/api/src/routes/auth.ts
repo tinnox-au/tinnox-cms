@@ -435,7 +435,7 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
         throw error;
       }
       if (revoked === null) {
-        throw new HttpError(401, 'unauthenticated', 'Sign in to continue.');
+        throw new HttpError('unauthenticated', 'Sign in to continue.');
       }
       // The portal should navigate to this URL so the identity provider's own session ends too.
       return { redirectTo: await ctx.idp.endSessionUrl(revoked.idToken) };

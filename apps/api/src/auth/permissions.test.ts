@@ -128,15 +128,24 @@ describe('ROUTE_PERMISSIONS', () => {
     expect(silent).toBeDefined();
   });
 
-  it('uses refines only on the display PATCH and the tag writes', () => {
+  it('uses refines only on the display PATCH and the new tag', () => {
     const refined = Object.entries(ROUTE_PERMISSIONS)
       .filter(([, rule]) => 'refine' in rule)
       .map(([key, rule]) => [key, 'refine' in rule ? rule.refine : null]);
     expect(Object.fromEntries(refined)).toEqual({
       'PATCH /api/displays/:id': 'displayPatchFields',
       'POST /api/tags': 'tagScopeFromBody',
-      'PATCH /api/tags/:id': 'tagScopeFromRow',
-      'DELETE /api/tags/:id': 'tagScopeFromRow',
+    });
+  });
+
+  // D20: the scope of a stored tag is known only after a lookup, so a change or deletion needs
+  // both scopes' keys, decided by the guard before the handler runs.
+  it('needs the content key and screen.setup together to change or delete a tag (D20)', () => {
+    expect(ROUTE_PERMISSIONS['PATCH /api/tags/:id']).toMatchObject({
+      all: ['content.write', 'screen.setup'],
+    });
+    expect(ROUTE_PERMISSIONS['DELETE /api/tags/:id']).toMatchObject({
+      all: ['content.delete', 'screen.setup'],
     });
   });
 });
@@ -258,7 +267,6 @@ describe('tag scopes', () => {
     expect(REFINES.tagScopeFromBody({})).toBeNull();
     expect(REFINES.tagScopeFromBody('display')).toBeNull();
     expect(REFINES.tagScopeFromBody(null)).toBeNull();
-    expect(REFINES.tagScopeFromRow({ scope: 'display' })).toBeNull();
   });
 
   // No real role holds content.write without screen.setup (stage-c.md 1.3), so a hypothetical
@@ -271,6 +279,23 @@ describe('tag scopes', () => {
     const media = REFINES.tagScopeFromBody({ scope: 'media' }) ?? [];
     expect(meetsKeys(held, { all: display })).toBe(false);
     expect(meetsKeys(held, { all: media })).toBe(true);
+  });
+
+  // D20: a split of the keys refuses a change rather than widening it, for a tag of either scope.
+  it('refuses a change and a deletion for a key set with one of the two keys (D20)', () => {
+    const patch = ROUTE_PERMISSIONS['PATCH /api/tags/:id'];
+    const remove = ROUTE_PERMISSIONS['DELETE /api/tags/:id'];
+    if (patch === undefined || !('all' in patch) || remove === undefined || !('all' in remove)) {
+      throw new Error('the tag change and deletion rules are all-of');
+    }
+    const contentOnly = new Set<PermissionKey>(['org.read', 'content.write', 'content.delete']);
+    const screensOnly = new Set<PermissionKey>(['org.read', 'screen.setup']);
+    const both = new Set<PermissionKey>([...contentOnly, ...screensOnly]);
+    for (const rule of [patch, remove]) {
+      expect(meetsKeys(contentOnly, rule)).toBe(false);
+      expect(meetsKeys(screensOnly, rule)).toBe(false);
+      expect(meetsKeys(both, rule)).toBe(true);
+    }
   });
 });
 

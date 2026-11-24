@@ -101,7 +101,6 @@ export function registerAlertRecipientRoutes(app: FastifyInstance, ctx: AppConte
       const mail = ctx.mail;
       if (mail === null) {
         throw new HttpError(
-          503,
           'mail_not_configured',
           'E-mail is not set up on this server yet, so alert addresses cannot be added.',
         );
@@ -121,7 +120,7 @@ export function registerAlertRecipientRoutes(app: FastifyInstance, ctx: AppConte
               );
               // The address already listed is answered before the ceiling, as it always was.
               if (listed.rows[0]?.taken === true) {
-                throw new HttpError(409, 'conflict', 'This address is already on the alert list.', {
+                throw new HttpError('conflict', 'This address is already on the alert list.', {
                   details: [
                     { path: 'email', message: 'This address is already on the alert list.' },
                   ],
@@ -132,7 +131,6 @@ export function registerAlertRecipientRoutes(app: FastifyInstance, ctx: AppConte
             max: MAX_ALERT_RECIPIENTS,
             whenFull: () => {
               throw new HttpError(
-                409,
                 'conflict',
                 `The alert list already has ${MAX_ALERT_RECIPIENTS} addresses. Remove one first.`,
               );
@@ -189,7 +187,6 @@ export function registerAlertRecipientRoutes(app: FastifyInstance, ctx: AppConte
       } catch (error) {
         request.log.error(mailErrorCode(error), 'alert confirmation e-mail was not sent');
         throw new HttpError(
-          503,
           'confirmation_not_sent',
           'The address was added, but the confirmation e-mail could not be sent. Remove the address and add it again later.',
         );
@@ -285,7 +282,7 @@ export function registerAlertConfirmRoute(app: FastifyInstance, ctx: AppContext)
       }).catch((error: unknown) => {
         throw lockTimeoutAsUnavailable(request, error);
       });
-      if (!confirmed) throw new HttpError(404, 'not_found', 'This link is not valid any more.');
+      if (!confirmed) throw new HttpError('not_found', 'This link is not valid any more.');
       return reply.code(204).send();
     },
   );

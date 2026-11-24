@@ -28,7 +28,7 @@ import { recordRefusal } from '../auth/refusal.ts';
 import { operatorOf, type OperatorSession } from '../auth/session.ts';
 import { perMinute, type AppContext } from '../context.ts';
 import { accept, refuse, type Decision } from '../db-helpers.ts';
-import { HttpError, notFound, parseInput } from '../errors.ts';
+import { found, HttpError, notFound, parseInput } from '../errors.ts';
 import { MEDIA_COLUMNS, toMediaDto, usedBytes, type MediaRow } from '../media/rows.ts';
 import { serveObject } from '../media/serve.ts';
 import { sniffMediaType } from '../media/sniff.ts';
@@ -46,7 +46,7 @@ const FOLDER_OR_TAG_GONE = {
  * the DELETE. The two keys that point at a media item and do not cascade.
  */
 const usedMeanwhile = (): HttpError =>
-  new HttpError(409, 'media_in_use', 'This file has just been used elsewhere. Try again.');
+  new HttpError('media_in_use', 'This file has just been used elsewhere. Try again.');
 const USED_MEANWHILE = {
   playlist_item_media_id_org_id_fkey: usedMeanwhile,
   publication_asset_media_id_org_id_fkey: usedMeanwhile,
@@ -113,7 +113,6 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
       const session = operatorOf(request);
       if (!request.isMultipart()) {
         throw new HttpError(
-          415,
           'unsupported_media_type',
           `Send the file as multipart/form-data in a field named "${MEDIA_UPLOAD_FIELD}".`,
         );
@@ -125,7 +124,6 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
         await recordUploadRefusal(request, session, 'denied', { reason: 'storage_quota_exceeded' });
         abandonBody(request, reply);
         throw new HttpError(
-          413,
           'storage_quota_exceeded',
           `The organisation's storage is full (${megabytes(limits.maxOrgStorageBytes)}). Delete unused media first.`,
         );
@@ -136,12 +134,10 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
       const tooLarge = (): HttpError =>
         quotaBound
           ? new HttpError(
-              413,
               'storage_quota_exceeded',
               `The file does not fit in the remaining storage (${megabytes(remaining)} free).`,
             )
           : new HttpError(
-              413,
               'payload_too_large',
               `The file is larger than the upload limit of ${megabytes(limits.maxUploadBytes)}.`,
             );
@@ -164,7 +160,6 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
       if (part === undefined || part.fieldname !== MEDIA_UPLOAD_FIELD) {
         part?.file.resume();
         throw new HttpError(
-          400,
           'bad_request',
           `The upload must contain one file in a field named "${MEDIA_UPLOAD_FIELD}".`,
         );
@@ -182,7 +177,7 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
       if (received.bytes === 0) {
         await ctx.media.discard(received.jobId);
         await recordUploadRefusal(request, session, 'failure', { reason: 'empty_file' });
-        throw new HttpError(400, 'bad_request', 'The file is empty.');
+        throw new HttpError('bad_request', 'The file is empty.');
       }
       const mimeType = sniffMediaType(received.head);
       if (mimeType === null) {
@@ -192,7 +187,6 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
           bytes: received.bytes,
         });
         throw new HttpError(
-          415,
           'unsupported_media_type',
           'The file content is not a JPEG, PNG or MP4 file. The file name and extension are ignored; only the content counts.',
         );
@@ -213,7 +207,6 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
             whenFull: (usedNow) => ({
               value: refuse(
                 new HttpError(
-                  413,
                   'storage_quota_exceeded',
                   `The file does not fit in the remaining storage (${megabytes(Math.max(0, limits.maxOrgStorageBytes - usedNow))} free).`,
                 ),
@@ -303,8 +296,7 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     return readOrg(db, session.orgId, async (tx) => {
-      const row = await loadMediaRow(tx, id);
-      if (row === null) throw notFound('The media item');
+      const row = found(await loadMediaRow(tx, id), 'The media item');
       return toMediaDto(row);
     });
   });
@@ -333,14 +325,12 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
            WHERE id = $1 AND org_id = app_org_id() AND deleted_at IS NULL FOR NO KEY UPDATE`,
           [id],
         );
-        const current = locked.rows[0];
-        if (current === undefined) throw notFound('The media item');
+        const current = found(locked.rows[0], 'The media item');
 
         const duration = patch.defaultDurationMs;
         if (duration !== undefined && duration !== null) {
           if (current.kind !== 'image') {
             throw new HttpError(
-              400,
               'validation_failed',
               'Only images have a default duration; a video plays for its own length.',
               {
@@ -353,7 +343,6 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
             duration > limits.maxImageItemDurationMs
           ) {
             throw new HttpError(
-              400,
               'validation_failed',
               'The default duration is outside the allowed range.',
               {
@@ -495,11 +484,7 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
       row.sha256 === null ||
       !mime.success
     ) {
-      throw new HttpError(
-        409,
-        'media_not_ready',
-        'This file has no preview because it is not ready.',
-      );
+      throw new HttpError('media_not_ready', 'This file has no preview because it is not ready.');
     }
     // shortcut: no backfill, no video posters; such media serves the original here.
     const thumb = thumbnail ? row.thumb_storage_key : null;
@@ -543,11 +528,9 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
            WHERE id = $1 AND org_id = app_org_id() AND deleted_at IS NULL FOR UPDATE`,
           [id],
         );
-        const row = rows[0];
-        if (row === undefined) throw notFound('The media item');
+        const row = found(rows[0], 'The media item');
         if (row.status === 'processing') {
           throw new HttpError(
-            409,
             'conflict',
             'This file is still being checked. Delete it once the check has finished.',
           );
@@ -563,7 +546,6 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
         );
         if (used.rows.length > 0) {
           throw new HttpError(
-            409,
             'media_in_use',
             'This file is used in a playlist. Remove it from the playlist first.',
             {

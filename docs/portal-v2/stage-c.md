@@ -34,14 +34,14 @@ Active keys (`PERMISSION_KEYS`, in this order):
 | `org.read` | Every read: screens, sites, delivery status, media (preview, thumbnail, usage), folders, tags, apps, playlists, schedules, layouts, push plan, overview. HEAD is treated as GET |
 | `activity.read` | `GET /api/audit` limited to the activity categories (1.5); `GET /api/members/names` |
 | `audit.read` | `GET /api/audit` unfiltered |
-| `content.write` | Create and edit media (upload included), folders, media tags, apps, playlists (duplicate included), schedules, layouts |
-| `content.delete` | Delete folders, media tags, apps, playlists, schedules, layouts |
+| `content.write` | Create and edit media (upload included), folders, media tags, apps, playlists (duplicate included), schedules, layouts. Renaming or recolouring a tag of either scope needs `screen.setup` too, since 2026-11-25 (step 28 of the poteto adoption plan, D20); the same for every role today, since every role with a content key holds `screen.setup` (1.3) |
+| `content.delete` | Delete folders, media tags, apps, playlists, schedules, layouts. Deleting a tag of either scope needs `screen.setup` too, since 2026-11-25 (step 28 of the poteto adoption plan, D20) |
 | `media.delete` | Delete media |
 | `screen.assign` | The `assigned*` fields of `PATCH /api/displays/:id` |
 | `push.publish` | `POST /api/push` |
 | `screen.details` | A screen's `name`, `description`, `tagIds` |
 | `screen.hours` | A screen's `workingHours` |
-| `screen.setup` | Add a screen; `canvas`, `contentRect`, `defaultFit`, `rotation`; create, rename, recolour and delete screen tags |
+| `screen.setup` | Add a screen; `canvas`, `contentRect`, `defaultFit`, `rotation`; create, rename, recolour and delete screen tags. Renaming, recolouring and deleting a tag of either scope need it with the content key, since 2026-11-25 (step 28 of the poteto adoption plan, D20) |
 | `screen.pair` | Claim a pairing code, revoke a player, cancel a pending pairing |
 | `member.read` | `GET /api/members`, `GET /api/invites`; the Users page |
 | `member.manage` | Invite, cancel an invite, change a role, correct a name, remove, sign out everywhere; always followed by the rank rule (1.4) |
@@ -953,8 +953,8 @@ Keyed by `` `${METHOD} ${ROUTES.<name>}` `` (the contract constants, so a rename
 | 32 | DELETE | `/api/layouts/:id` (`layoutPattern`) | all `content.delete` | layouts.ts:256 |
 | 33 | GET | `/api/tags` (`tags`) | all `org.read` | tags.ts:134 |
 | 34 | POST | `/api/tags` (`tags`) | any `content.write`, `screen.setup`; refine `tagScopeFromBody` | tags.ts:149 |
-| 35 | PATCH | `/api/tags/:id` (`tagPattern`) | any `content.write`, `screen.setup`; refine `tagScopeFromRow` | tags.ts:197 |
-| 36 | DELETE | `/api/tags/:id` (`tagPattern`) | any `content.delete`, `screen.setup`; refine `tagScopeFromRow` | tags.ts:229 |
+| 35 | PATCH | `/api/tags/:id` (`tagPattern`) | all `content.write`, `screen.setup` since 2026-11-25 (step 28 of the poteto adoption plan, D20); until then any `content.write`, `screen.setup`, refine `tagScopeFromRow` | tags.ts:197 |
+| 36 | DELETE | `/api/tags/:id` (`tagPattern`) | all `content.delete`, `screen.setup` since 2026-11-25 (step 28 of the poteto adoption plan, D20); until then any `content.delete`, `screen.setup`, refine `tagScopeFromRow` | tags.ts:229 |
 | 37 | GET | `/api/folders` (`folders`) | all `org.read` | folders.ts:58 |
 | 38 | POST | `/api/folders` (`folders`) | all `content.write` | folders.ts:72 |
 | 39 | PATCH | `/api/folders/:id` (`folderPattern`) | all `content.write` | folders.ts:119 |
@@ -979,7 +979,7 @@ Keyed by `` `${METHOD} ${ROUTES.<name>}` `` (the contract constants, so a rename
 | 58 | POST | `/api/invites` (`invites`) | all `member.manage` (then `grantableRoles`) | members.ts |
 | 59 | POST | `/api/invites/:id/cancel` (`inviteCancelPattern`) | all `member.manage` (then the rank rule) | members.ts |
 
-Totals: `org.read` 22, `activity.read` 2, `member.read` 2, `content.write` 13, `content.delete` 5, `media.delete` 1, `screen.setup` 1, `screen.pair` 2, `push.publish` 1, publish all-of 1, any-with-refine 4, `member.manage` 5. `screen.details`, `screen.hours` and `screen.assign` are reached only through row 6 (and `screen.assign` through row 47).
+Totals: `org.read` 22, `activity.read` 2, `member.read` 2, `content.write` 13, `content.delete` 5, `media.delete` 1, `screen.setup` 1, `screen.pair` 2, `push.publish` 1, publish all-of 1, any-with-refine 4, `member.manage` 5. Since 2026-11-25 (step 28 of the poteto adoption plan, D20), rows 35 and 36 are all-of two keys, so any-with-refine is 2 (rows 6 and 34). `screen.details`, `screen.hours` and `screen.assign` are reached only through row 6 (and `screen.assign` through row 47).
 
 Refine functions (`REFINES`), all pure and unit-tested with a hypothetical key set (`meetsKeys`, 6.2), because under 1.3 no real role holds one candidate key without the other:
 
@@ -987,7 +987,7 @@ Refine functions (`REFINES`), all pure and unit-tested with a hypothetical key s
 |---|---|---|
 | `displayPatchFields` | `displayPatchKeys(Object.keys(body))` when the body is a plain object; unknown fields map to nothing (`.strict()` answers 400); `{}` gives `[]` (400 follows); not an object gives null (stay any-of, 400 follows) | nothing more |
 | `tagScopeFromBody` | `scope` `'media'` → `[content.write]`, `'display'` → `[screen.setup]`; anything else → null (400 follows) | nothing more |
-| `tagScopeFromRow` | null (stay any-of) | PATCH: new first read `SELECT scope FROM tag WHERE id = $1 AND org_id = app_org_id() FOR UPDATE` (404 when none), then `requirePermission(role, { all: [tagScopeKey(scope, 'write')] })`. DELETE: after the existing locked read (`tags.ts:233-239`), `requirePermission(role, { all: [tagScopeKey(row.scope, 'delete')] })` |
+| `tagScopeFromRow` | Removed on 2026-11-25 (step 28 of the poteto adoption plan, D20): rows 35 and 36 are all-of, decided by the guard before any lookup. It was null (stay any-of) | Removed with it: the PATCH's first read of the scope and both handlers' `requirePermission` on the stored tag's scope, a refusal by role after a lookup. The DELETE's locked read stays, for the audit row; the PATCH's `UPDATE` answers 404 when no row matches |
 
 ```ts
 /** PATCH /api/displays/:id field → key. `satisfies` makes a new DisplayPatch field a compile error until it is mapped. */
@@ -1007,7 +1007,7 @@ export function tagScopeKey(scope: TagScope, action: 'write' | 'delete'): Permis
 ### 6.2 The guard, the startup check, HEAD (`apps/api/src/auth/permissions.ts`, new)
 
 ```ts
-export type RefineName = 'displayPatchFields' | 'tagScopeFromBody' | 'tagScopeFromRow';
+export type RefineName = 'displayPatchFields' | 'tagScopeFromBody';   // 'tagScopeFromRow' removed on 2026-11-25 (adoption plan step 28, D20)
 export type RouteRule =
   | { readonly all: readonly PermissionKey[] }
   | { readonly any: readonly PermissionKey[]; readonly refine: RefineName };
@@ -1061,7 +1061,7 @@ The body is parsed (not validated) before preHandlers, so refines read it; a mul
 ### 6.3 The check inside every write
 
 ```ts
-export const forbidden = (): HttpError => new HttpError(403, 'forbidden', "Your role doesn't allow this.");
+export const forbidden = (): HttpError => new HttpError('forbidden', "Your role doesn't allow this.");  // the status comes from the code since step 28 of the poteto adoption plan
 
 /** A refusal by role found inside a transaction or by a people-route rule. Carries what the audit row needs. */
 export class PermissionDeniedError extends HttpError { readonly record: DenialRecord }  // 403 forbidden, same message
@@ -1116,8 +1116,8 @@ The 28 write transactions, each changed from `withOrg`/`withOrgDecision` to the 
 | playlists.ts:232, :274, :373, :441 | POST, PUT, duplicate, DELETE | `withOrgAllowed` | |
 | playlists.ts:547 | POST …/publish | `withOrgDecisionAllowed` inside `attempt()` | runs in each attempt, before `lockPublishKey` `:551` |
 | tags.ts:154 | POST /api/tags | `withOrgAllowed` | before the tag-count lock `:156` |
-| tags.ts:202 | PATCH /api/tags/:id | `withOrgAllowed` | then the scope read (6.1) |
-| tags.ts:232 | DELETE /api/tags/:id | `withOrgAllowed` | then the scope check on `row.scope` |
+| tags.ts:202 | PATCH /api/tags/:id | `withOrgAllowed` | then the scope read (6.1); the scope read was removed on 2026-11-25 (step 28 of the poteto adoption plan, D20) |
+| tags.ts:232 | DELETE /api/tags/:id | `withOrgAllowed` | then the scope check on `row.scope`; the check was removed on 2026-11-25 (step 28 of the poteto adoption plan, D20) |
 | folders.ts:77, :124, :153 | POST, PATCH, DELETE folders | `withOrgAllowed` | |
 | push.ts:92 | POST /api/push, each screen | `withOrgAllowed` | `pushDisplay(request, session, displayId, key)`; before `lockPublishKey` `:93`, so a demoted member's replay of the same key is refused too |
 
@@ -1339,7 +1339,7 @@ Every control below is in a WP5 file. "Hidden" also means: a row menu left with 
 | Screen row menu | `features/displays/list/ScreenRowMenu.tsx:20-80` | Assign content `:38-45` screen.assign; Push now `:46-55` push.publish; Edit tags `:56-63` screen.details; Revoke player `:64-77` screen.pair | Items hidden; Open only → no menu |
 | Screens selection and bulk bar | `ScreensList.tsx:808-813`, `:845-852`, `:866-906` | Assign `:873-883` screen.assign; Add tags `:884-894` screen.details; Push `:895-905` push.publish | Items hidden; selection off |
 | Screens tags dialog | `ScreensList.tsx:946-955` | create: screen.setup | `allowCreate={useCan('screen.setup')}` |
-| Settings tag pages | `features/settings/TagsPage.tsx` | media: New tag `:125-135` (used `:265`, `:288`), Rename `:202-209`, Change colour `:210-217` content.write; Delete `:224-232` content.delete. display: all screen.setup. "Show files" `:218-222` stays | Hidden per scope; empty text "An editor adds tags." |
+| Settings tag pages | `features/settings/TagsPage.tsx` | media: New tag `:125-135` (used `:265`, `:288`), Rename `:202-209`, Change colour `:210-217` content.write; Delete `:224-232` content.delete. display: all screen.setup. "Show files" `:218-222` stays. Since 2026-11-25 (step 28 of the poteto adoption plan, D20), Rename, Change colour and Delete need the content key and screen.setup together in both scopes; New tag stays per scope | Hidden per scope; empty text "An editor adds tags." |
 
 ### 7.3 Read-only editors and the screen page (WP6)
 
@@ -1860,7 +1860,7 @@ Every `// shortcut:` this build adds: a push refused part-way answers 403 withou
 | # | Choice | Why |
 |---|---|---|
 | 1 | Loop guard: a second HMAC label (`login-state-reauth`) for the forced login's state key; the callback tries it first. No `max_age`, no schema change | How login state is stored today (`routes/auth.ts:46-50`); map 02 option 1 |
-| 2 | `assertStillAllowed` takes a `Requirement` (`{ all }` or `{ any }`); tag PATCH and DELETE start with the any-of keys and check the stored scope on the returned role | The scope is known only after a read inside the transaction; one lock, check first |
+| 2 | `assertStillAllowed` takes a `Requirement` (`{ all }` or `{ any }`); tag PATCH and DELETE start with the any-of keys and check the stored scope on the returned role; the tag half was removed on 2026-11-25 (step 28 of the poteto adoption plan, D20): PATCH and DELETE are all-of, decided by the guard before any lookup | The scope is known only after a read inside the transaction; one lock, check first |
 | 3 | `withOrgAllowed` and `withOrgDecisionAllowed` map a 55P03 raised anywhere in their transaction to 503 (a write that waited too long on any lock answered 500 before); `lockOrgMembership` throws the pg error (`@tinnox/db` cannot build `HttpError`); the callback maps it to `provider_unavailable`; the global handler keeps 55P03 as 500 | Reads and the other routes do not change |
 | 4 | "Renamed" mark backed by `membership.display_name_changed_at`, stamped by a trigger; events before it show "(renamed)" | The record asks for the mark; the client cannot read `membership.update` rows without `audit.read`; 0013 cannot be edited later |
 | 5 | Throttle: `AuthFailureGuard` keyed by membership id, 20 per 10 minutes, one per `AppContext` in a `WeakMap` | Reuses B6 code; no `AppContext` change |

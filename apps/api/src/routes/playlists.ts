@@ -37,7 +37,7 @@ import { changeAsOperator, type ConstraintAnswers } from '../auth/permissions.ts
 import { operatorOf } from '../auth/session.ts';
 import { perMinute, type AppContext } from '../context.ts';
 import { accept, bigintToNumber, iso, refuse, type Decision } from '../db-helpers.ts';
-import { HttpError, notFound, parseInput } from '../errors.ts';
+import { found, HttpError, notFound, parseInput } from '../errors.ts';
 import { MEDIA_COLUMNS, toMediaDto, type MediaRow } from '../media/rows.ts';
 import {
   auditRejectedPublication,
@@ -58,7 +58,6 @@ import {
 /** A file or an app of a playlist being saved was deleted between the check and the write. */
 const itemDeletedMeanwhile = (): HttpError =>
   new HttpError(
-    409,
     'conflict',
     'A file or app in this playlist was deleted meanwhile. Reload and try again.',
   );
@@ -74,7 +73,6 @@ const ITEM_GONE = {
  */
 const publishChangedMeanwhile = (): HttpError =>
   new HttpError(
-    409,
     'conflict',
     'A file, app or screen used by this playlist changed meanwhile. Try again.',
   );
@@ -293,8 +291,7 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     return readOrg(db, session.orgId, async (tx) => {
-      const dto = await loadPlaylistDto(tx, id);
-      if (dto === null) throw notFound('The playlist');
+      const dto = found(await loadPlaylistDto(tx, id), 'The playlist');
       return dto;
     });
   });
@@ -324,14 +321,9 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
           mode: 'draft',
         });
         if (issues.length > 0) {
-          throw new HttpError(
-            400,
-            'validation_failed',
-            'The playlist has items that cannot be saved.',
-            {
-              details: issueDetails(issues),
-            },
-          );
+          throw new HttpError('validation_failed', 'The playlist has items that cannot be saved.', {
+            details: issueDetails(issues),
+          });
         }
 
         await tx.query(
@@ -414,8 +406,7 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
            WHERE id = $1 AND org_id = app_org_id() AND deleted_at IS NULL FOR SHARE`,
           [id],
         );
-        const original = source.rows[0];
-        if (original === undefined) throw notFound('The playlist');
+        const original = found(source.rows[0], 'The playlist');
         const inserted = await tx.query<{ id: string }>(
           `INSERT INTO playlist (org_id, name, description, transition, shuffle)
            VALUES (app_org_id(), $1, $2, $3, $4)
@@ -470,7 +461,7 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     const inUse = (message: string, details?: { path: string; message: string }[]): HttpError =>
-      new HttpError(409, 'playlist_in_use', message, details === undefined ? {} : { details });
+      new HttpError('playlist_in_use', message, details === undefined ? {} : { details });
     await changeAsOperator(
       ctx,
       request,
@@ -602,7 +593,6 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
             return {
               value: refuse(
                 new HttpError(
-                  409,
                   'idempotency_conflict',
                   'This Idempotency-Key was already used to publish a different playlist to this screen.',
                 ),
@@ -616,10 +606,11 @@ export function registerPlaylistRoutes(app: FastifyInstance, ctx: AppContext): v
           };
         },
         publish: async (tx) => {
-          const display = await lockDisplayForPublish(tx, displayId);
-          if (display === null) throw notFound('The screen');
-          const playlist = (await loadPlaylistDrafts(tx, [playlistId], true)).get(playlistId);
-          if (playlist === undefined) throw notFound('The playlist');
+          const display = found(await lockDisplayForPublish(tx, displayId), 'The screen');
+          const playlist = found(
+            (await loadPlaylistDrafts(tx, [playlistId], true)).get(playlistId),
+            'The playlist',
+          );
           const refs = itemRefs(playlist.items);
           const mediaById = await loadMediaRecords(tx, refs.mediaIds, true);
           const appsById = await loadAppRecords(tx, refs.appIds, true);

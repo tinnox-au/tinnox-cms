@@ -77,14 +77,9 @@ export async function serveObject(
     typeof ifRange === 'string' && ifRange.trim() !== etag ? undefined : request.headers.range;
   const range = parseRangeHeader(rangeHeader, stat.bytes);
   if (range.kind === 'unsatisfiable') {
-    throw new HttpError(
-      416,
-      'range_not_satisfiable',
-      'The requested byte range is not available.',
-      {
-        headers: { 'content-range': unsatisfiableContentRangeHeader(stat.bytes) },
-      },
-    );
+    throw new HttpError('range_not_satisfiable', 'The requested byte range is not available.', {
+      headers: { 'content-range': unsatisfiableContentRangeHeader(stat.bytes) },
+    });
   }
 
   void reply.type(input.mimeType);

@@ -75,12 +75,15 @@ export function TagsPage() {
   const [params, setParams] = useSearchParams();
   const scope = parseTagScope(params.get('scope'));
   const words = tagScopeWords(scope);
-  // Media tags are content (content.write, content.delete); screen tags are screen set-up.
+  // The API's rules (ROUTE_PERMISSIONS): a new tag needs its scope's key, content.write for a
+  // media tag and screen.setup for a screen tag. Renaming, recolouring and deleting a tag of
+  // either scope need the content key and screen.setup together (adoption plan D20).
   const canWriteContent = useCan('content.write');
   const canDeleteContent = useCan('content.delete');
   const canSetUpScreens = useCan('screen.setup');
-  const canEdit = scope === 'media' ? canWriteContent : canSetUpScreens;
-  const canDelete = scope === 'media' ? canDeleteContent : canSetUpScreens;
+  const canCreate = scope === 'media' ? canWriteContent : canSetUpScreens;
+  const canEdit = canWriteContent && canSetUpScreens;
+  const canDelete = canDeleteContent && canSetUpScreens;
 
   const loadTags = useCallback((signal: AbortSignal) => api.listTags(undefined, signal), []);
   const { state, reload } = useLoad<TagDto[]>(loadTags);
@@ -280,10 +283,10 @@ export function TagsPage() {
         <EmptyState
           icon={Tags}
           title={`No ${words.tag}s yet`}
-          action={canEdit ? newButton('lg') : undefined}
+          action={canCreate ? newButton('lg') : undefined}
           level={3}
         >
-          {!canEdit
+          {!canCreate
             ? 'An editor adds tags.'
             : scope === 'media'
               ? 'Media tags label files in the library, so they can be found and filtered.'
@@ -307,7 +310,7 @@ export function TagsPage() {
               data-testid="settings-tags-search"
             />
           </div>
-          {canEdit && <div className="tx-filter-row__end">{newButton('md')}</div>}
+          {canCreate && <div className="tx-filter-row__end">{newButton('md')}</div>}
         </div>
         <div className="tx-toolbar">
           <p className="tx-toolbar__count" aria-live="polite" data-testid="settings-tags-count">
@@ -336,7 +339,7 @@ export function TagsPage() {
             setSort(next);
             setPage(1);
           }}
-          // Screen tags have no "Show files": without the scope's keys there is no menu at all.
+          // Screen tags have no "Show files": without the keys to change one there is no menu at all.
           rowActions={canEdit || canDelete || scope === 'media' ? rowActions : undefined}
           loading={state.status === 'loading'}
           loadingRows={4}

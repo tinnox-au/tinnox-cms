@@ -226,7 +226,7 @@ describe('changeOncePerKey (step 27)', () => {
   });
 
   it('answers the constraints the route maps, and keeps the key’s own for itself', async () => {
-    const changed = new HttpError(409, 'conflict', 'Changed meanwhile.');
+    const changed = new HttpError('conflict', 'Changed meanwhile.');
     const constraints = { publication_asset_media_id_org_id_fkey: () => changed };
     const mapped = scripted([
       { publishFails: serverError('23503', 'publication_asset_media_id_org_id_fkey') },
