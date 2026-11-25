@@ -18,7 +18,7 @@ repository administrators can bypass it) and has its three variables. The first
 release ran on 25 November, from the Deploy workflow, and succeeded at the first attempt:
 four images pushed, sixteen migrations applied on RDS, three containers healthy, and both
 host names answer over https with Let's Encrypt certificates. The organisation "TINNOX Internal" and its first Owner exist (created with
-`provision.sh` on 25 November); nobody has signed in yet. Section 9 lists what is unverified pending runtime.
+`provision.sh` on 25 November); the Owner has signed in. Section 9 lists what is unverified pending runtime.
 
 ## 1. The account
 
@@ -246,11 +246,12 @@ an authenticator app at the first sign-in.
    `client_id` and `logout_uri`, has not been tried. If it refuses, the CMS session
    ends but Cognito's own lasts up to an hour, so the same browser can sign in again
    without a password, and `apps/api/src/auth/oidc.ts` needs a change.
-3. **Proof of the second factor.** In production the API refuses to start without
-   `OIDC_MFA_ACR_VALUES` or `OIDC_MFA_AMR_VALUES`, and refuses every sign-in whose token
-   does not match. Cognito documents `acr` `urn:cognito:loa:4` and `amr`
-   `["pwd","otp","mfa"]` for a password plus an authenticator code through managed login,
-   but says the claims are "rolling out gradually". Read a real token before choosing.
+3. **Proof of the second factor: settled for `amr`.** The API runs with
+   `OIDC_MFA_AMR_VALUES=mfa` and refuses every sign-in whose token lacks it. The first
+   sign-in through Cognito's managed login, with a password and an authenticator code,
+   was accepted (25 November), so the ID token's `amr` contains `mfa`. Not read: the
+   token's other `amr` values and its `acr`; and a sign-in that Cognito lets through
+   without a second factor cannot happen while the pool requires one.
 4. **Provisioning.** `infra/aws/provision.sh <environment> <command …>` runs
    `provision-member` from a person's CloudShell, never on the server: it builds a small
    image from the checkout (CloudShell is an Intel machine, so the server's ARM images do
@@ -260,10 +261,9 @@ an authenticator app at the first sign-in.
    `AdminGetUser` call (`scripts/lib/idp.ts`), and the username of a command is the
    person's e-mail address; the account is created first, in the Cognito console or with
    `aws cognito-idp admin-create-user`.
-5. **The first sign-in.** The first release is done (25 November; the two host names
-   are A records at GoDaddy, where the domain's DNS is hosted), and the first organisation
-   and Owner exist. What is left is items 2 and 3: the first sign-in will show whether
-   `OIDC_MFA_AMR_VALUES=mfa` and the sign-out are right.
+5. **After the first sign-in.** The first Owner signed in on 25 November. Left from this
+   list: sign-out against Cognito (item 2), a forced re-authentication (`prompt=login`
+   and `auth_time`), and a check that replaces `verify:oidc` for this provider.
 
 ## 6. Running it
 
