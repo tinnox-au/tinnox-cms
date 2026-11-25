@@ -5,14 +5,16 @@ Four CloudFormation templates that create what stage 0 of
 infrastructure only. They start no container, hold no secret and run no migration: the
 deploy step and the database role set-up come after them and are not written yet.
 
-**Status, 25 November 2026.** Three stacks exist in Sydney, all created from CloudShell and
-all complete on the first attempt: `tinnox-cms-test` from `environment.yml` (the server's
+**Status, 25 November 2026.** All four stacks exist in Sydney, created from CloudShell and
+complete on the first attempt: `tinnox-cms-test` from `environment.yml` (the server's
 set-up reported success), `tinnox-cms-test-database` from `database.yml` (PostgreSQL 17.9,
-available) and `tinnox-cms-test-identity` from `identity.yml` (an empty user pool).
-Stack termination protection is on for all three, and the server's termination
-protection too. `delivery.yml` has not run against AWS. All four pass `cfn-lint` 1.61, and
-five reviewers read them with a second reader checking each finding. Section 9 lists what
-is unverified pending runtime.
+available), `tinnox-cms-test-identity` from `identity.yml` (an empty user pool) and
+`tinnox-cms-delivery` from `delivery.yml` (three empty image repositories, the GitHub
+identity provider, the deploy role). Stack termination protection is on for all four, and
+the server's termination protection too. The GitHub deployment environment `test` exists:
+main branch only, one required reviewer; repository administrators can bypass it.
+Nothing has been deployed: no image pushed, no role taken by GitHub, no user signed in.
+Section 9 lists what is unverified pending runtime.
 
 ## 1. The account
 
@@ -205,7 +207,8 @@ an authenticator app at the first sign-in.
    `["pwd","otp","mfa"]` for a password plus an authenticator code through managed login,
    but says the claims are "rolling out gradually". Read a real token before choosing.
 4. **The provisioning tool** reads users from Keycloak only (`scripts/lib/idp.ts`).
-5. **How images arrive** (section 1), and with it the deploy step.
+5. **The deploy step.** How images arrive is settled: GitHub pushes them to the three
+   repositories through the deploy role. The workflow that does it is not written.
 
 ## 6. Running it
 
@@ -323,17 +326,15 @@ What stays behind on purpose, and keeps costing until removed by hand:
 
 ## 9. Unverified pending runtime
 
-- `delivery.yml` has not been created. Creating the other three on
-  25 November showed: the organisation's policies allow their resource types, including
-  the IAM role; the data disk appears under the by-id name the set-up waits for; the
-  set-up's report reaches the stack; and `EngineVersion: '17'` is accepted (it gave
-  17.9).
+- Creating the four stacks on 25 November showed: the organisation's policies allow
+  their resource types, including the IAM roles and the identity provider; the data disk
+  appears under the by-id name the set-up waits for; the set-up's report reaches the
+  stack; and `EngineVersion: '17'` is accepted (it gave 17.9).
 - The migrations and the `sec.*` functions on RDS: the server reaches the database and
   RDS accepts the roles (section 5), but no migration has run there.
-- That the organisation's policies allow the resource types of `delivery.yml`. As read on 25 November they refuse other Regions and IAM paths under
-  `/managed/`, which the templates do not use. The resource control policy was not read.
-- That GitHub can take the deploy role: the ban on identity providers is gone from the
-  policies, but no provider has been created yet.
+- The organisation's resource control policy was not read.
+- That GitHub can take the deploy role: the provider and the role exist, and the role's
+  trust names the subject `…:environment:test`, but no workflow has tried.
 - What the server looks like from inside: nobody has opened a session on it yet. The
   set-up checks the mount, Docker and Compose before it reports success, and it did.
 - That a metadata hop limit of 1 keeps containers from the server's credentials.
