@@ -182,13 +182,18 @@ const VALID_RULE: Rule = {
   start: '09:00',
   end: '17:00',
 };
-/** Zero to three rules, or 49, 50 or 51 copies of a valid one (the 50-event limit). */
+/**
+ * Zero to three rules, 49, 50 or 51 copies of a valid one (the 50-event limit), or a valid rule
+ * that ends at 24:00. Random rules reach that last one about once in 600 draws, so the self-check
+ * missed it in about 3% of runs; the direct arm makes it a tenth of all draws.
+ */
 export const eventsArb: fc.Arbitrary<Rule[]> = fc.oneof(
   { weight: 8, arbitrary: fc.array(ruleArb, { maxLength: 3 }) },
   {
     weight: 1,
     arbitrary: pick([49, 50, 51]).map((n) => Array.from({ length: n }, () => VALID_RULE)),
   },
+  { weight: 1, arbitrary: fc.constant<Rule[]>([{ ...VALID_RULE, start: '00:00', end: '24:00' }]) },
 );
 
 export interface Box {
@@ -213,10 +218,21 @@ const splitPair = edgeOr([1, 5000, 9999], 1, 9999).map((at): Box[] => [
   { x: 0, y: 0, width: at, height: 10_000 },
   { x: at, y: 0, width: 10_000 - at, height: 10_000 },
 ]);
-/** Zone sets of zero to five boxes, in or out of the square, touching, apart or overlapping. */
+/**
+ * Zone sets of zero to five boxes, in or out of the square, touching, apart or overlapping. Loose
+ * boxes overlap inside the square about once in 300 draws, so the self-check missed it in about
+ * one run in 650; a split pair whose left zone is one unit too wide overlaps by construction.
+ */
 export const zonesArb: fc.Arbitrary<Box[]> = fc.oneof(
   { weight: 3, arbitrary: fc.array(looseBox, { maxLength: 5 }) },
   { weight: 2, arbitrary: splitPair },
+  {
+    weight: 1,
+    arbitrary: edgeOr([1, 5000, 9999], 1, 9999).map((at): Box[] => [
+      { x: 0, y: 0, width: at + 1, height: 10_000 },
+      { x: at, y: 0, width: 10_000 - at, height: 10_000 },
+    ]),
+  },
   {
     weight: 2,
     arbitrary: fc
