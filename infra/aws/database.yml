@@ -96,6 +96,13 @@ Resources:
     Type: AWS::RDS::DBInstance
     DeletionPolicy: Snapshot
     UpdateReplacePolicy: Snapshot
+    Metadata:
+      cfn-lint:
+        config:
+          # W3691 compares EngineVersion with a list of full versions and so reads the
+          # major version alone as one that cannot be created. CloudFormation accepts a
+          # version prefix and matches by prefix when it looks for drift.
+          ignore_checks: [W3691]
     Properties:
       # A fixed name makes an update that needs a replacement fail instead of happening.
       DBInstanceIdentifier: !Sub 'tinnox-cms-${EnvironmentName}'

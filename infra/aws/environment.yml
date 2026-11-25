@@ -11,7 +11,13 @@ Metadata:
       - Label: { default: Environment }
         Parameters: [EnvironmentName, PortalHostName, PlayerHostName, HostedZoneId]
       - Label: { default: Server }
-        Parameters: [ImageId, InstanceType, DataVolumeSizeGiB, TerminationProtection]
+        Parameters:
+          - ImageId
+          - InstanceType
+          - TerminationProtection
+          - DataVolumeSizeGiB
+          - DataVolumeSnapshotId
+          - DataVolumeAttached
       - Label: { default: Network and logs }
         Parameters: [VpcCidr, LogRetentionDays]
 
@@ -62,6 +68,22 @@ Parameters:
     Description: >-
       Size of the data disk, which holds Docker's images and volumes (media, job
       exchange, certificates). It can grow later, never shrink.
+  DataVolumeSnapshotId:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^snap-[0-9a-f]{8,17}$'
+    Description: >-
+      Empty for a new, blank data disk. A snapshot id creates the disk from that
+      snapshot instead: to rebuild an environment, or to go back to an earlier night.
+      Changing it on an existing stack replaces the disk; detach the disk first.
+  DataVolumeAttached:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Must be true when the stack is created. Set to false, after unmounting the disk
+      on the server, to detach it before the server or the disk is replaced; then true
+      again in the update that replaces it. See "Replacing the server" in the README.
   TerminationProtection:
     Type: String
     Default: 'true'
@@ -92,6 +114,8 @@ Rules:
 
 Conditions:
   HasHostedZone: !Not [!Equals [!Ref HostedZoneId, '']]
+  FromSnapshot: !Not [!Equals [!Ref DataVolumeSnapshotId, '']]
+  AttachDataVolume: !Equals [!Ref DataVolumeAttached, 'true']
 
 Resources:
   # ------------------------------------------------------------------ network
@@ -375,6 +399,7 @@ Resources:
     Properties:
       AvailabilityZone: !GetAtt ServerSubnet.AvailabilityZone
       Size: !Ref DataVolumeSizeGiB
+      SnapshotId: !If [FromSnapshot, !Ref DataVolumeSnapshotId, !Ref 'AWS::NoValue']
       VolumeType: gp3
       Encrypted: true
       Tags:
@@ -535,8 +560,11 @@ Resources:
 
           signal SUCCESS 'server set-up finished'
 
+  # Conditional so the disk can be detached on purpose: CloudFormation creates a
+  # replacement server before it removes the old one, and a disk cannot be attached to both.
   DataVolumeAttachment:
     Type: AWS::EC2::VolumeAttachment
+    Condition: AttachDataVolume
     Properties:
       InstanceId: !Ref Server
       VolumeId: !Ref DataVolume
@@ -559,7 +587,9 @@ Resources:
 
   BootstrapFinished:
     Type: AWS::CloudFormation::WaitCondition
-    DependsOn: [DataVolumeAttachment, ServerAddressAssociation]
+    # The 30 minutes start when the fixed address is attached; the disk is attached at
+    # about the same time and the set-up waits for it.
+    DependsOn: ServerAddressAssociation
     Properties:
       Handle: !Ref BootstrapHandle
       Timeout: '1800'
