@@ -485,6 +485,9 @@ describe('test code (rule (h))', () => {
     ['packages/domain/src/fixture.ts', './fixtures.test-support.ts'],
     ['apps/portal/src/fixture.tsx', './testFrame.test-support.ts'],
     ['apps/api/src/fixture.ts', '../test/support.ts'],
+    // The fault harness and the race helpers (step 33) are test code like the harness itself.
+    ['apps/api/src/fixture.ts', '../test/support/faults.ts'],
+    ['apps/api/src/routes/fixture.ts', '../../test/support/race.ts'],
     ['apps/api/src/fixture.ts', './security.test.ts'],
     ['scripts/lib/fixture.ts', '../../tests/integration/support.ts'],
     // SEC-3: TypeScript resolves these spellings to the .ts test files too.
@@ -539,6 +542,101 @@ describe('route files (rule (i), D6)', () => {
 
   it('lets apps/api/src/app.ts register the routes', async () => {
     expect(await flagged('apps/api/src/app.ts', importOf('./routes/media.ts'))).toEqual([]);
+  });
+});
+
+/** The no-restricted-syntax messages for `code` at `path`, under the config the path resolves to. */
+async function syntaxFlagged(path: string, code: string): Promise<string[]> {
+  const resolved = ((await repository.calculateConfigForFile(path)) as Linter.Config).rules ?? {};
+  const entry = resolved['no-restricted-syntax'];
+  const fixture = new ESLint({
+    cwd: repoRoot,
+    overrideConfigFile: true,
+    overrideConfig: [
+      {
+        files: ['**/*.ts'],
+        languageOptions: { sourceType: 'module', parser: tseslint.parser },
+        rules: entry === undefined ? {} : { 'no-restricted-syntax': entry },
+      },
+    ],
+  });
+  const [result] = await fixture.lintText(code, { filePath: path });
+  return (result?.messages ?? []).map((message) => message.message);
+}
+
+describe('the seeders of the migrate-forward chain (D13, step 34)', { timeout: 30_000 }, () => {
+  const SEEDER = 'packages/db/test/levels/seed-0099.ts';
+  const LEVELS = /A seeder of the migrate-forward chain imports only from its own folder/;
+  const LOADER =
+    /A seeder of the migrate-forward chain is plain SQL through the client it is given/;
+
+  it.each([
+    '@tinnox/db',
+    '@tinnox/db/testing',
+    '@tinnox/db/migrate',
+    '@tinnox/contracts',
+    '../support.ts',
+    '../../src/index.ts',
+    './../support.ts',
+    '..',
+    '/abs/packages/db/test/support.ts',
+    'file:///abs/support.ts',
+  ])('flags %s in a seeder', async (specifier) => {
+    const messages = await flagged(SEEDER, importOf(specifier));
+    expect(messages).toEqual(expect.arrayContaining([expect.stringMatching(LEVELS)]));
+  });
+
+  it('flags a type-only import from @tinnox/* in a seeder too', async () => {
+    const messages = await flagged(SEEDER, "import type { OrgId } from '@tinnox/db';");
+    expect(messages).toEqual(expect.arrayContaining([expect.stringMatching(LEVELS)]));
+  });
+
+  it('flags an import() that leaves the folder, as a static one (LINT-1)', async () => {
+    const messages = await loadsFlagged(SEEDER, "await import('../support.ts');");
+    expect(messages).toEqual([expect.stringMatching(LEVELS)]);
+  });
+
+  it.each(['node:module', 'module', 'node:fs', 'node:fs/promises', 'fs', 'fs/promises'])(
+    'flags %s in a seeder: it reads no file and builds no require (D13)',
+    async (specifier) => {
+      expect(await flagged(SEEDER, importOf(specifier))).toEqual([expect.stringMatching(LOADER)]);
+    },
+  );
+
+  it.each([
+    [
+      'createRequire',
+      "import { createRequire } from 'node:module';\ncreateRequire(import.meta.url)('../support.ts');",
+    ],
+    ['readFileSync', "import { readFileSync } from 'node:fs';\nreadFileSync('../support.ts');"],
+  ])('flags a seeder that loads another file through %s', async (_, code) => {
+    expect(await flagged(SEEDER, code)).toEqual([expect.stringMatching(LOADER)]);
+  });
+
+  it.each([
+    'await import(`../${n}.ts`);',
+    'await import(variable);',
+    "await import(new URL('../support.ts', import.meta.url).href);",
+    "await import('@tinnox' + '/db/testing');",
+  ])('flags a computed import() in a seeder: %s', async (code) => {
+    expect(await syntaxFlagged(SEEDER, code)).toEqual([expect.stringMatching(LOADER)]);
+  });
+
+  it('leaves a literal import() in a seeder to the import rules, and a computed one elsewhere', async () => {
+    expect(await syntaxFlagged(SEEDER, "await import('./seed-0004.ts');")).toEqual([]);
+    expect(await syntaxFlagged('packages/db/test/levels.ts', 'await import(path);')).toEqual([]);
+  });
+
+  it('lets a seeder import its own folder and Node', async () => {
+    const code = ['./sql.ts', './seed-0004.ts', 'node:crypto'].map(importOf).join('\n');
+    expect(await flagged(SEEDER, code)).toEqual([]);
+  });
+
+  it('leaves the rest of packages/db/test alone', async () => {
+    const code = ['./levels/seed-0004.ts', './support.ts', '../src/migrate.ts']
+      .map(importOf)
+      .join('\n');
+    expect(await flagged('packages/db/test/fixture.integration.test.ts', code)).toEqual([]);
   });
 });
 

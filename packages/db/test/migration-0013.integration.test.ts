@@ -54,8 +54,9 @@ import {
   PG,
   pgCode,
   pgViolation,
-  stillWaiting,
+  backendPid,
   twoTransactions,
+  waitForLockWaiters,
   withNoOrgSet,
   type TestOrg,
 } from './support.ts';
@@ -451,7 +452,13 @@ describe('the in-write role check', () => {
         org.membershipId,
       ]);
       const check = asApp(org.orgId, FOR_SHARE, [org.membershipId]);
-      expect(await stillWaiting(check)).toBe(true);
+      await waitForLockWaiters(
+        clients().pool,
+        backendPid(client),
+        1,
+        'the share lock never waited for the change that holds the member row',
+        { waiter: check },
+      );
       await client.query('COMMIT');
       expect((await check).rows).toEqual([{ role: 'owner' }]);
     } catch (error) {
@@ -561,7 +568,13 @@ describe('the last active Owner', () => {
     await twoTransactions(clients().pool, org.orgId, async (one, two) => {
       await one.query(SET_ROLE, [first, 'admin']);
       const late = pgViolation(two.query(SET_ROLE, [second, 'admin']));
-      expect(await stillWaiting(late)).toBe(true);
+      await waitForLockWaiters(
+        clients().pool,
+        backendPid(one),
+        1,
+        'the second demotion never waited for the first',
+        { waiter: late },
+      );
       await one.query('COMMIT');
       expect(await late).toEqual(lastOwner);
     });
@@ -743,7 +756,13 @@ describe('sessions and the cut-off', () => {
       await revoker.query("SELECT set_config('app.org_id', $1, true)", [org.orgId]);
       await revoker.query('SELECT sec.session_revoke_membership($1)', [member.id]);
       const signing = signIn(member.oidcSub, new Date(Date.now() - 60_000));
-      expect(await stillWaiting(signing)).toBe(true);
+      await waitForLockWaiters(
+        clients().pool,
+        backendPid(revoker),
+        1,
+        'the sign-in never waited for the revocation that is committing',
+        { waiter: signing },
+      );
       await revoker.query('COMMIT');
       const result = await signing;
       expect(result).toEqual({
@@ -1183,19 +1202,31 @@ describe('the shared member SQL (packages/db/src/members.ts)', () => {
     const held = new Promise<void>((resolve) => {
       release = resolve;
     });
-    let locked = (): void => undefined;
-    const isLocked = new Promise<void>((resolve) => {
+    let locked = (pid: number): void => void pid;
+    const isLocked = new Promise<number>((resolve) => {
       locked = resolve;
     });
     const holder = withOrg(clients().pool, org.orgId, async (tx) => {
       await lockOrgMembership(tx);
-      locked();
+      const { rows } = await tx.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+      if (rows[0] === undefined) throw new Error('no backend pid');
+      locked(rows[0].pid);
       await held;
     });
-    await isLocked;
+    const holderPid = await isLocked;
     const demotion = pgViolation(asApp(org.orgId, SET_ROLE, [second.id, 'admin']));
-    expect(await stillWaiting(demotion)).toBe(true);
-    release();
+    try {
+      await waitForLockWaiters(
+        clients().pool,
+        holderPid,
+        1,
+        'the demotion never waited for lockOrgMembership',
+        { waiter: demotion, locktype: 'advisory' },
+      );
+    } finally {
+      // Also when the wait was never seen: the holder must not outlive the test.
+      release();
+    }
     await holder;
     expect(await demotion).toBeNull();
   });

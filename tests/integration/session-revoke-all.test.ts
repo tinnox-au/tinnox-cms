@@ -21,6 +21,7 @@ import {
   startTestApp,
   type TestApp,
   type TestOrg,
+  waitForLockWait,
 } from './support.ts';
 
 /** One connection as the database administrator, as in the runbook. */
@@ -40,23 +41,6 @@ async function asSuperuser<T>(work: (client: pg.Client) => Promise<T>): Promise<
   } finally {
     await client.end();
   }
-}
-
-/** Waits, at most ten seconds, until backend `pid` waits for a lock. */
-async function waitForLockWait(pid: number): Promise<void> {
-  // A superuser sees every role's backends; outside a transaction each poll reads afresh.
-  await asSuperuser(async (client) => {
-    const deadline = Date.now() + 10_000;
-    for (;;) {
-      const { rows } = await client.query<{ waiting: boolean }>(
-        "SELECT wait_event_type = 'Lock' AS waiting FROM pg_stat_activity WHERE pid = $1",
-        [pid],
-      );
-      if (rows[0]?.waiting === true) return;
-      if (Date.now() > deadline) throw new Error(`backend ${pid} never waited for a lock`);
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-  });
 }
 
 /** The text of a runbook script with its `-v name=value` variables filled in, as psql does. */
@@ -216,7 +200,11 @@ describe('signing every operator out', () => {
       if (pid === undefined) throw new Error('no backend pid');
       // Sent as one message, where every statement shares one statement_timestamp().
       running = runScript(script, 'revoke-subject-sessions.sql', { subject: suspect.oidcSub });
-      await waitForLockWait(pid);
+      // Read on the holder's own connection: any role sees pg_locks, which shows the locks as
+      // they are now, whatever transaction reads it (the race helpers, adoption plan step 33).
+      await waitForLockWait(holder, pid, 'the incident script never waited for the member row', {
+        waiter: running,
+      });
       // Past a whole second, so a cut-off stamped when the script started is an earlier second.
       await new Promise((resolve) => setTimeout(resolve, 2_200));
       const t1 = (await holder.query<{ t1: Date }>('SELECT clock_timestamp() AS t1')).rows[0]?.t1;

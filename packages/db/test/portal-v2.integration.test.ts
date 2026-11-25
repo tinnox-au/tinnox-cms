@@ -8,7 +8,13 @@ import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { STAGE_A_CONSTRAINTS, violatedConstraint, type OrgTx } from '../src/index.ts';
-import { stillWaiting, withOrg, type Pool, type PoolClient } from '../src/testing.ts';
+import {
+  backendPid,
+  waitForLockWaiters,
+  withOrg,
+  type Pool,
+  type PoolClient,
+} from '../src/testing.ts';
 import {
   appPool,
   createOrg,
@@ -472,7 +478,13 @@ describe('deleted playlists', () => {
     await twoSessions(async (assigning, deleting) => {
       await assigning.query(assign, [display, playlist]);
       const deletion = pgCode(deleting.query(softDelete, [playlist]));
-      expect(await stillWaiting(deletion)).toBe(true);
+      await waitForLockWaiters(
+        pool,
+        backendPid(assigning),
+        1,
+        'the deletion never waited for the assignment',
+        { waiter: deletion },
+      );
       await assigning.query('COMMIT');
       expect(await deletion).toBe(PG.restrict);
     });
@@ -494,7 +506,13 @@ describe('deleted playlists', () => {
     await twoSessions(async (deleting, assigning) => {
       await deleting.query(softDelete, [playlist]);
       const assignment = pgCode(assigning.query(assign, [display, playlist]));
-      expect(await stillWaiting(assignment)).toBe(true);
+      await waitForLockWaiters(
+        pool,
+        backendPid(deleting),
+        1,
+        'the assignment never waited for the deletion',
+        { waiter: assignment },
+      );
       await deleting.query('COMMIT');
       expect(await assignment).toBe(PG.restrict);
     });

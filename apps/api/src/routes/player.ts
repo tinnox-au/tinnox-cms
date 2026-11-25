@@ -695,14 +695,28 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
           report,
           receivedAt,
         });
+        // The write takes effect only while this credential's registration is still the active
+        // one (D8). A request past its credential lookup finishes its transaction, so the
+        // registration may have been revoked since: by an operator, a reset, or a newer claim of
+        // the display. The condition is part of the UPDATE, so nothing can come between the check
+        // and the write, and no lock is added. With the row lock taken above it means a late
+        // report never replaces the new player's: that player reports only after the old
+        // registration's revocation has committed, and either its report waits for this
+        // transaction and is written after it, or it committed before this statement began, which
+        // then reads the revocation and writes nothing.
+        let stored = false;
         if (reduced.accepted) {
           const s = reduced.state;
-          await tx.query(
+          const written = await tx.query(
             `UPDATE display_delivery
              SET reporting_registration_id = $2, last_seq = $3, downloaded_publication_id = $4,
                  active_publication_id = $5, active_item_index = $6, player_state = $7,
                  staging = $8::jsonb, last_errors = $9::jsonb, last_heartbeat_at = $10
-             WHERE display_id = $1 AND org_id = app_org_id()`,
+             WHERE display_id = $1 AND org_id = app_org_id()
+               AND EXISTS (
+                 SELECT 1 FROM player_registration pr
+                 WHERE pr.id = $2 AND pr.org_id = app_org_id() AND pr.display_id = $1
+                   AND pr.revoked_at IS NULL)`,
             [
               device.displayId,
               s.registrationId,
@@ -716,12 +730,14 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
               receivedAt,
             ],
           );
+          stored = written.rowCount === 1;
         }
-        // History is diagnostic only. Ignored reports (stale or replayed seq) are not kept,
-        // and accepted ones are sampled to at most one row per display per interval, so a
-        // player cannot grow the table faster than that. Housekeeping removes rows older
-        // than the retention period by time; nothing depends on values the player sends.
-        if (reduced.accepted) {
+        // History is diagnostic only. Ignored reports (stale or replayed seq, or one whose
+        // registration is no longer active) are not kept, and stored ones are sampled to at most
+        // one row per display per interval, so a player cannot grow the table faster than that.
+        // Housekeeping removes rows older than the retention period by time; nothing depends on
+        // values the player sends.
+        if (stored) {
           await tx.query(
             `INSERT INTO heartbeat_log (org_id, display_id, registration_id, seq, accepted, received_at, payload)
              SELECT app_org_id(), $1, $2, $3, true, $4, $5::jsonb
@@ -740,6 +756,10 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
             ],
           );
         }
+        // The answer is the sequence rule's, as before, also for a report that was not stored
+        // because its registration ended meanwhile (D8 lets the request finish and names no
+        // answer of its own): the player's next request is answered 401 device_revoked. Nothing
+        // is audited either way: a heartbeat is telemetry (D3), and the route's statement says so.
         return {
           value: {
             accepted: reduced.accepted,

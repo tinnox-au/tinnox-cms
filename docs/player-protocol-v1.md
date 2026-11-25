@@ -74,7 +74,7 @@ No body, no credential. Response `201` (`PairingCreateResponseSchema`):
 |---|---|---|
 | `200 {"status":"pending","expiresAt"}` | Not claimed yet | Keep polling |
 | `200 {"status":"claimed", deviceToken, registrationId, orgId, display:{id,name,canvas,contentRect}}` | Claimed. **Returned exactly once.** | Store the token, registration id, org id and display; start syncing |
-| `200 {"status":"consumed"}` | The token was already handed out, or the claim was cancelled between this poll and the collection | If the player has no token, start a new pairing |
+| `200 {"status":"consumed"}` | The token was already handed out; or the claim ended before this collection: it was cancelled between this poll and the collection, or the member who claimed the code has since been removed from the organisation or had their sessions ended (removal, a lower role, sign out everywhere), which a later return of that member does not undo | If the player has no token, start a new pairing |
 | `200 {"status":"expired"}` | The code expired unclaimed, or its claim was cancelled before the player collected it (a newer code was claimed for the display, or the operator revoked the display's player) | Start a new pairing |
 | `404 not_found` | Unknown id, wrong polling token, missing header, or locked session. Deliberately indistinguishable. | Start a new pairing |
 
@@ -96,9 +96,53 @@ Revocation stops **future** server access. It cannot erase a device that is offl
 
 ### `DELETE /player/registration`
 
-Player-initiated reset. `Authorization: Bearer <deviceToken>`. Response `204`. The registration is revoked with reason `player_reset`. The player should call this before deleting its local state when it is online; when offline it clears locally and the operator revokes from the portal. (This route is not in `ROUTES` of `packages/contracts`.)
+Player-initiated reset. `Authorization: Bearer <deviceToken>`. Response `204`. The registration is revoked with reason `player_reset`. A reset that waits longer than the server's lock timeout (5 s) for its registration's row, held by another change to that registration, is answered `503 service_unavailable` with `Retry-After: 2` and revokes nothing; retry it as any 5xx (section 10). The player should call this before deleting its local state when it is online; when offline it clears locally and the operator revokes from the portal. (This route is not in `ROUTES` of `packages/contracts`.)
 
 A player that is paired to a display of another organisation must first delete every cached asset and all state of the previous registration. Cache names must include the organisation id and registration id from the `claimed` response.
+
+### Player phases
+
+The browser player is in one phase at a time, and an event either moves it along an arrow below or is refused and changes nothing. The chart is generated from the player's transition table (`apps/player-web/src/core/machine.ts`); `npm run check:docs` fails when the two differ, and `npm run check:docs -- --write` writes it again. A player starts in `booting`. It holds a credential and talks to the credentialed routes only in `idle`, `playing` and `faulted`. `REVOKED` is the answer `401` to any player call; `resetting` reloads the page into `booting`.
+
+<!-- player-state-chart:start (generated from the transition table in apps/player-web/src/core/machine.ts by `npm run check:docs -- --write`; do not edit by hand) -->
+
+```mermaid
+stateDiagram-v2
+    booting --> standby: LEADERSHIP_WAITING
+    booting --> unpaired: NO_REGISTRATION
+    booting --> idle: REGISTRATION_LOADED
+    booting --> revoked: REVOKED_REGISTRATION_LOADED
+    standby --> standby: LEADERSHIP_WAITING
+    standby --> unpaired: NO_REGISTRATION
+    standby --> idle: REGISTRATION_LOADED
+    standby --> revoked: REVOKED_REGISTRATION_LOADED
+    unpaired --> pairing: PAIRING_CODE_ISSUED
+    unpaired --> resetting: RESET_REQUESTED
+    pairing --> pairing: PAIRING_CODE_ISSUED
+    pairing --> unpaired: PAIRING_LOST
+    pairing --> idle: PAIRED
+    pairing --> resetting: RESET_REQUESTED
+    idle --> playing: ITEM_STARTED
+    idle --> idle: NO_CONTENT
+    idle --> faulted: PLAYBACK_FAILED
+    idle --> revoked: REVOKED
+    idle --> resetting: RESET_REQUESTED
+    playing --> playing: ITEM_STARTED
+    playing --> idle: NO_CONTENT
+    playing --> faulted: PLAYBACK_FAILED
+    playing --> revoked: REVOKED
+    playing --> resetting: RESET_REQUESTED
+    faulted --> playing: ITEM_STARTED
+    faulted --> idle: NO_CONTENT
+    faulted --> faulted: PLAYBACK_FAILED
+    faulted --> revoked: REVOKED
+    faulted --> resetting: RESET_REQUESTED
+    revoked --> revoked: REVOKED
+    revoked --> resetting: RESET_REQUESTED
+    resetting
+```
+
+<!-- player-state-chart:end -->
 
 ## 5. Manifest
 
@@ -358,10 +402,12 @@ Rules:
 
 - **Sequence.** `seq` must increase with every report of one registration (persist it locally, so it survives a reload). A report whose `seq` is not greater than the stored one is answered `200 {"accepted": false, "ignoredReason": "stale_seq"}` and changes nothing. A delayed or replayed report therefore cannot overwrite newer state. The check and the update run under one row lock, so concurrent reports cannot interleave.
 - **New registration, new sequence.** The stored sequence belongs to the registration that produced it. A newly paired player starts again from any number.
+- **Registration still active.** A report is stored only while the credential's registration is still the active one at the moment of the write. A request whose credential was accepted, and whose registration was revoked before its write (an operator revoke, a reset, a new player paired to the display), is still answered `200` by the sequence rule above, but stores nothing and is not kept as history; the next request gets `401 device_revoked`. A late report from a replaced player therefore never replaces the new player's report.
 - **Display.** `displayId` must be the display of the credential: otherwise `403 forbidden`.
 - **Publications.** Every publication id named anywhere in the report (downloaded, active, staging, errors) must be a publication of that display: otherwise `409 conflict`. This includes publications of another display of the same organisation.
 - **Shape.** Schema violations (unknown fields, `playing` without an active publication, `activePublicationId` and `activeItemIndex` not both set, `assetsDone > assetsTotal`, more than 10 errors, messages over 300 characters): `400 validation_failed`.
 - **Rejected reports change nothing** and are not stored.
+- **Lock wait.** A report that waits longer than the server's lock timeout (5 s) for the display's row, held by another report or a publish to that display, is answered `503 service_unavailable` with `Retry-After: 2`, as an operator's change is, and changes nothing; retry it as any 5xx (section 10).
 - `errors` is the most recent problems, newest first, replaced as a whole by each accepted report. Messages must not contain URLs or tokens.
 - Send every `nextHeartbeatInMs` (default 15 s). The portal marks a display stale when the last **accepted** report is older than 60 s (`LIMIT_HEARTBEAT_STALE_AFTER_SECONDS`), measured on the server clock at the time the status is read. Nothing stores an "online" flag. Raw reports are kept as diagnostic history only when accepted, at most one per display per 10 s, for `LIMIT_HEARTBEAT_LOG_RETENTION_HOURS` (default 24); ignored reports (stale `seq`) are not stored.
 - Rate limit: 120 reports per minute per credential.
@@ -375,7 +421,7 @@ M0 negotiates on the server, at publish time, not with each device.
 - Every display has a `route` (only `browser` exists). Each route has a capability profile (`CapabilityProfileSchema`, `packages/delivery`). For the browser route, profile version 2: JPEG, PNG and MP4 with H.264 (8-bit 4:2:0); `contain` and `cover`; up to four regions (the zones of a layout; one without a layout; version 1 had one full-frame region); muted; optional content rectangle; canvas up to 16384 px per side; video up to 3840x2160; assets up to the upload limit; up to 200 items.
 - `POST /api/playlists/:id/publish` checks the playlist against the profile of the target display's route. A playlist the route cannot show is refused with `422 publication_rejected` and one readable reason per item (`PUBLISH_REJECTION_CODES`). Nothing unsupported reaches a manifest.
 - A schedule (stage B, slice 3) is checked the same way when it is pushed: the item total of all its playlists is checked first (over the limit it is the only issue), then each playlist on its own, then the combined list, so the item limit of the profile applies to **all playlists of a schedule together** (`too_many_items`, issue path `schedule`). There is no separate limit for schedules.
-- A layout (stage B, slice 4) is checked the same way, after one more step first: its zones are resolved to pixels of the screen's content area, and a zone under 16 px either way blocks that screen alone (`zone_too_small`, issue path `zones[n]`); other screens with the layout are pushed. Then the item total of all its zones (`too_many_items`, issue path `layout`), each zone's playlist on its own (`zones[n].playlist`, `zones[n].items[k]`), and the combined list (path `layout`). A playlist used by two zones counts twice.
+- A layout (stage B, slice 4) is checked the same way, after two more steps first. A stored zone set the layout API itself would refuse blocks every screen with the layout: one zone, or more than four (`zone_count_out_of_range`, issue path `layout`; a layout with no zones reads as nothing assigned, because the API finds no main zone before the planner runs), or a zone that overlaps an earlier one (`zone_overlap`, issue path `zones[n]`); the layout API never writes one, but the database does not refuse it (LYX-03). Then its zones are resolved to pixels of the screen's content area, and a zone under 16 px either way blocks that screen alone (`zone_too_small`, issue path `zones[n]`); other screens with the layout are pushed. Then the item total of all its zones (`too_many_items`, issue path `layout`), each zone's playlist on its own (`zones[n].playlist`, `zones[n].items[k]`), and the combined list (path `layout`). A playlist used by two zones counts twice.
 - A player declares nothing about itself except `player.version`. If a device cannot play an asset that the profile allows (for example a browser build without H.264), it reports `unsupported_media` or `decode_failed` in the heartbeat and keeps the previous version. Per-device capability reports are a later addition and would be a new field in a new heartbeat schema version.
 - Version handling: `schemaVersion` is explicit in the manifest and the heartbeat. There is no per-player version negotiation. The server writes manifest v5 exactly when the screen has a layout assigned. It writes manifest v4 exactly when the screen's assigned schedule has an event that uses a playlist other than its default; a schedule without such an event (no events, or events that all name the default playlist) is sent as its default playlist, v1 to v3. Otherwise it writes v3 when any item is an app; otherwise v2 when the publication needs it (a transition other than `cut`, shuffle, a rotation other than 0, working hours, or an availability window on any item); otherwise v1. So a screen whose settings did not change keeps getting the same kind of document; removing every app makes the next push v2 or v1 again, and removing the schedule, or its last event that uses another playlist, makes it v1 to v3 again. The ETag stays the publication id; there is no request header, `Vary` or down-conversion.
 - A v1 player (before `player-web/0.2.0`) that receives v2 reports `manifest_unsupported_version` and keeps playing its last content. Nothing reloads a running player: it moves to v2 only when its page is reloaded. The portal says so under that error on the screen's Overview tab.

@@ -11,9 +11,10 @@
  * where many names have the same one; each name is still listed, so a new constraint fails the
  * test until someone decides.
  *
- * CHECK constraints are not enumerated: each is the database twin of a contract rule the API
- * validates first (plan step 31), so its violation is a bug. One that a caller maps is in the
- * registry (media_default_duration_images_only), which the test checks exists.
+ * CHECK constraints are not enumerated here: tests/integration/twins.test.ts owns them (plan
+ * step 31), each compared with its contract rule or registered with why it has none in
+ * CHECK_TWINS (tests/integration/twins-registers.ts), so a violation is a bug. One that a caller maps is in the registry
+ * (media_default_duration_images_only), which the test checks exists.
  */
 
 const ORG_ONLY =

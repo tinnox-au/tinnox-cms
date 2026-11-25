@@ -223,7 +223,7 @@ EMPTY_REPORTED_STATE
 
 Publishing in the API: load display, items and media inside `changeAsOperator`; `planPublication` with `registry.get(display.route)`; on success generate the id, `buildManifest`, insert `publication` and `publication_asset`, upsert `display_delivery.desired_publication_id`. On an idempotency-key conflict return the existing row (`replayed: true`) if the playlist matches and the stored manifest has no `schedule` or `zones` block, otherwise `idempotency_conflict`.
 
-`ReportedState` maps onto `display_delivery` (`reporting_registration_id`, `last_seq`, `downloaded_publication_id`, `active_publication_id`, `active_item_index`, `player_state`, `staging`, `last_errors`, `last_heartbeat_at`). A heartbeat from a newly registered player starts a new sequence; `seq` only has to increase within one registration.
+`ReportedState` maps onto `display_delivery` (`reporting_registration_id`, `last_seq`, `downloaded_publication_id`, `active_publication_id`, `active_item_index`, `player_state`, `staging`, `last_errors`, `last_heartbeat_at`). A heartbeat from a newly registered player starts a new sequence; `seq` only has to increase within one registration. The heartbeat's `UPDATE` of `display_delivery` is conditional on the credential's registration still being active, so a request that was past its credential lookup when the registration was revoked or replaced stores nothing (`apps/api/test/revocation-window.integration.test.ts`).
 
 ### `@tinnox/delivery`
 

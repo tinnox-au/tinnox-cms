@@ -6,32 +6,29 @@
  * database is upgraded, could still complete afterwards and hand out a lasting
  * credential (security review round 3, SCX-01, second check). 0012 cancels them.
  *
- * This file rebuilds the test database at migration 0011, leaves pairing sessions in
- * every state, with claims as the code before 0010 could leave them, then applies 0012
- * with the real migration runner and checks what was cancelled, what was left alone and
- * what was audited. Before that it applies 0012 once while its audit rows cannot be written,
- * and checks that nothing of the migration was kept (D3): `pairing.cancel` is the one audit
- * action no code writes, so this file is its case of tests/integration/audit-failure.test.ts.
+ * This file builds a database at migration 0011 with the seeders of the migrate-forward
+ * chain (levels.ts, atLevel): level 0011's seeder (levels/seed-0011.ts) leaves pairing
+ * sessions in every state, with claims as the code before 0010 could leave them, in plain
+ * SQL valid at 0011. Then it applies 0012 with the real migration runner and checks what was
+ * cancelled, what was left alone and what was audited. Before that it applies 0012 once while
+ * its audit rows cannot be written, and checks that nothing of the migration was kept (D3):
+ * `pairing.cancel` is the one audit action no code writes, so this file is its case of
+ * tests/integration/audit-failure.test.ts.
  *
- * It resets the shared integration-test database. Integration files run one at a time
- * and each arranges its own data, so the others are unaffected; `afterAll` always leaves
- * the database at the newest migration.
+ * The database is atLevel's own, dropped in `afterAll`; the shared integration-test database
+ * is not touched.
  */
-import { copyFile, mkdtemp, readdir, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { readdir } from 'node:fs/promises';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   deviceByTokenHash,
   pairingClaim,
   pairingComplete,
-  pairingCreate,
   poolAsTx,
   type Autocommit,
 } from '../src/index.ts';
-import { resetTestDatabase, runMigrations, type MigrationResult } from '../src/migrate.ts';
+import { runMigrations, type MigrationResult } from '../src/migrate.ts';
 import {
   whileAuditFails,
   type AuditFaultOutcome,
@@ -39,25 +36,18 @@ import {
   type Pool,
   databaseOn,
 } from '../src/testing.ts';
+import { MIGRATIONS, atLevel, type LevelDatabase } from './levels.ts';
 import {
-  appPool,
-  createOrg,
-  hash,
-  inTx,
-  migratorClient,
-  migratorUrl,
-  pairingCode,
-  type TestOrg,
-} from './support.ts';
+  COMPLETED_REGISTRATION,
+  PAIRINGS,
+  UPGRADE_A,
+  UPGRADE_B,
+  UPGRADE_C,
+  type LevelOrg,
+  type LevelPairing,
+} from './levels/seed-0011.ts';
+import { appPool, hash, inTx, testOrgId } from './support.ts';
 
-const MIGRATIONS = join(
-  dirname(fileURLToPath(import.meta.url)),
-  '..',
-  '..',
-  '..',
-  'db',
-  'migrations',
-);
 const TARGET = '0012_pairing_upgrade_cleanup.sql';
 
 interface Pairing {
@@ -66,7 +56,14 @@ interface Pairing {
   readonly pollingTokenHash: Buffer;
 }
 
-let scratch: string | undefined;
+/** An organisation of level 0011's seeder, as this file uses it. */
+interface TestOrg {
+  readonly orgId: ReturnType<typeof testOrgId>;
+  readonly displayId: string;
+  readonly membershipId: string;
+}
+
+let level: LevelDatabase | undefined;
 let migrator: pg.Client | undefined;
 let pool: Pool | undefined;
 let db: Autocommit;
@@ -79,26 +76,41 @@ let unaudited: AuditFaultOutcome<{
   readonly cancellations: number;
 }>;
 
+const org = (seeded: LevelOrg): TestOrg => ({
+  orgId: testOrgId(seeded.org),
+  displayId: seeded.display,
+  membershipId: seeded.member,
+});
+const pairing = (seeded: LevelPairing): Pairing => ({
+  pairingId: seeded.id,
+  code: seeded.code,
+  pollingTokenHash: Buffer.from(seeded.pollingTokenHash.slice(2), 'hex'),
+});
+
 /** A screen that never had a player, with two claims at once: possible only before 0010. */
-let a: TestOrg;
+const a = org(UPGRADE_A);
 /** In another organisation: a screen with one claim, and one that lapsed uncollected. */
-let b: TestOrg;
+const b = org(UPGRADE_B);
 /** A screen with a paired player. */
-let c: TestOrg;
+const c = org(UPGRADE_C);
 
-let firstOfTwo: Pairing;
-let secondOfTwo: Pairing;
-let otherOrg: Pairing;
-let lapsed: Pairing;
-let pending: Pairing;
-let locked: Pairing;
-let completed: Pairing;
-let completedToken: Buffer;
+const firstOfTwo = pairing(PAIRINGS.firstOfTwo);
+const secondOfTwo = pairing(PAIRINGS.secondOfTwo);
+const otherOrg = pairing(PAIRINGS.otherOrg);
+const lapsed = pairing(PAIRINGS.lapsed);
+const pending = pairing(PAIRINGS.pending);
+const locked = pairing(PAIRINGS.locked);
+const completed = pairing(PAIRINGS.completed);
+const completedToken = Buffer.from(COMPLETED_REGISTRATION.tokenHash.slice(2), 'hex');
 
-function clients(): { migrator: pg.Client; pool: Pool } {
-  if (migrator === undefined || pool === undefined) throw new Error('beforeAll did not finish');
-  return { migrator, pool };
+function clients(): { level: LevelDatabase; migrator: pg.Client; pool: Pool } {
+  if (level === undefined || migrator === undefined || pool === undefined)
+    throw new Error('beforeAll did not finish');
+  return { level, migrator, pool };
 }
+
+/** tinnox_migrator on atLevel's database (tests/integration/audit-failure.test.ts reads this call). */
+const migratorUrl = (): string => clients().level.migratorUrl;
 
 /** Runs one statement as the owner of the security functions (non-tenant tables). */
 async function asDefiner<R extends pg.QueryResultRow>(
@@ -116,36 +128,6 @@ async function asDefiner<R extends pg.QueryResultRow>(
     await client.query('ROLLBACK');
     throw error;
   }
-}
-
-async function newPairing(): Promise<Pairing> {
-  const pollingTokenHash = hash();
-  const code = pairingCode();
-  const created = await inTx(clients().pool, (tx) =>
-    pairingCreate(tx, {
-      code,
-      pollingTokenHash,
-      clientKey: `client-${code}`,
-      ttlSeconds: 600,
-      maxSessionsPerClient: 10,
-      windowSeconds: 600,
-    }),
-  );
-  if (created.outcome !== 'created') throw new Error(`pairing not created: ${created.outcome}`);
-  return { code, pollingTokenHash, pairingId: created.pairingId };
-}
-
-/** A claim written straight into the table, as code from before 0010 could leave it. */
-async function legacyClaim(org: TestOrg, expiresIn: string): Promise<Pairing> {
-  const pairing = await newPairing();
-  await asDefiner(
-    `UPDATE public.pairing_session
-     SET status = 'claimed', org_id = $2, display_id = $3, claimed_at = now(),
-         claimed_by_membership = $4, expires_at = now() + $5::interval
-     WHERE id = $1`,
-    [pairing.pairingId, org.orgId, org.displayId, org.membershipId, expiresIn],
-  );
-  return pairing;
 }
 
 async function statusOf(pairing: Pairing): Promise<string | undefined> {
@@ -178,46 +160,12 @@ async function cancellationsSeenBy(org: TestOrg): Promise<Record<string, unknown
 
 beforeAll(async () => {
   const names = (await readdir(MIGRATIONS)).filter((n) => n.endsWith('.sql')).sort();
-  const before = names.filter((n) => n < TARGET);
   expect(names).toContain(TARGET);
-  expect(before).toHaveLength(11);
-  scratch = await mkdtemp(join(tmpdir(), 'tinnox-migration-0012-'));
-  for (const name of before) await copyFile(join(MIGRATIONS, name), join(scratch, name));
-
-  await resetTestDatabase(migratorUrl());
-  await runMigrations({ connectionString: migratorUrl(), directory: scratch });
-
-  migrator = await migratorClient();
-  pool = appPool('tries the upgraded schema as the runtime role', 2);
+  expect(names.filter((n) => n < TARGET)).toHaveLength(11);
+  level = await atLevel('0011', { seed: true });
+  migrator = await level.migrator();
+  pool = appPool('tries the upgraded schema as the runtime role', 2, level.appUrl);
   db = poolAsTx(databaseOn(pool));
-  a = await createOrg(migrator, 'Upgrade A', { role: 'operator' });
-  b = await createOrg(migrator, 'Upgrade B', { role: 'operator' });
-  c = await createOrg(migrator, 'Upgrade C', { role: 'operator' });
-
-  firstOfTwo = await legacyClaim(a, '5 minutes');
-  // Longer than the default code lifetime of ten minutes: the lifetime is configurable.
-  secondOfTwo = await legacyClaim(a, '50 minutes');
-  otherOrg = await legacyClaim(b, '5 minutes');
-  lapsed = await legacyClaim(b, '-1 minute');
-  pending = await newPairing();
-  locked = await newPairing();
-  await asDefiner("UPDATE public.pairing_session SET status = 'locked' WHERE id = $1", [
-    locked.pairingId,
-  ]);
-
-  completed = await newPairing();
-  completedToken = hash();
-  const claimed = await withOrg(pool, c.orgId, (tx) =>
-    pairingClaim(tx, {
-      code: completed.code,
-      displayId: c.displayId,
-      membershipId: c.membershipId,
-      maxFailures: 5,
-      windowSeconds: 600,
-    }),
-  );
-  expect(claimed.outcome).toBe('claimed');
-  expect((await complete(completed, completedToken)).outcome).toBe('completed');
 
   // First with the audit rows failing: what the upgrade leaves then is read before the real one.
   unaudited = await whileAuditFails(migratorUrl(), 'pairing.cancel', async () => {
@@ -240,15 +188,13 @@ beforeAll(async () => {
     };
   });
 
-  upgrade = await runMigrations({ connectionString: migratorUrl(), directory: MIGRATIONS });
+  upgrade = await level.upgrade();
 });
 
 afterAll(async () => {
   await pool?.end();
   await migrator?.end();
-  // Whatever happened above, leave the shared test database at the newest migration.
-  await runMigrations({ connectionString: migratorUrl(), directory: MIGRATIONS });
-  if (scratch !== undefined) await rm(scratch, { recursive: true, force: true });
+  await level?.drop();
 });
 
 describe('migration 0012 on a database that already holds pairing sessions', () => {
@@ -270,7 +216,7 @@ describe('migration 0012 on a database that already holds pairing sessions', () 
     const later = (await readdir(MIGRATIONS)).filter((n) => n.endsWith('.sql') && n > TARGET);
     expect(upgrade.alreadyApplied).toHaveLength(11);
     expect(upgrade.applied).toEqual([TARGET, ...later.sort()]);
-    const again = await runMigrations({ connectionString: migratorUrl(), directory: MIGRATIONS });
+    const again = await clients().level.upgrade();
     expect(again.applied).toEqual([]);
     expect(again.alreadyApplied).toContain(TARGET);
   });

@@ -1,70 +1,70 @@
 /**
  * Migration 0014, e-mail alerts for screens (CMS-15, docs/portal-v2/stage-c-alerts.md section 7).
  *
- * Rebuilds the test database at migration 0013 with two organisations and their displays, applies
- * 0014 with the real migration runner, and checks that existing displays get the defaults (an
- * offline e-mail after 30 minutes, the back-online e-mail on), the exact grants, and the two
- * sec.* functions.
+ * Builds a database at migration 0013 with the seeders of the migrate-forward chain (levels.ts,
+ * atLevel): among the organisations of the earlier levels, level 0013's seeder
+ * (levels/seed-0013.ts) leaves two organisations with an Owner and a display each, in plain SQL
+ * valid at 0013. Then it applies 0014 with the real migration runner, and checks that existing
+ * displays get the defaults (an offline e-mail after 30 minutes, the back-online e-mail on), the
+ * exact grants, and the two sec.* functions.
  *
- * It resets the shared integration-test database; `afterAll` always leaves it at the newest
- * migration.
+ * The database is atLevel's own, dropped in `afterAll`; the shared integration-test database is
+ * not touched.
  */
 import { randomBytes } from 'node:crypto';
-import { copyFile, mkdtemp, readdir, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { readdir } from 'node:fs/promises';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { alertRecipientByTokenHash, displayAlertOrgs, poolAsTx } from '../src/index.ts';
 import { withOrg, type Pool, databaseOn } from '../src/testing.ts';
-import { resetTestDatabase, runMigrations, type MigrationResult } from '../src/migrate.ts';
-import { appPool, createOrg, migratorClient, migratorUrl, type TestOrg } from './support.ts';
+import type { MigrationResult } from '../src/migrate.ts';
+import { MIGRATIONS, atLevel, type LevelDatabase } from './levels.ts';
+import { BEFORE_ALERTS_A, BEFORE_ALERTS_B } from './levels/seed-0013.ts';
+import { appPool, testOrgId } from './support.ts';
 
-const MIGRATIONS = join(
-  dirname(fileURLToPath(import.meta.url)),
-  '..',
-  '..',
-  '..',
-  'db',
-  'migrations',
-);
 const TARGET = '0014_display_alerts.sql';
 
-let scratch: string | undefined;
+let level: LevelDatabase | undefined;
 let migrator: pg.Client | undefined;
 let pool: Pool | undefined;
-let a: TestOrg;
-let b: TestOrg;
 let upgrade: MigrationResult;
+/** Every organisation of the levels before 0014, read as the administrator before the upgrade. */
+let organisations: string[];
+
+const org = (seeded: typeof BEFORE_ALERTS_B) => ({
+  orgId: testOrgId(seeded.org),
+  membershipId: seeded.owner,
+});
+const a = org(BEFORE_ALERTS_A);
+const b = org(BEFORE_ALERTS_B);
 
 beforeAll(async () => {
   const names = (await readdir(MIGRATIONS)).filter((n) => n.endsWith('.sql')).sort();
-  const before = names.filter((n) => n < TARGET);
   expect(names).toContain(TARGET);
-  expect(before).toHaveLength(13);
-  scratch = await mkdtemp(join(tmpdir(), 'tinnox-migration-0014-'));
-  for (const name of before) await copyFile(join(MIGRATIONS, name), join(scratch, name));
-  await resetTestDatabase(migratorUrl());
-  await runMigrations({ connectionString: migratorUrl(), directory: scratch });
-
-  migrator = await migratorClient();
-  a = await createOrg(migrator, 'Before alerts A');
-  b = await createOrg(migrator, 'Before alerts B');
-  upgrade = await runMigrations({ connectionString: migratorUrl(), directory: MIGRATIONS });
-  pool = appPool('tries the upgraded schema as the runtime role', 2);
+  expect(names.filter((n) => n < TARGET)).toHaveLength(13);
+  level = await atLevel('0013', { seed: true });
+  const admin = await level.administrator();
+  try {
+    const { rows } = await admin.query<{ id: string }>('SELECT id FROM organization ORDER BY id');
+    organisations = rows.map((r) => r.id);
+  } finally {
+    await admin.end();
+  }
+  migrator = await level.migrator();
+  upgrade = await level.upgrade();
+  pool = appPool('tries the upgraded schema as the runtime role', 2, level.appUrl);
 });
 
 afterAll(async () => {
   await pool?.end();
   await migrator?.end();
-  await runMigrations({ connectionString: migratorUrl(), directory: MIGRATIONS });
-  if (scratch !== undefined) await rm(scratch, { recursive: true, force: true });
+  await level?.drop();
 });
 
-function clients(): { migrator: pg.Client; pool: Pool } {
-  if (migrator === undefined || pool === undefined) throw new Error('beforeAll did not finish');
-  return { migrator, pool };
+function clients(): { level: LevelDatabase; migrator: pg.Client; pool: Pool } {
+  if (level === undefined || migrator === undefined || pool === undefined)
+    throw new Error('beforeAll did not finish');
+  return { level, migrator, pool };
 }
 
 describe('migration 0014 on a database that already holds displays', () => {
@@ -72,7 +72,7 @@ describe('migration 0014 on a database that already holds displays', () => {
     const later = (await readdir(MIGRATIONS)).filter((n) => n.endsWith('.sql') && n > TARGET);
     expect(upgrade.alreadyApplied).toHaveLength(13);
     expect(upgrade.applied).toEqual([TARGET, ...later.sort()]);
-    const again = await runMigrations({ connectionString: migratorUrl(), directory: MIGRATIONS });
+    const again = await clients().level.upgrade();
     expect(again.applied).toEqual([]);
   });
 
@@ -153,7 +153,9 @@ describe('grants', () => {
 describe('sec.* functions', () => {
   it('list organisation ids for the alert check, and nothing else', async () => {
     const ids = await displayAlertOrgs(poolAsTx(databaseOn(clients().pool)));
-    expect(ids).toEqual([a.orgId, b.orgId].sort());
+    // Every organisation of every level before 0014, these two among them.
+    expect(ids).toEqual(organisations);
+    expect(ids).toEqual(expect.arrayContaining([a.orgId, b.orgId]));
   });
 
   it('resolve only an unexpired, unconfirmed token', async () => {

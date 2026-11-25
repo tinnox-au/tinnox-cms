@@ -11,9 +11,9 @@ import { testOrgId, unjudgedSql, createPool, type Pool } from '../src/testing.ts
 // its own statements where no organisation is set. They live in the package's testing entry, so
 // tests outside this package use the same ones.
 export { inTx, testOrgId, withNoOrgSet } from '../src/testing.ts';
-// Two connections in open transactions, and whether one side still waits on the other's lock:
-// the pattern of a two-connection test (SCX-05).
-export { stillWaiting, twoTransactions } from '../src/testing.ts';
+// Two connections in open transactions, the wait of one side on the other's lock as the server
+// shows it, and the end of a backend: the pattern of a two-connection test (SCX-05, step 33).
+export { backendPid, killBackend, twoTransactions, waitForLockWaiters } from '../src/testing.ts';
 
 const envFile = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '.env');
 if (existsSync(envFile)) process.loadEnvFile(envFile);
@@ -30,11 +30,12 @@ function need(name: string): string {
  * these tests write themselves: they try what the role may and may not do (row-level security,
  * grants, constraints, the sec.* functions), so most of their writes carry no audit row. The
  * name tells the audit-debt guard that this is not product code (../src/audit-debt-guard.ts),
- * and `why` says what the SQL is.
+ * and `why` says what the SQL is. `connectionString` names another database, such as one
+ * `atLevel` built (./levels.ts).
  */
-export function appPool(why: string, max = 4): Pool {
+export function appPool(why: string, max = 4, connectionString = need('TEST_DATABASE_URL')): Pool {
   return createPool({
-    connectionString: need('TEST_DATABASE_URL'),
+    connectionString,
     applicationName: unjudgedSql(why),
     max,
   });

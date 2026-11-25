@@ -37,9 +37,9 @@ import {
   createSchedule,
   desiredPublicationId,
   expectError,
+  faultyPool,
   imageItem,
   layoutZones,
-  losingCommitAnswers,
   pairPlayer,
   pngBytes,
   push,
@@ -778,7 +778,8 @@ describe('assign, then push', () => {
       const ids = [one.displayId, two.displayId];
       // Every publication of this app commits for real, and the answer to its COMMIT is lost.
       const lossy = await startTestApp({}, 1000, {
-        wrapPool: (pool) => losingCommitAnswers(pool, /INSERT INTO publication \(id/),
+        wrapPool: (pool) =>
+          faultyPool(pool, { mode: 'lost-commit-answer', at: /INSERT INTO publication \(id/ }),
       });
       try {
         const operator = await signIn(lossy, orgA);
@@ -1119,6 +1120,73 @@ describe('assign, then push', () => {
         result: 'failure',
         objectType: 'layout',
         detail: { displayId: small.id, reasons: ['zone_too_small'], via: 'push' },
+      });
+    });
+
+    it('LYX-03: blocks a stored layout of overlapping zones or one zone, which the schema refuses, instead of a 500', async () => {
+      const main = await createPlaylist(alice, 'Planted main', [imageItem(imageA)]);
+      const band = await createPlaylist(alice, 'Planted band', [imageItem(imageB)]);
+      const overlapping = await createLayout(alice, 'Planted overlap', layoutZones(main, band));
+      const single = await createLayout(alice, 'Planted single', layoutZones(main, band));
+      // layout_zone holds any count and overlap (D7: cross-row, so the planner holds it). Its
+      // rows are replaced, never updated: the band moves up into the main zone.
+      await withOrg(
+        t.testSql('plants zone sets the layout API refuses'),
+        orgA.orgId,
+        async (tx) => {
+          await tx.query(
+            'DELETE FROM layout_zone WHERE layout_id = ANY($1::uuid[]) AND position = 1 AND org_id = app_org_id()',
+            [[overlapping.id, single.id]],
+          );
+          await tx.query(
+            `INSERT INTO layout_zone
+               (layout_id, position, org_id, playlist_id, x_bp, y_bp, width_bp, height_bp)
+             VALUES ($1, 1, app_org_id(), $2, 0, 8000, 10000, 1500)`,
+            [overlapping.id, band],
+          );
+        },
+      );
+      const first = await createDisplay(alice, orgA, 'Overlap screen');
+      const second = await createDisplay(alice, orgA, 'Single-zone screen');
+      await assignLayout(alice, first.id, overlapping.id);
+      await assignLayout(alice, second.id, single.id);
+
+      const overlapRow = await planRow(alice, first.id);
+      expect(overlapRow).toMatchObject({ layout: { id: overlapping.id }, state: 'blocked' });
+      expect(overlapRow.issues).toEqual([
+        {
+          path: 'zones[1]',
+          code: 'zone_overlap',
+          message:
+            'Zone 2 of the layout overlaps zone 1. Open the layout and save it again so that no zones overlap, or assign other content.',
+        },
+      ]);
+      const singleRow = await planRow(alice, second.id);
+      expect(singleRow).toMatchObject({ layout: { id: single.id }, state: 'blocked' });
+      expect(singleRow.issues).toEqual([
+        {
+          path: 'layout',
+          code: 'zone_count_out_of_range',
+          message:
+            'This layout has 1 zone; a layout needs 2 to 4. Open the layout and save it with 2 to 4 zones, or assign other content.',
+        },
+      ]);
+
+      const results = await pushed(alice, [first.id, second.id]);
+      expect(results.map((r) => r.outcome)).toEqual(['rejected', 'rejected']);
+      expect(results.map((r) => r.issues)).toEqual([overlapRow.issues, singleRow.issues]);
+      expect(await desiredPublicationId(alice, first.id)).toBeNull();
+      expect(await desiredPublicationId(alice, second.id)).toBeNull();
+      const failures = await auditEvents(alice, '&category=publication&result=failure');
+      expect(failures.find((e) => e.objectId === overlapping.id)).toMatchObject({
+        action: 'publication.create',
+        objectType: 'layout',
+        detail: { displayId: first.id, reasons: ['zone_overlap'], via: 'push' },
+      });
+      expect(failures.find((e) => e.objectId === single.id)).toMatchObject({
+        action: 'publication.create',
+        objectType: 'layout',
+        detail: { displayId: second.id, reasons: ['zone_count_out_of_range'], via: 'push' },
       });
     });
   });

@@ -174,6 +174,11 @@ export const NULL_PASSING_CHECKS: Readonly<Record<string, NullPassingCheck>> = {
     ['available_from', 'available_until'],
     'Either bound may be absent (no start, no end) and is accepted by name; the comparison runs on two values only.',
   ),
+  'public.media.media_availability_year': total(
+    "CHECK ((((available_from IS NULL) OR ((available_from >= '1000-01-01 00:00:00'::timestamp without time zone) AND (available_from <= '9999-12-31 23:59:59'::timestamp without time zone))) AND ((available_until IS NULL) OR ((available_until >= '1000-01-01 00:00:00'::timestamp without time zone) AND (available_until <= '9999-12-31 23:59:59'::timestamp without time zone)))))",
+    ['available_from', 'available_until'],
+    'Either bound may be absent (no limit on that side) and is accepted by name; each range test runs on a value only.',
+  ),
   'public.media.media_bytes_check': optional('CHECK ((bytes >= 0))', ['bytes'], NOT_VALIDATED_YET),
   'public.media.media_codec_check': optional(
     'CHECK ((char_length(codec) <= 40))',
@@ -268,7 +273,7 @@ export const NULL_PASSING_CHECKS: Readonly<Record<string, NullPassingCheck>> = {
     INVITE_DETAILS,
   ),
   'public.member_invite.member_invite_email_shape': optional(
-    "CHECK ((email ~~ '%_@_%'::text))",
+    "CHECK ((email ~ '^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$'::text))",
     ['email'],
     INVITE_DETAILS,
   ),

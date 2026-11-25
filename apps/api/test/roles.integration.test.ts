@@ -11,7 +11,7 @@ import { sessionRevokeMembership } from '@tinnox/db';
 import { withOrg } from '@tinnox/db/testing';
 import { ACTIVITY_CATEGORIES, permissionsOf } from '@tinnox/domain';
 import pg from 'pg';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   addMember,
   asMigratorIn,
@@ -63,6 +63,9 @@ describe('roles enforced by the API', () => {
     t = await startTestApp({}, 1000, { wrapPool: holds.wrapPool });
     org = await createOrg('Roles');
     owner = await signIn(t, org);
+  });
+  afterEach(() => {
+    holds.disarmAll();
   });
   afterAll(async () => {
     await t.close();

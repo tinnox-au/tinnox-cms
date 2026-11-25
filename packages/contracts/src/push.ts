@@ -43,9 +43,9 @@ const MAX_ISSUES = 100;
  * `default.items[n]`, `events[n].playlist`, `events[n].items[n]` or `schedule` for a schedule
  * (the event is the first one that uses the playlist; item numbers count inside that playlist;
  * `schedule` is a problem of all its playlists together). For a layout it is
- * `zones[n].playlist`, `zones[n].items[k]`, `zones[n]` (the zone is too small on this screen)
- * or `layout` (n is the zone, from 0; item numbers count inside that zone's playlist; `layout`
- * is a problem of all its playlists together).
+ * `zones[n].playlist`, `zones[n].items[k]`, `zones[n]` (the zone is too small on this screen, or
+ * overlaps an earlier zone) or `layout` (n is the zone, from 0; item numbers count inside that
+ * zone's playlist; `layout` is a problem of all its playlists together, or of its zone count).
  */
 export const PushIssueSchema = z
   .object({
