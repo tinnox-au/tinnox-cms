@@ -94,7 +94,7 @@ Beside the instance:
 | Secrets | Parameter Store | The same | Yes |
 | Deploy pipeline | GitHub Actions: build, migrate, release, health check | The same, releasing to staging first and then production | Yes |
 | Job hand-off, API to worker | Shared folder on the one server | Redesigned for two servers | No |
-| Logs and monitoring | Log files on the server | Central logs, metrics, paging | No |
+| Logs and monitoring | Container logs in CloudWatch, kept 30 days; no metrics, no paging | Central logs, metrics, paging | Partly: the logs are already central |
 | E-mail | Off | SES Sydney | No |
 | Load balancer and firewall | None | Both | No |
 
@@ -217,7 +217,7 @@ Second month:
 | S3 media storage | Second month | Under A$1.50 | Needs the adapter written first |
 | One database restore drill | Second month | Cents, once | |
 | One outside uptime check (Better Stack or UptimeRobot free tier) | Optional | Free | |
-| Server logs kept on the instance, rotated | Yes | Free | |
+| Container logs in CloudWatch (built that way on 25 Nov, instead of files on the instance) | Yes | Free under 5 GB a month | |
 | Central logs and metrics (CloudWatch) | No | | Stage 1. Free under 5 GB a month, then about A$1 per GB |
 | Paging (Better Stack paid) | No | | Stage 1. About A$45 |
 | E-mail (SES Sydney) | No | | Stage 1. Under A$1; needs CMS-35 and CMS-27 first |
