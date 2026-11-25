@@ -1,0 +1,10 @@
+# Used only for apps/api/Dockerfile. Tests, fixtures and local state stay out of the image.
+**/node_modules
+**/*.test.ts
+**/test
+**/test-fixtures
+**/dist
+.env*
+.git
+data
+infra/.generated
