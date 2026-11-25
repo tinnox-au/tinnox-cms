@@ -324,7 +324,7 @@ from: CMS-30
 - 25 Nov: Michael, 25 Nov: stage 0 goes in the existing AWS account Tinnox Production, not a new account. It already runs one server for another system.
 - 25 Nov: Michael activated AWS advanced features (cannot be undone). TINNOX now administers the organisation and its policies. The region policy still allows Sydney only; identity providers are allowed, so keyless GitHub deploys are possible.
 - 25 Nov: stacks tinnox-cms-test (network, server, data disk, key, snapshots, patching) and tinnox-cms-test-database (RDS PostgreSQL 17, private) created in Sydney; both completed first time. Billing has started. Michael set the root password and MFA.
-- 25 Nov: tested on the new RDS instance: it accepts a BYPASSRLS role, so RDS stays. DNS records, the real roles and sign-in are next.
+- 25 Nov: tested on the new RDS instance: it accepts a BYPASSRLS role, so RDS stays. Sign-in stack tinnox-cms-test-identity created (Cognito, empty pool). Next: DNS records, the real database roles, image delivery, the deploy step.
 
 ### CMS-38
 from: CMS-37
