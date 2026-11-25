@@ -33,7 +33,6 @@ None.
 | CMS-18 | Web pages on screens (stage C): sandboxed, off by default per organisation; needs the P2-06 threat review first, like CMS-3 | proposed | - | 19 Nov |
 | CMS-20 | Self-service sign-up with payment (like Yodeck): new customers sign up and pay, invites complete without TINNOX | proposed | - | 19 Nov |
 | CMS-25 | Fix the open layouts review findings LYX-01 to LYX-05 (round 4); each closes with its poteto plan step | proposed | - | 22 Nov |
-| CMS-26 | Ruleset on main: no force push or deletion, merge or squash only, pull requests and the three CI jobs required (poteto D12, D14); Michael creates it | proposed | - | 22 Nov |
 | CMS-27 | Ask TINNOX whether DEC-13 (data stays in Australia) allows alert e-mails to mailboxes outside Australia (poteto D23) | proposed | - | 22 Nov |
 | CMS-29 | Revoke three unused tinnox_definer grants in a new migration: member_invite.invited_by SELECT, UPDATE on login_state and pairing_claim_failure (poteto step 6) | proposed | - | 23 Nov |
 | CMS-33 | Poteto pyramid refactor, group E: frontend (steps 38 to 44a of the adoption plan); Michael starts it | proposed | - | 24 Nov |
@@ -63,6 +62,7 @@ None.
 | Id | Date | Outcome | PR |
 |---|---|---|---|
 | CMS-31 | 25 Nov | Poteto pyramid refactor, group C: errors and outcomes (steps 23 to 28 of the adoption plan); Michael starts it | #40 |
+| CMS-26 | 25 Nov | Ruleset on main: no force push or deletion, merge or squash only, pull requests and the three CI jobs required (poteto D12, D14); Michael creates it | - |
 | CMS-30 | 24 Nov | Poteto pyramid refactor, group B: the database API (steps 13 to 22 of the adoption plan), built locally first | #39 |
 | CMS-28 | 23 Nov | Poteto pyramid refactor, rest of group A: steps 3, 4, 6, 6a, 11, 12 and 12a to 12c of the adoption plan | #37 |
 | CMS-24 | 22 Nov | Poteto pyramid refactor, group A: guardrails that land with their fixes (document, test, migration, import and lint checks) | #36 |
@@ -243,6 +243,9 @@ from: CMS-24
 
 **Notes**
 - 25 Nov: Michael, 25 Nov: ruleset 'main' created and active on the default branch: no deletion, no force push, pull request required (0 approvals, merge or squash only), the three ci.yml checks required, not strict; Repository admin bypass always. e2e not required yet (D14).
+
+**Evidence**
+ruleset 'main' active on the default branch, read back through the GitHub API on 25 Nov; a status commit to main passed through the admin bypass
 
 ### CMS-27
 from: CMS-23
