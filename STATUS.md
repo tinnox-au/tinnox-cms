@@ -325,7 +325,7 @@ from: CMS-30
 - 25 Nov: Michael activated AWS advanced features (cannot be undone). TINNOX now administers the organisation and its policies. The region policy still allows Sydney only; identity providers are allowed, so keyless GitHub deploys are possible.
 - 25 Nov: stacks tinnox-cms-test (network, server, data disk, key, snapshots, patching) and tinnox-cms-test-database (RDS PostgreSQL 17, private) created in Sydney; both completed first time. Billing has started. Michael set the root password and MFA.
 - 25 Nov: tested on the new RDS instance: it accepts a BYPASSRLS role, so RDS stays. Sign-in (Cognito) and delivery (image repositories, GitHub deploy role, GitHub environment test) stacks created.
-- 25 Nov: release path (pull request 47) applied to AWS: roles, settings, GitHub variables. Next: DNS records, merge 44 and 47, first release.
+- 25 Nov: release path (pull request 47) applied to AWS: roles, settings, GitHub variables. DNS records added at GoDaddy. Next: merge 44 and 47, first release.
 
 ### CMS-38
 from: CMS-37
