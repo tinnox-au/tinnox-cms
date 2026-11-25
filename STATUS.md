@@ -326,3 +326,6 @@ from: CMS-37
 
 ### CMS-39
 from: CMS-37
+
+**Notes**
+- 25 Nov: 25 Nov: the stage 0 image (pull request 42) runs the source on Node 24's type stripping: production dependencies only, no tsx. Left for this card: CI tests the API through tsx on Node 22, so before stage 1 CI tests the image as built or a compiled build replaces it.
