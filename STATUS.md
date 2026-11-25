@@ -322,6 +322,7 @@ from: CMS-30
 - 25 Nov: Michael, 25 Nov: hostnames are app. and player. under tinnox-one.com.au (app.test. and player.test. for stage 0); the bare domain carries no application and redirects to tinnox.com.au for now.
 - 25 Nov: Michael, 25 Nov: stage 0 goes in the existing AWS account Tinnox Production, not a new account. It already runs one server for another system; no RDS, no S3. The region lock needs the management account and is open.
 - 25 Nov: 25 Nov: the AWS account is a project of AWS's new sign-up experience: AWS manages its policies and forbids identity providers, so the Australia-only policy and keyless GitHub deploys both need 'Activate advanced features', which cannot be undone. Michael's decision; open.
+- 25 Nov: 25 Nov: Michael activated AWS advanced features. He now administers the organisation; AWS's policies are ours to edit. Region policy still confines to Sydney (plus global endpoints in two US regions); the ban on identity providers is gone, so keyless GitHub deploys are possible.
 
 ### CMS-38
 from: CMS-37
