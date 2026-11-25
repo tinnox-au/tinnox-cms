@@ -1,0 +1,178 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  TINNOX CMS, sign-in for one environment: an Amazon Cognito user pool that acts as the
+  OpenID Connect provider of the API, with a one-time code from an authenticator app
+  required for every user, and the app client the API signs in with. See
+  infra/aws/README.md.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Environment }
+        Parameters: [EnvironmentName, PortalOrigin]
+      - Label: { default: Sign-in pages }
+        Parameters: [DomainPrefix]
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: test
+    AllowedPattern: '^[a-z][a-z0-9]{1,11}$'
+    ConstraintDescription: 2 to 12 lower-case letters and digits, starting with a letter.
+    Description: The same name as in the environment stack. Never change it on an existing stack.
+  PortalOrigin:
+    Type: String
+    Default: https://app.test.tinnox-one.com.au
+    AllowedPattern: '^https://[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
+    ConstraintDescription: An https origin with no port, no path and no trailing slash.
+    Description: >-
+      PORTAL_ORIGIN of the API. Sign-in returns to /api/auth/callback on it and sign-out
+      returns to its root.
+  DomainPrefix:
+    Type: String
+    Default: tinnox-cms-test
+    AllowedPattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+    Description: >-
+      First part of the address of the sign-in pages,
+      https://<prefix>.auth.<region>.amazoncognito.com. It must be unused by any AWS
+      customer in the Region and must not contain "aws", "amazon" or "cognito".
+
+Rules:
+  AustraliaOnly:
+    Assertions:
+      - Assert: !Contains [[ap-southeast-2, ap-southeast-4], !Ref 'AWS::Region']
+        AssertDescription: >-
+          All data stays in Australia (DEC-13): this stack may only be created in
+          Sydney (ap-southeast-2) or Melbourne (ap-southeast-4).
+
+Resources:
+  # Deleting or replacing the pool deletes every user, and a new pool gives every person
+  # a new subject, which is what a CMS membership is tied to. So the pool is kept when
+  # the stack is deleted, and it refuses deletion until that is switched off by hand.
+  #
+  # These cannot be changed after the pool exists: signing in with the e-mail address
+  # (UsernameAttributes), ignoring upper and lower case, and the required attribute.
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      UserPoolName: !Sub 'tinnox-cms-${EnvironmentName}'
+      DeletionProtection: ACTIVE
+      # Essentials, the tier with the current sign-in pages: only those ask again on
+      # prompt=login and report in the token how the user signed in, both of which the
+      # API depends on. Free up to 10,000 active users a month.
+      UserPoolTier: ESSENTIALS
+      UsernameAttributes: [email]
+      UsernameConfiguration:
+        CaseSensitive: false
+      AutoVerifiedAttributes: [email]
+      Schema:
+        - { Name: email, AttributeDataType: String, Required: true, Mutable: true }
+      UserAttributeUpdateSettings:
+        AttributesRequireVerificationBeforeUpdate: [email]
+      # People do not register themselves: TINNOX creates each account.
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      # Every user must use an authenticator app. No SMS and no e-mail codes.
+      MfaConfiguration: 'ON'
+      EnabledMfas: [SOFTWARE_TOKEN_MFA]
+      # A forgotten password or a lost authenticator is reset by TINNOX staff, as the
+      # runbook says, not by a link sent to the user.
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - { Name: admin_only, Priority: 1 }
+      # Length over character classes, as the development realm: the second factor is
+      # required for everyone.
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireLowercase: false
+          RequireUppercase: false
+          RequireNumbers: false
+          RequireSymbols: false
+          TemporaryPasswordValidityDays: 3
+      # Invitations come from Cognito's own sender in this Region, at most 50 a day.
+      EmailConfiguration:
+        EmailSendingAccount: COGNITO_DEFAULT
+
+  # The sign-in pages, served by Cognito under its own name. A custom host name would
+  # need a certificate in us-east-1 and a CloudFront distribution, which the project
+  # does not use.
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      UserPoolId: !Ref UserPool
+      Domain: !Ref DomainPrefix
+      # 2 = managed login. The classic pages (1) ignore prompt=login and report every
+      # local sign-in as single-factor.
+      ManagedLoginVersion: 2
+
+  # The API: a confidential client that uses the authorisation code flow with PKCE and
+  # asks for the scope "openid" only (apps/api/src/auth/oidc.ts). Changing
+  # GenerateSecret replaces the client: a new id and secret, the users stay.
+  ApiClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: !Sub 'tinnox-cms-${EnvironmentName}-api'
+      GenerateSecret: true
+      SupportedIdentityProviders: [COGNITO]
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows: [code]
+      AllowedOAuthScopes: [openid]
+      # config.ts accepts exactly this callback path, and a sign-out target on the portal.
+      CallbackURLs:
+        - !Sub '${PortalOrigin}/api/auth/callback'
+      LogoutURLs:
+        - !Sub '${PortalOrigin}/'
+      # The API never signs users in through the Cognito API, only through the pages.
+      ExplicitAuthFlows: [ALLOW_REFRESH_TOKEN_AUTH]
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+      # The API uses the ID token once, at sign-in, and keeps no access or refresh
+      # token, so each lives as briefly as Cognito allows.
+      TokenValidityUnits:
+        IdToken: minutes
+        AccessToken: minutes
+        RefreshToken: minutes
+      IdTokenValidity: 5
+      AccessTokenValidity: 5
+      RefreshTokenValidity: 60
+      # Long enough to set up an authenticator app at the first sign-in.
+      AuthSessionValidity: 15
+      # With the scope "openid" the ID token carries every attribute the client may
+      # read. The API needs none of them, and the rule is no name or e-mail in the token.
+      ReadAttributes: [email_verified]
+      # Cognito requires write access to a required attribute; without the scope
+      # aws.cognito.signin.user.admin no user can use it.
+      WriteAttributes: [email]
+
+  # Managed login shows nothing for a client made outside the console until the client
+  # has a style; this one is Cognito's default.
+  ApiClientBranding:
+    Type: AWS::Cognito::ManagedLoginBranding
+    DependsOn: UserPoolDomain
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientId: !Ref ApiClient
+      UseCognitoProvidedValues: true
+
+Outputs:
+  Issuer:
+    Description: OIDC_ISSUER of the API, exactly as written here (no trailing slash).
+    Value: !Sub 'https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}'
+  ClientId:
+    Description: >-
+      OIDC_CLIENT_ID of the API. The client secret is not an output: read it once in the
+      Cognito console and store it as a SecureString parameter.
+    Value: !Ref ApiClient
+  UserPoolId:
+    Description: The user pool, for creating users and for the provisioning tool.
+    Value: !Ref UserPool
+  UserPoolArn:
+    Description: The user pool, for an IAM policy that reads users.
+    Value: !GetAtt UserPool.Arn
+  SignInPages:
+    Description: Where Cognito serves the sign-in pages and the /logout address.
+    Value: !Sub 'https://${DomainPrefix}.auth.${AWS::Region}.amazoncognito.com'

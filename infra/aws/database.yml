@@ -1,0 +1,157 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  TINNOX CMS, the PostgreSQL database of one environment, on Amazon RDS, inside the
+  network that environment.yml created. It creates the instance and its master user only:
+  the three application roles and the tinnox database are made afterwards by the role
+  set-up, run by hand. See infra/aws/README.md.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Environment }
+        Parameters: [EnvironmentName, EnvironmentStackName]
+      - Label: { default: Database }
+        Parameters:
+          - InstanceClass
+          - StorageGiB
+          - MaxStorageGiB
+          - MultiAZ
+          - BackupRetentionDays
+          - DeletionProtection
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: test
+    AllowedPattern: '^[a-z][a-z0-9]{1,11}$'
+    ConstraintDescription: 2 to 12 lower-case letters and digits, starting with a letter.
+    Description: The same name as in the environment stack. Never change it on an existing stack.
+  EnvironmentStackName:
+    Type: String
+    Default: tinnox-cms-test
+    AllowedPattern: '^[A-Za-z][A-Za-z0-9-]{0,127}$'
+    Description: Name of the stack created from environment.yml, whose network this database joins.
+  InstanceClass:
+    Type: String
+    Default: db.t4g.micro
+    AllowedValues: [db.t4g.micro, db.t4g.small, db.t4g.medium, db.t4g.large]
+    Description: A change restarts the database.
+  StorageGiB:
+    Type: Number
+    Default: 20
+    MinValue: 20
+    MaxValue: 1000
+    Description: Disk allocated now. It can grow, never shrink.
+  MaxStorageGiB:
+    Type: Number
+    Default: 50
+    MinValue: 26
+    MaxValue: 2000
+    Description: >-
+      RDS grows the disk by itself up to this size when it runs short. Keep it at least
+      a quarter above the allocated size.
+  MultiAZ:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      A standby copy in a second zone that takes over by itself. Off for internal
+      testing; it doubles the instance price.
+  BackupRetentionDays:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 35
+    Description: Days of automatic backups, and so how far back a point-in-time restore can go.
+  DeletionProtection:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Refuse to delete the database. Set to false, and update the stack, before the
+      stack can be deleted.
+
+Rules:
+  AustraliaOnly:
+    Assertions:
+      - Assert: !Contains [[ap-southeast-2, ap-southeast-4], !Ref 'AWS::Region']
+        AssertDescription: >-
+          All data stays in Australia (DEC-13): this stack may only be created in
+          Sydney (ap-southeast-2) or Melbourne (ap-southeast-4).
+
+Resources:
+  SubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub 'TINNOX CMS ${EnvironmentName} - subnets with no route to the internet'
+      SubnetIds: !Split
+        - ','
+        - Fn::ImportValue: !Sub '${EnvironmentStackName}-DatabaseSubnetIds'
+
+  # Deleting the stack, or an update that would replace the instance, first takes a
+  # final snapshot. A replacement still loses the automatic backups and with them
+  # point-in-time restore, so the properties that force one are fixed below and are
+  # not parameters: the identifier, the master user name, encryption and the subnet group.
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      # A fixed name makes an update that needs a replacement fail instead of happening.
+      DBInstanceIdentifier: !Sub 'tinnox-cms-${EnvironmentName}'
+      Engine: postgres
+      # The major version only: RDS applies minor versions itself, in the maintenance
+      # window, and a pinned minor version would then read as a downgrade on the next update.
+      EngineVersion: '17'
+      AutoMinorVersionUpgrade: true
+      AllowMajorVersionUpgrade: false
+      # No paid extended support starts by itself when version 17 leaves standard support.
+      EngineLifecycleSupport: open-source-rds-extended-support-disabled
+      DBInstanceClass: !Ref InstanceClass
+      MultiAZ: !Ref MultiAZ
+      StorageType: gp3
+      AllocatedStorage: !Ref StorageGiB
+      MaxAllocatedStorage: !Ref MaxStorageGiB
+      # Encrypted with the account's RDS key. This cannot be changed later.
+      StorageEncrypted: true
+      DBSubnetGroupName: !Ref SubnetGroup
+      VPCSecurityGroups:
+        - Fn::ImportValue: !Sub '${EnvironmentStackName}-DatabaseSecurityGroupId'
+      PubliclyAccessible: false
+      Port: '5432'
+      # RDS refuses connections without TLS by default from version 15; clients verify
+      # the server against this authority's root certificate.
+      CACertificateIdentifier: rds-ca-rsa2048-g1
+      # The master user is for the role set-up and for incidents only; the application
+      # never uses it. RDS creates its password, keeps it in Secrets Manager and changes
+      # it every seven days, so it appears in no template, parameter or file.
+      MasterUsername: tinnox_master
+      ManageMasterUserPassword: true
+      # No database is created here: the role set-up creates "tinnox", owned by
+      # tinnox_migrator.
+      EnableIAMDatabaseAuthentication: false
+      BackupRetentionPeriod: !Ref BackupRetentionDays
+      CopyTagsToSnapshot: true
+      # UTC. Backups about 02:00 and maintenance about 03:00 on Sunday, Sydney time.
+      PreferredBackupWindow: 16:00-16:45
+      PreferredMaintenanceWindow: sat:17:00-sat:18:00
+      DeletionProtection: !Ref DeletionProtection
+      # No paid monitoring: the detailed tier is the default unless it is turned off.
+      EnablePerformanceInsights: false
+      DatabaseInsightsMode: standard
+      MonitoringInterval: 0
+      Tags:
+        - { Key: Name, Value: !Sub 'tinnox-cms-${EnvironmentName}' }
+
+Outputs:
+  DatabaseHost:
+    Description: Host name for DATABASE_URL and DATABASE_MIGRATOR_URL.
+    Value: !GetAtt Database.Endpoint.Address
+  DatabasePort:
+    Description: Port for DATABASE_URL and DATABASE_MIGRATOR_URL.
+    Value: !GetAtt Database.Endpoint.Port
+  MasterUserSecretArn:
+    Description: >-
+      Secrets Manager secret with the master user's current password. For the role
+      set-up and for incidents; the server's role cannot read it.
+    Value: !GetAtt Database.MasterUserSecret.SecretArn
