@@ -180,13 +180,17 @@ an authenticator app at the first sign-in.
 
 ## 5. Open before the first deployment
 
-1. **RDS and the `BYPASSRLS` role.** `CREATE ROLE tinnox_definer NOLOGIN BYPASSRLS` as the
-   RDS master user is expected to be refused: PostgreSQL lets only a superuser or a
-   `BYPASSRLS` role give that attribute, and the master user is neither. Every tenant table
-   forces row-level security, so the `sec.*` functions depend on it. Test this first, on
-   the new instance. If it is refused, the plan's fallback is PostgreSQL in a container on
-   the server: delete the database stack (`DeletionProtection` false first). Do not grant
-   `rds_superuser` to anything and do not weaken the policies.
+1. **RDS and the `BYPASSRLS` role: settled, RDS accepts it.** Tested on 25 November on
+   the new instance (PostgreSQL 17.9) as the master user, from the server, over TLS 1.3
+   with `sslmode=verify-full` and the RDS bundle: `CREATE ROLE … NOLOGIN BYPASSRLS` with
+   the same attributes as `infra/postgres/init/01-roles.sh` succeeded and the role had
+   `rolbypassrls`, although the master user itself has neither superuser nor `BYPASSRLS`.
+   The grant `WITH INHERIT FALSE, SET TRUE` and the role's `lock_timeout` succeeded too.
+   One difference from the local script: `CREATE DATABASE … OWNER tinnox_migrator` is
+   refused ("must be able to SET ROLE") until
+   `GRANT tinnox_migrator TO CURRENT_USER WITH SET TRUE` has run. The test used throwaway
+   roles and dropped them; the real roles and databases are not created yet. Still: do
+   not grant `rds_superuser` to anything.
 2. **Sign-out.** The API builds a standard sign-out address from `end_session_endpoint`,
    which Cognito is not known to publish. Without it the CMS session ends but Cognito's
    own session lasts up to an hour, so the same browser can sign in again without a
@@ -321,8 +325,8 @@ What stays behind on purpose, and keeps costing until removed by hand:
   the IAM role; the data disk appears under the by-id name the set-up waits for; the
   set-up's report reaches the stack; and `EngineVersion: '17'` is accepted (it gave
   17.9).
-- That the server can reach the database, and that the database accepts the three roles
-  (section 5): nothing has connected to it yet.
+- The migrations and the `sec.*` functions on RDS: the server reaches the database and
+  RDS accepts the roles (section 5), but no migration has run there.
 - That the organisation's policies allow the resource types of the other two
   templates. As read on 25 November they refuse other Regions and IAM paths under
   `/managed/`, which the templates do not use. The resource control policy was not read.
