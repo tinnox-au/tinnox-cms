@@ -321,6 +321,7 @@ from: CMS-30
 - 25 Nov: Michael, 25 Nov: the product domain is tinnox-one.com.au, bought. Stage 0 keeps the API on tsx (compiled image is CMS-39).
 - 25 Nov: Michael, 25 Nov: hostnames are app. and player. under tinnox-one.com.au (app.test. and player.test. for stage 0); the bare domain carries no application and redirects to tinnox.com.au for now.
 - 25 Nov: Michael, 25 Nov: stage 0 goes in the existing AWS account Tinnox Production, not a new account. It already runs one server for another system; no RDS, no S3. The region lock needs the management account and is open.
+- 25 Nov: 25 Nov: the AWS account is a project of AWS's new sign-up experience: AWS manages its policies and forbids identity providers, so the Australia-only policy and keyless GitHub deploys both need 'Activate advanced features', which cannot be undone. Michael's decision; open.
 
 ### CMS-38
 from: CMS-37
