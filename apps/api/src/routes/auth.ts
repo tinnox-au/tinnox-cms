@@ -28,6 +28,7 @@ import {
 import {
   auditStandalone,
   changePreOrg,
+  isLockTimeout,
   loginStatePut,
   loginStateTake,
   poolAsTx,
@@ -45,7 +46,7 @@ import {
 import { permissionsOf } from '@tinnox/domain';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { IdentityProviderError, mfaSatisfied } from '../auth/oidc.ts';
-import { parseRole } from '../auth/permissions.ts';
+import { lockTimeoutAsUnavailable, parseRole } from '../auth/permissions.ts';
 import {
   clearSessionCookie,
   operatorOf,
@@ -433,6 +434,59 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
     };
   });
 
+  /**
+   * The sign-out catch-all (CX-01 residual; kept by decision, Michael, 25 Nov 2026). Ending a
+   * session is the safe direction, so a sign-out whose audited transaction failed still ends the
+   * session, in a statement of its own with no audit row (sessionRevokeUnaudited). Sign-in and
+   * pairing do the opposite: no audit event, no credential. Returns the error to throw, or the
+   * answer when the request is answered after all. The log line says what happened:
+   *  - the fallback ended a live session: the first transaction did not commit, so this
+   *    sign-out has no audit row;
+   *  - it found none: the first transaction committed after all, with its auth.logout row (its
+   *    COMMIT was not confirmed), or another request ended the session meanwhile; either way
+   *    nothing was ended without an audit row;
+   *  - it failed too: the session may still be active.
+   *
+   * A wait past lock_timeout (55P03) is answered by what the fallback found, because "try
+   * again" is true only while the session may still be there: 503 with Retry-After when the
+   * fallback failed too, as every other write answers a lock timeout; a sign-out's own answer
+   * when the fallback ended the session (with no ID token to hand the provider: the fallback
+   * does not read it); and the 401 of a session that is no longer live when another request had
+   * ended it. Every other failure keeps the answer it had.
+   */
+  async function afterFailedSignOut(
+    request: FastifyRequest,
+    idHash: Buffer,
+    error: unknown,
+    failed: { readonly unconfirmed: boolean; readonly lockTimeout: boolean },
+  ): Promise<{ readonly answer: LogoutResponse } | { readonly error: unknown }> {
+    const fallback = await sessionRevokeUnaudited(ctx.db, idHash).then(
+      (ended) => (ended ? ('ended' as const) : ('nothing_to_end' as const)),
+      (revokeError: unknown) => {
+        request.log.error({ err: revokeError }, 'sign-out could not end the session either');
+        return 'failed' as const;
+      },
+    );
+    switch (fallback) {
+      case 'ended':
+        request.log.error({ err: error }, 'sign-out was not audited; the session was ended anyway');
+        if (!failed.lockTimeout) return { error };
+        return { answer: { redirectTo: await ctx.idp.endSessionUrl(null) } };
+      case 'nothing_to_end':
+        request.log.error(
+          { err: error },
+          failed.unconfirmed
+            ? 'sign-out did not confirm its COMMIT and no live session was left to end: it committed, with its audit row, or another request ended the session; nothing was ended without an audit row'
+            : 'sign-out failed and no live session was left to end: another request ended the session; nothing was ended without an audit row',
+        );
+        if (!failed.lockTimeout) return { error };
+        return { error: new HttpError('unauthenticated', 'Sign in to continue.') };
+      case 'failed':
+        request.log.error({ err: error }, 'sign-out failed and the session may still be active');
+        return { error: lockTimeoutAsUnavailable(request, error) };
+    }
+  }
+
   app.post(
     ROUTES.authLogout,
     { config: authRateLimit, preHandler: requireOperator(ctx) },
@@ -442,9 +496,8 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
       clearSessionCookie(ctx, reply);
       // One transaction: the revocation and its audit event commit together.
       const statement = routeStatement(request);
-      let revoked;
-      try {
-        revoked = await changePreOrg(ctx.db, statement, async (pre, enterOrg) => {
+      const first = await settle(
+        changePreOrg(ctx.db, statement, async (pre, enterOrg) => {
           const ended = await sessionRevoke(pre, session.idHash);
           // No live session left to end (another request ended it first): nothing changed.
           if (ended === null) return { value: null, audit: unaudited('nothing_changed') };
@@ -461,24 +514,29 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
               detail: null,
             },
           };
-        });
-      } catch (error) {
-        // Ending a session is the safe direction, so a sign-out that cannot be audited still
-        // ends it. Sign-in and pairing do the opposite: no audit event, no credential.
-        const ended = await sessionRevokeUnaudited(ctx.db, session.idHash).then(
-          () => true,
-          (revokeError: unknown) => {
-            request.log.error({ err: revokeError }, 'sign-out could not end the session either');
-            return false;
-          },
-        );
-        request.log.error(
-          { err: error },
-          ended
-            ? 'sign-out was not audited; the session was ended anyway'
-            : 'sign-out was not audited and the session may still be active',
-        );
-        throw error;
+        }),
+      );
+      let revoked;
+      switch (first.end) {
+        case 'committed':
+          revoked = first.value;
+          break;
+        case 'rolled_back': {
+          const after = await afterFailedSignOut(request, session.idHash, first.error, {
+            unconfirmed: false,
+            lockTimeout: isLockTimeout(first.failure),
+          });
+          if ('answer' in after) return after.answer;
+          throw after.error;
+        }
+        case 'unknown': {
+          const after = await afterFailedSignOut(request, session.idHash, first.unconfirmed, {
+            unconfirmed: true,
+            lockTimeout: false,
+          });
+          if ('answer' in after) return after.answer;
+          throw after.error;
+        }
       }
       if (revoked === null) {
         throw new HttpError('unauthenticated', 'Sign in to continue.');

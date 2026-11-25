@@ -65,6 +65,7 @@ No body, no credential. Response `201` (`PairingCreateResponseSchema`):
 - The code is 8 symbols from `23456789ABCDEFGHJKMNPQRSTVWXYZ`, chosen with a CSPRNG. Show it as `K7M2-QX4D` (`formatPairingCode`).
 - Limit: 10 pairing sessions per client address per 10 minutes (stored as a keyed hash of the address, never the address). Over the limit: `429 rate_limited` with `Retry-After`.
 - A code alone gives nothing: claiming needs a signed-in operator, and collecting the credential needs the polling token, which never leaves the player.
+- A request that waits longer than the server's lock timeout (5 s) for a lock is answered `503 service_unavailable` with `Retry-After: 2`, as an operator's change is, and stores nothing; ask again (section 10). Until 2026-11-25 it answered `500 internal_error`.
 
 ### `GET /player/pairing/:id`
 
@@ -77,6 +78,8 @@ No body, no credential. Response `201` (`PairingCreateResponseSchema`):
 | `200 {"status":"consumed"}` | The token was already handed out; or the claim ended before this collection: it was cancelled between this poll and the collection, or the member who claimed the code has since been removed from the organisation or had their sessions ended (removal, a lower role, sign out everywhere), which a later return of that member does not undo | If the player has no token, start a new pairing |
 | `200 {"status":"expired"}` | The code expired unclaimed, or its claim was cancelled before the player collected it (a newer code was claimed for the display, or the operator revoked the display's player) | Start a new pairing |
 | `404 not_found` | Unknown id, wrong polling token, missing header, or locked session. Deliberately indistinguishable. | Start a new pairing |
+
+A poll that waits longer than the server's lock timeout (5 s) for a lock, in the read or in the collection, is answered `503 service_unavailable` with `Retry-After: 2` and changes nothing: no wrong attempt is counted and no credential is issued, so the next poll answers as this one would have (until 2026-11-25 it answered `500 internal_error`). A collection whose `COMMIT` went unconfirmed still answers `500 internal_error` (section 10).
 
 Five wrong polling tokens lock a session permanently. Five wrong codes by one operator within 10 minutes block that operator's claims (`429 pairing_locked` on the portal side).
 

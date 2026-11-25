@@ -47,6 +47,11 @@
  *   transactions at REPEATABLE READ while it is armed. It exists to give the error classifier a
  *   real 40001; a test must not present it as something production can see.
  *
+ * Beside the faults, the harness keeps every error the database raised on a wrapped connection
+ * (`databaseErrors`), struck by a fault or not: a race test reads there which constraint, if
+ * any, PostgreSQL refused a request with, where the answer alone would not tell a constraint
+ * from the route's own check.
+ *
  * Only connections taken with `pool.connect()` are wrapped, which is how every transaction of
  * packages/db takes one; `pool.query()` goes straight through. The harness sends its own
  * statements (the kill, the advisory locks of the other side) on other connections of the same
@@ -134,6 +139,17 @@ export interface Delivered {
   readonly killed?: KilledBackend;
 }
 
+/** An error the database raised on a connection of the wrapped pool. */
+export interface DatabaseErrorSeen {
+  /** The backend that raised it. */
+  readonly pid: number;
+  /** The statement it was raised for. */
+  readonly statement: string;
+  readonly sqlstate: string | null;
+  /** The constraint the error names, or null. */
+  readonly constraint: string | null;
+}
+
 export interface ArmedFault {
   /**
    * Resolves when the fault struck and the database did what the mode says; rejects when it
@@ -165,8 +181,14 @@ export interface StatementHolds {
   /**
    * For afterEach: takes back every armed fault that has not struck (its `delivered` rejects,
    * naming it) and releases every hold, so a test that failed half-way leaves nothing armed.
+   * Forgets the database errors seen so far.
    */
   disarmAll(): void;
+  /**
+   * Every error the database raised on a wrapped connection since the last `disarmAll`, oldest
+   * first: the server's own errors only (pg.DatabaseError), not a lost connection.
+   */
+  databaseErrors(): readonly DatabaseErrorSeen[];
 }
 
 export interface FaultHarness extends StatementHolds {
@@ -256,6 +278,8 @@ export function faultHarness(): FaultHarness {
   /** The releases of the holds not yet released, for disarmAll. */
   const unreleased = new Set<() => void>();
   const armed: Armed[] = [];
+  /** The errors the database raised on the wrapped connections, for databaseErrors. */
+  const raised: DatabaseErrorSeen[] = [];
   /** The wrapped pools' connections by backend pid, and the pool each came from. */
   const connections = new Map<number, { client: PoolClient; pool: Pool }>();
 
@@ -499,6 +523,24 @@ export function faultHarness(): FaultHarness {
     /** Whether this connection has an open transaction, as the statements sent on it say. */
     let inTransaction = false;
     const query = async (text: unknown, values?: unknown[]): Promise<unknown> => {
+      try {
+        return await judged(text, values);
+      } catch (error) {
+        if (error instanceof pg.DatabaseError) {
+          raised.push({
+            pid,
+            statement: typeof text === 'string' ? text : '',
+            sqlstate: sqlstateOf(error),
+            constraint:
+              typeof error.constraint === 'string' && error.constraint !== ''
+                ? error.constraint
+                : null,
+          });
+        }
+        throw error;
+      }
+    };
+    const judged = async (text: unknown, values?: unknown[]): Promise<unknown> => {
       // Only statements sent as text are judged: packages/db sends nothing else.
       if (typeof text !== 'string') return client.query(text as string, values);
 
@@ -596,7 +638,9 @@ export function faultHarness(): FaultHarness {
       }
       held = null;
       for (const release of [...unreleased]) release();
+      raised.length = 0;
     },
+    databaseErrors: () => [...raised],
     arm(fault, options = {}) {
       let resolve: (seen: Delivered) => void = () => undefined;
       let reject: (error: Error) => void = () => undefined;

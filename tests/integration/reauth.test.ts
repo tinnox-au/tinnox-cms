@@ -9,7 +9,7 @@
  */
 import { randomBytes, randomUUID } from 'node:crypto';
 import { sessionRevokeMembership } from '@tinnox/db';
-import { withOrg } from '@tinnox/db/testing';
+import { withOrg, type Pool } from '@tinnox/db/testing';
 import pg from 'pg';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { IdentityProvider } from '@tinnox/api/test-support';
@@ -20,9 +20,12 @@ import {
   auditEvents,
   createOrg,
   PORTAL_ORIGIN,
+  reachedBefore,
   signIn,
   startTestApp,
   statementHolds,
+  waitForLockWaiters,
+  withoutWaitingFor,
   type Operator,
   type TestApp,
   type TestOrg,
@@ -133,6 +136,8 @@ describe('signing in again after the sessions were ended', () => {
   let org: TestOrg;
   let owner: Operator;
   let member: TestOrg;
+  /** The test's own reads of pg_locks, pg_stat_activity and the database clock. */
+  let sql: Pool;
 
   /** What the fake provider answers. */
   const idp = {
@@ -169,6 +174,7 @@ describe('signing in again after the sessions were ended', () => {
       check: () => Promise.resolve(true),
     };
     (t.ctx as { idp: IdentityProvider }).idp = provider;
+    sql = t.testSql('reading pg_locks, pg_stat_activity and the database clock for the races');
     org = await createOrg('Re-authentication');
     owner = await signIn(t, org);
     member = await addMember(org);
@@ -393,6 +399,14 @@ describe('signing in again after the sessions were ended', () => {
     },
   );
 
+  /** The whole second the database's clock shows now: what a provider's auth_time would be. */
+  async function databaseSecond(): Promise<number> {
+    const { rows } = await sql.query<{ at: Date }>('SELECT clock_timestamp() AS at');
+    const at = rows[0]?.at;
+    if (at === undefined) throw new Error('no clock');
+    return Math.floor(at.getTime() / 1000);
+  }
+
   it('locks the member row before the old session, so a revocation meanwhile cannot deadlock', async () => {
     // The member's browser still sends a live session cookie.
     const signedIn = await addMember(org, 'editor');
@@ -405,17 +419,22 @@ describe('signing in again after the sessions were ended', () => {
       const login = await startLogin();
       const held = holds.hold((text) => text.includes('sec.session_create('));
       const signingIn = callback(login, cookie);
-      await held.reached;
-      // "Sign out everywhere" for the member while the sign-in waits.
-      const revoking = withOrg(
-        t.testSql('the test’s own sign-out of the member, racing a sign-in in flight'),
-        org.orgId,
-        (tx) => sessionRevokeMembership(tx, signedIn.membershipId),
+      const pid = await reachedBefore(held, signingIn, 'the sign-in');
+      // "Sign out everywhere" for the member while the sign-in is stopped before its first
+      // lock. It must finish without waiting for the sign-in: with the old order (rotation
+      // first) it would wait for the session row the sign-in holds, which the server shows.
+      const ended = await withoutWaitingFor(
+        sql,
+        pid,
+        withOrg(
+          t.testSql('the test’s own sign-out of the member, racing a sign-in in flight'),
+          org.orgId,
+          (tx) => sessionRevokeMembership(tx, signedIn.membershipId),
+        ),
+        'the revocation waits for a lock the sign-in holds, and the two would deadlock',
       );
-      // With the old order the revocation would now wait for the sign-in's session row lock.
-      await Promise.race([revoking, new Promise((resolve) => setTimeout(resolve, 500))]);
       held.release();
-      const [response, ended] = await Promise.all([signingIn, revoking]);
+      const response = await signingIn;
       expect(response.status).toBe(303);
       // The revocation committed first: the sign-in authenticated before it is sent back.
       expect(response.headers.get('location')).toBe(`${IDP_URL}?state=${idp.state}`);
@@ -426,54 +445,172 @@ describe('signing in again after the sessions were ended', () => {
     }
   });
 
-  // The hold stops the route before lockTarget is sent, so the route never waits on the row in
-  // the database, and the 0013 body of sec.session_revoke_membership passes this too. What it
-  // checks is the API's order. That the function itself stamps after its own wait for the row
-  // (migration 0015) is shown by packages/db/test/migration-0015.integration.test.ts and
-  // tests/integration/session-revoke-all.test.ts (TST-6).
-  it("a sign-in while a people route holds before lockTarget is cut off: the route's cut-off is taken after lockTarget, not at transaction start (RCX-02, API order)", async () => {
-    const target = await addMember(org, 'editor');
-    const sub = idp.sub;
-    idp.sub = target.oidcSub;
-    // "Sign out everywhere" by the Owner, stopped just before lockTarget locks the member row.
-    const held = holds.hold(
-      (text) => text.includes('FROM membership') && text.includes('FOR NO KEY UPDATE'),
+  // TST-6 (adoption plan step 33; RCX-02; docs/portal-v2/stage-c.md 1.6 and 6.8; D22): a
+  // sign-in that meets a people route at the member row, with the meeting read from the server.
+  // Each side really waits for the row lock the other holds (waitForLockWaiters), in both
+  // orders, for the three routes that end a member's sessions. What must hold in every case: a
+  // session of the member does not outlive the change, and an authentication from before the
+  // change cannot start one.
+  const PEOPLE_ROUTES = [
+    {
+      name: 'sign out everywhere',
+      change: (id: string) => owner.fetch(`/api/members/${id}/sign-out`, { method: 'POST' }),
+      // The sign-in is sent back to the provider once.
+      refusal: 'reauth',
+    },
+    {
+      name: 'a demotion',
+      change: (id: string) =>
+        owner.fetch(`/api/members/${id}`, { method: 'PATCH', json: { role: 'viewer' } }),
+      refusal: 'reauth',
+    },
+    {
+      name: 'a removal',
+      change: (id: string) => owner.fetch(`/api/members/${id}/remove`, { method: 'POST' }),
+      refusal: 'no_membership',
+    },
+  ] as const;
+
+  /** That the sign-in was refused as `refusal` says, with no session. */
+  function expectRefused(
+    response: Response,
+    refusal: 'reauth' | 'no_membership',
+    state: string,
+  ): void {
+    expect(response.status).toBe(303);
+    expect(response.headers.get('location')).toBe(
+      refusal === 'reauth'
+        ? `${IDP_URL}?state=${state}`
+        : `${PORTAL_ORIGIN}/?authError=no_membership`,
     );
-    try {
-      const signingOut = owner.fetch(`/api/members/${target.membershipId}/sign-out`, {
-        method: 'POST',
+    expect(setCookie(response, t.config.sessionCookieName) ?? '').toBe('');
+  }
+
+  describe.each(PEOPLE_ROUTES)(
+    'a sign-in that meets $name at the member row (TST-6)',
+    ({ change, refusal }) => {
+      it('the route holds the row: the sign-in waits for it, and is refused once the change has committed', async () => {
+        const target = await addMember(org, 'editor');
+        const sub = idp.sub;
+        idp.sub = target.oidcSub;
+        // Stopped after lockTarget has the member row, before the sessions are ended and the
+        // cut-off is taken.
+        const held = holds.hold((text) => text.includes('sec.session_revoke_membership('));
+        try {
+          const changing = change(target.membershipId);
+          const route = await reachedBefore(held, changing, 'the people route');
+          // The member signs in now: authenticated after the route took the row, before the
+          // change has committed.
+          idp.authTime = await databaseSecond();
+          const login = await startLogin();
+          const begins = idp.begins.length;
+          const signingIn = callback(login);
+          await waitForLockWaiters(
+            sql,
+            route,
+            1,
+            'the sign-in never waited for the member row the people route holds',
+            { waiter: signingIn },
+          );
+          held.release();
+          expect((await changing).status).toBe(200);
+          const response = await signingIn;
+          expectRefused(response, refusal, idp.state);
+          if (refusal === 'reauth') {
+            expect(idp.begins.slice(begins)).toEqual([{ reauthenticate: true }]);
+          }
+          expect(await liveSessions(target.membershipId)).toBe(0);
+        } finally {
+          held.release();
+          idp.sub = sub;
+        }
       });
-      await held.reached;
-      // Past a whole second (auth_time has whole seconds), so a cut-off from before the wait,
-      // such as the start of the route's transaction, is an earlier second than the sign-in.
-      await new Promise((resolve) => setTimeout(resolve, 1_500));
-      // The member signs in meanwhile, authenticated now by the database's clock.
-      const [clock] = await queryAsDefiner<{ at: Date }>('SELECT clock_timestamp() AS at', []);
-      if (clock === undefined) throw new Error('no clock');
-      idp.authTime = Math.floor(clock.at.getTime() / 1000);
-      const signedIn = await callback(await startLogin());
-      expect(signedIn.headers.get('location')).toBe(`${PORTAL_ORIGIN}/`);
-      const cookie = setCookie(signedIn, t.config.sessionCookieName) ?? '';
-      expect(await sessionOf(cookie)).toMatchObject({ authenticated: true });
 
-      held.release();
-      const response = await signingOut;
-      expect(response.status).toBe(200);
-      expect(await response.json()).toEqual({ sessionsEnded: 1 });
+      it('the sign-in holds the row: the route waits for it at lockTarget, then ends the session it made; a second sign-in authenticated during that wait is refused, and so is that authentication afterwards', async () => {
+        const target = await addMember(org, 'editor');
+        const sub = idp.sub;
+        idp.sub = target.oidcSub;
+        // The first sign-in is stopped at its audit row: sec.session_create has the member row
+        // and has inserted the session.
+        const held = holds.hold((text) => text.includes('INSERT INTO audit_event'));
+        try {
+          idp.authTime = await databaseSecond();
+          const first = callback(await startLogin());
+          const signIn1 = await reachedBefore(held, first, 'the first sign-in');
 
-      // The session that sign-in created is ended, and the same authentication cannot be
-      // used again: the cut-off was taken once the route held the row, after the sign-in.
-      expect(await sessionOf(cookie)).toMatchObject({ authenticated: false });
-      const begins = idp.begins.length;
-      const again = await callback(await startLogin());
-      expect(again.status).toBe(303);
-      expect(again.headers.get('location')).toBe(`${IDP_URL}?state=${idp.state}`);
-      expect(idp.begins.slice(begins)).toEqual([undefined, { reauthenticate: true }]);
-      expect(setCookie(again, t.config.sessionCookieName) ?? '').toBe('');
-      expect(await liveSessions(target.membershipId)).toBe(0);
-    } finally {
-      held.release();
-      idp.sub = sub;
-    }
-  });
+          // The people route waits for the member row, in lockTarget: sent, not held before it.
+          const changing = change(target.membershipId);
+          const [route] = await waitForLockWaiters(
+            sql,
+            signIn1,
+            1,
+            'the people route never waited for the member row the sign-in holds',
+            { waiter: changing },
+          );
+          if (route === undefined) throw new Error('no waiter');
+          const waiting = await sql.query<{ query: string; began: number }>(
+            `SELECT query, floor(extract(epoch FROM xact_start))::int AS began
+               FROM pg_stat_activity WHERE pid = $1`,
+            [route],
+          );
+          expect(waiting.rows[0]?.query).toContain('FOR NO KEY UPDATE');
+          const began = waiting.rows[0]?.began ?? Number.NaN;
+
+          // A second sign-in, authenticated while the route waits and in a later whole second
+          // than the start of the route's transaction (auth_time has whole seconds): a cut-off
+          // taken before the wait, at the start of the transaction or of a statement sent
+          // before it, would be earlier than this authentication and let it through (RCX-02).
+          // The database's clock is read until it shows that second; nothing is guessed.
+          let second = await databaseSecond();
+          while (second <= began) {
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            second = await databaseSecond();
+          }
+          idp.authTime = second;
+          const login = await startLogin();
+          const begins = idp.begins.length;
+          const again = callback(login);
+          // It queues for the same row, behind the route.
+          await waitForLockWaiters(
+            sql,
+            signIn1,
+            2,
+            'the second sign-in never waited for the member row',
+            { waiter: again },
+          );
+
+          held.release();
+          // The first sign-in committed its session before the change.
+          const signedIn = await first;
+          expect(signedIn.headers.get('location')).toBe(`${PORTAL_ORIGIN}/`);
+          const cookie = setCookie(signedIn, t.config.sessionCookieName) ?? '';
+          expect(cookie).toMatch(/^[A-Za-z0-9_-]{43}$/);
+          // The route got the row next and ended that session.
+          const changed = await changing;
+          expect(changed.status).toBe(200);
+          expect(await changed.json()).toMatchObject({ sessionsEnded: 1 });
+          // The second sign-in got the row after the change: refused, though it was
+          // authenticated after the route's transaction began.
+          expectRefused(await again, refusal, idp.state);
+          if (refusal === 'reauth') {
+            expect(idp.begins.slice(begins)).toEqual([{ reauthenticate: true }]);
+          }
+
+          // No session of the member outlived the change, and that authentication is spent.
+          expect(await sessionOf(cookie)).toMatchObject({ authenticated: false });
+          expect(await liveSessions(target.membershipId)).toBe(0);
+          const beginsAfter = idp.begins.length;
+          const third = await callback(await startLogin());
+          expectRefused(third, refusal, idp.state);
+          if (refusal === 'reauth') {
+            expect(idp.begins.slice(beginsAfter)).toEqual([undefined, { reauthenticate: true }]);
+          }
+          expect(await liveSessions(target.membershipId)).toBe(0);
+        } finally {
+          held.release();
+          idp.sub = sub;
+        }
+      });
+    },
+  );
 });
