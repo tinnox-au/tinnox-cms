@@ -169,46 +169,86 @@ export function cognitoDirectory(options: {
   if (credentials.accessKeyId === '' || credentials.secretAccessKey === '') {
     throw new Error('AWS credentials are required to read the Cognito user pool');
   }
+  // A line break or a space inside a credential (a paste that wrapped) would make fetch refuse
+  // the header and quote it in its error. Refused here, by name and without the value.
+  const parts: [string, string | undefined][] = [
+    ['the AWS access key id', credentials.accessKeyId],
+    ['the AWS secret access key', credentials.secretAccessKey],
+    ['the AWS session token', credentials.sessionToken],
+  ];
+  for (const [what, value] of parts) {
+    if (value !== undefined && value !== '' && !/^[\x21-\x7e]+$/.test(value.trim())) {
+      throw new Error(`${what} contains a space, a line break or another character it cannot have`);
+    }
+  }
   const send = options.fetch ?? fetch;
   const now = options.now ?? (() => new Date());
   const endpoint = new URL(`https://cognito-idp.${region}.amazonaws.com/`);
 
+  /** Fixed hints for the answers an operator can act on. Never AWS's own text. */
+  function hint(kind: string, message: string): string {
+    if (kind === 'InvalidSignatureException') {
+      return /^Signature (expired|not yet current)/.test(message)
+        ? ": check this machine's clock"
+        : ': the AWS secret access key does not match the access key id';
+    }
+    if (kind === 'ExpiredTokenException' || kind === 'UnrecognizedClientException') {
+      return ': your AWS credentials have expired or are not valid; get new ones';
+    }
+    if (kind === 'AccessDeniedException') {
+      return ': your AWS role needs cognito-idp:AdminGetUser on this user pool';
+    }
+    if (kind === 'ResourceNotFoundException') return ': there is no such user pool';
+    if (kind === 'TooManyRequestsException') return ': try again in a moment';
+    return '';
+  }
+
   return {
     async findByUsername(username) {
-      const wanted = username.trim().toLowerCase();
+      const asked = username.trim();
+      const wanted = asked.toLowerCase();
       if (!/^[^@\s]+@[^@\s]+$/.test(wanted)) return null;
-      const body = JSON.stringify({ UserPoolId: pool, Username: wanted });
-      const response = await send(endpoint, {
-        method: 'POST',
-        headers: signedHeaders({
+      // As typed: the pool decides whether case matters. The comparison below does not.
+      const body = JSON.stringify({ UserPoolId: pool, Username: asked });
+      let response: Response;
+      try {
+        response = await send(endpoint, {
           method: 'POST',
-          url: endpoint,
-          headers: {
-            'content-type': 'application/x-amz-json-1.1',
-            'x-amz-target': 'AWSCognitoIdentityProviderService.AdminGetUser',
-          },
+          headers: signedHeaders({
+            method: 'POST',
+            url: endpoint,
+            headers: {
+              'content-type': 'application/x-amz-json-1.1',
+              'x-amz-target': 'AWSCognitoIdentityProviderService.AdminGetUser',
+            },
+            body,
+            region,
+            service: 'cognito-idp',
+            credentials,
+            now: now(),
+          }),
           body,
-          region,
-          service: 'cognito-idp',
-          credentials,
-          now: now(),
-        }),
-        body,
-        redirect: 'error',
-      });
+          redirect: 'error',
+        });
+      } catch {
+        // fetch's own error can quote a header: nothing of it is passed on.
+        throw new Error(
+          'the identity-provider user lookup failed (the request could not be sent: check the network)',
+        );
+      }
       const answer: unknown = await response.json().catch(() => null);
       if (!response.ok) {
-        const kind =
-          typeof answer === 'object' &&
-          answer !== null &&
-          '__type' in answer &&
-          typeof answer.__type === 'string'
-            ? (answer.__type.split('#').at(-1) ?? '')
-            : '';
+        const text = (name: string): string => {
+          if (typeof answer !== 'object' || answer === null) return '';
+          const value = (answer as Record<string, unknown>)[name];
+          return typeof value === 'string' ? value : '';
+        };
+        const kind = text('__type').split('#').at(-1) ?? '';
         if (response.status === 400 && kind === 'UserNotFoundException') return null;
-        // The kind only: an AWS error message can repeat what was sent.
+        // The kind and a fixed hint only: an AWS error message can repeat what was sent.
+        const named = /^[A-Za-z]+$/.test(kind) ? kind : '';
         throw new Error(
-          `the identity-provider user lookup failed (HTTP ${response.status}${/^[A-Za-z]+$/.test(kind) ? `, ${kind}` : ''})`,
+          `the identity-provider user lookup failed (HTTP ${response.status}${named === '' ? '' : `, ${named}`})${hint(named, text('message') || text('Message'))}`,
         );
       }
       if (typeof answer !== 'object' || answer === null) {
@@ -218,6 +258,19 @@ export function cognitoDirectory(options: {
       const subject = attribute(attributes, 'sub');
       const email = attribute(attributes, 'email');
       if (subject === null || email === null || email.trim().toLowerCase() !== wanted) return null;
+      // An account the pool itself holds, in a state a person can sign in from. In a pool that
+      // signs people in by e-mail address its internal user name is its subject; an account
+      // linked from another provider, or one that never confirmed, is not one to bind.
+      const status = 'UserStatus' in answer ? answer.UserStatus : undefined;
+      const internalName = 'Username' in answer ? answer.Username : undefined;
+      if (
+        internalName !== subject ||
+        (status !== 'CONFIRMED' &&
+          status !== 'FORCE_CHANGE_PASSWORD' &&
+          status !== 'RESET_REQUIRED')
+      ) {
+        return null;
+      }
       return {
         subject,
         email,

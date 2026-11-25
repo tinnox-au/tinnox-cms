@@ -26,9 +26,25 @@ import {
   type Invocation,
 } from './lib/provision.ts';
 
+// Read before the repository's .env is loaded: AWS credentials belong to the person's shell
+// and expire; a pair written into .env would be a stored key. Never printed.
+const AWS_FROM_SHELL = {
+  accessKeyId: (process.env['AWS_ACCESS_KEY_ID'] ?? '').trim(),
+  secretAccessKey: (process.env['AWS_SECRET_ACCESS_KEY'] ?? '').trim(),
+  sessionToken: (process.env['AWS_SESSION_TOKEN'] ?? '').trim(),
+};
+
+let announced = false;
+
 /** The reader for the configured identity provider: the issuer's address says which one. */
 function directory(): IdpDirectory {
   const issuer = process.env['PROVISION_IDP_ISSUER'] || requireEnv('OIDC_ISSUER');
+  // Which directory is read is not tied to the database that is written: say it, so a
+  // wrong pool or realm is seen before its answer is believed.
+  if (!announced) {
+    announced = true;
+    console.error(`identity provider: ${issuer}`);
+  }
   if (!isCognitoIssuer(issuer)) {
     return keycloakDirectory({
       issuer,
@@ -36,18 +52,13 @@ function directory(): IdpDirectory {
       clientSecret: requireEnv('PROVISION_IDP_CLIENT_SECRET'),
     });
   }
-  const accessKeyId = process.env['AWS_ACCESS_KEY_ID'] ?? '';
-  const secretAccessKey = process.env['AWS_SECRET_ACCESS_KEY'] ?? '';
-  const sessionToken = process.env['AWS_SESSION_TOKEN'] ?? '';
-  if (accessKeyId === '' || secretAccessKey === '') {
+  const { accessKeyId, secretAccessKey, sessionToken } = AWS_FROM_SHELL;
+  if (accessKeyId === '' || secretAccessKey === '' || sessionToken === '') {
     throw new Error(
-      'AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are not set: the Cognito user pool is read with your own short-lived AWS credentials',
+      'AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and AWS_SESSION_TOKEN must be set in this shell: the Cognito user pool is read with your own temporary AWS credentials (a key without a session token is a stored key, and is refused)',
     );
   }
-  return cognitoDirectory({
-    issuer,
-    credentials: { accessKeyId, secretAccessKey, ...(sessionToken === '' ? {} : { sessionToken }) },
-  });
+  return cognitoDirectory({ issuer, credentials: { accessKeyId, secretAccessKey, sessionToken } });
 }
 
 /** Returns the exit code (no process.exit, so nothing written to a pipe is lost). */

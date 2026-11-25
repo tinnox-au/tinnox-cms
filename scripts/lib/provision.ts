@@ -189,8 +189,15 @@ const STAFF_ID = /^[a-z][a-z0-9._-]{1,39}$/;
 /** No "@" and no space, so no e-mail address or name reaches audit_event.detail. */
 const REFERENCE = /^[A-Za-z0-9._:/-]{1,64}$/;
 const LOWER_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-/** An identity-provider username. Never written to the database or the audit log. */
-const USERNAME = /^[A-Za-z0-9][A-Za-z0-9._@+-]{0,254}$/;
+/**
+ * An identity-provider username. Never written to the database or the audit log. Against a
+ * Cognito user pool the username is the person's e-mail address (scripts/lib/idp.ts), so the
+ * second form takes any address in printable ASCII: an invite may carry "o'brien@firm.example",
+ * which the first form refuses. No space, no control character and no "=", which separates the
+ * username from the name in --owner and --successor.
+ */
+const USERNAME =
+  /^(?:[A-Za-z0-9][A-Za-z0-9._@+-]{0,254}|[\x21-\x3c\x3e\x3f\x41-\x7e]{1,64}@[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?)$/;
 const OrgNameSchema = labelSchema(ABSOLUTE.maxNameLength, 'organisation name');
 const SiteNameSchema = labelSchema(ABSOLUTE.maxNameLength, 'site name');
 
