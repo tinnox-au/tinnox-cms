@@ -195,6 +195,8 @@ export interface AuditEventShapes {
             | 'provider_rejected'
             | 'no_membership'
             | 'member_locked'
+            | 'database_error'
+            | 'server_error'
             | 'reauth_failed'
             | 'reauth_required';
         }
