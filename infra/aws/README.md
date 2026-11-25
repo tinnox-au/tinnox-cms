@@ -5,16 +5,18 @@ Four CloudFormation templates that create what stage 0 of
 infrastructure only. They start no container, hold no secret and run no migration: the
 deploy step and the database role set-up come after them and are not written yet.
 
-**Status, 25 November 2026.** All four stacks exist in Sydney, created from CloudShell and
-complete on the first attempt: `tinnox-cms-test` from `environment.yml` (the server's
-set-up reported success), `tinnox-cms-test-database` from `database.yml` (PostgreSQL 17.9,
-available), `tinnox-cms-test-identity` from `identity.yml` (an empty user pool) and
-`tinnox-cms-delivery` from `delivery.yml` (three empty image repositories, the GitHub
+**Status, 25 November 2026.** All four stacks exist in Sydney, created and updated from
+CloudShell: `tinnox-cms-test` from `environment.yml` (server, release document),
+`tinnox-cms-test-database` from `database.yml` (PostgreSQL 17.9),
+`tinnox-cms-test-identity` from `identity.yml` (an empty user pool) and
+`tinnox-cms-delivery` from `delivery.yml` (four empty image repositories, the GitHub
 identity provider, the deploy role). Stack termination protection is on for all four, and
-the server's termination protection too. The GitHub deployment environment `test` exists:
-main branch only, one required reviewer; repository administrators can bypass it.
-Nothing has been deployed: no image pushed, no role taken by GitHub, no user signed in.
-Section 9 lists what is unverified pending runtime.
+the server's termination protection too. `bootstrap.sh test` has run: the three database
+roles and the database `tinnox` exist, and the settings are in Parameter Store. The
+GitHub deployment environment `test` exists (main branch only, one required reviewer;
+repository administrators can bypass it) and has its three variables. No release has
+run: no image pushed, no migration applied, no user signed in. Section 9 lists what is
+unverified pending runtime.
 
 ## 1. The account
 
@@ -45,10 +47,10 @@ Spend limits ended with activation. A budget alert takes their place and is not 
 
 | Template | Stack name | Creates | About, per month |
 | --- | --- | --- | --- |
-| `environment.yml` | `tinnox-cms-test` | Network, the server with its fixed address and data disk, its role, log group, nightly disk snapshots, weekly patching, the key for secrets, optional DNS records | US$26 |
+| `environment.yml` | `tinnox-cms-test` | Network, the server with its fixed address and data disk, its role, log group, nightly disk snapshots, weekly patching, the key for secrets, the release document, optional DNS records | US$26 |
 | `database.yml` | `tinnox-cms-test-database` | RDS PostgreSQL 17, one zone (the server's), 7 days of backups, in subnets with no route to the internet | US$21 |
 | `identity.yml` | `tinnox-cms-test-identity` | Cognito user pool with an authenticator app required, the sign-in pages, the API's app client | US$0 |
-| `delivery.yml` | `tinnox-cms-delivery` | Three image repositories, the GitHub identity provider, the deploy role | under US$1 |
+| `delivery.yml` | `tinnox-cms-delivery` | Four image repositories, the GitHub identity provider, the deploy role | under US$1 |
 
 The costs are estimates from the prices of 24 November 2026: server US$15.50 (t4g.small),
 disks US$4.40, public address US$3.65, key US$1, snapshots and logs about US$1; database
@@ -124,38 +126,76 @@ In Sydney, in this order. For every stack:
    reviewers: GitHub creates a missing environment, unprotected, for the first job that
    names it. It needs `--capabilities CAPABILITY_IAM`, as step 1 does.
 
-## 4. What the templates leave to be done by hand
+## 4. Before the first release, and what a release does
 
-**Secrets and settings.** CloudFormation cannot create encrypted parameters. They are
-written once, as SecureString with the key `alias/tinnox-cms-test-secrets`, under the path
-`/tinnox-cms/test/`. Proposed layout, to be fixed by the deploy step:
+**`bootstrap.sh`**, once per environment, by a person in CloudShell with their own rights:
+
+```bash
+git clone https://github.com/tinnox-au/tinnox-cms.git && cd tinnox-cms && infra/aws/bootstrap.sh test
+```
+
+It creates the three database roles and the database `tinnox` (`rds-roles.sql`, the RDS
+form of `infra/postgres/init/01-roles.sh`), and writes the settings below to Parameter
+Store under `/tinnox-cms/test/`, the secrets as SecureString with the key
+`alias/tinnox-cms-test-secrets`. It may be run again: it keeps every secret that exists,
+and changes the database passwords only with `--rotate-database-passwords`, after which a
+release is needed so the API reads its new one.
 
 | Parameter | Kind | Value |
 | --- | --- | --- |
-| `api/DATABASE_URL` | secret | `postgresql://tinnox_app:…@<DatabaseHost>:5432/tinnox?sslmode=verify-full&sslrootcert=<path to the RDS certificate bundle>` |
-| `api/SESSION_SECRET`, `api/MEDIA_URL_HMAC_SECRET`, `api/PAIRING_CLIENT_KEY_SECRET` | secret | three different random values of 32 characters or more |
-| `api/OIDC_CLIENT_SECRET` | secret | the app client's secret, read once in the Cognito console |
+| `api/DATABASE_URL` | secret | `postgresql://tinnox_app:…@<DatabaseHost>:5432/tinnox?sslmode=verify-full&sslrootcert=/etc/ssl/rds/ap-southeast-2-bundle.pem` |
+| `api/SESSION_SECRET`, `api/MEDIA_URL_HMAC_SECRET`, `api/PAIRING_CLIENT_KEY_SECRET` | secret | 256 random bits each, made once |
+| `api/OIDC_CLIENT_SECRET` | secret | the app client's secret, read from Cognito |
 | `api/OIDC_ISSUER`, `api/OIDC_CLIENT_ID` | plain | the `Issuer` and `ClientId` outputs |
 | `api/API_PUBLIC_ORIGIN`, `api/PORTAL_ORIGIN` | plain | the `PortalOrigin` output |
 | `api/PLAYER_ORIGIN` | plain | the `PlayerOrigin` output |
 | `api/OIDC_REDIRECT_URI` | plain | `<PortalOrigin>/api/auth/callback` |
 | `api/OIDC_POST_LOGOUT_REDIRECT_URI` | plain | `<PortalOrigin>/` |
-| `api/OIDC_MFA_AMR_VALUES` or `api/OIDC_MFA_ACR_VALUES` | plain | only after reading a real token (section 5) |
+| `api/OIDC_MFA_AMR_VALUES` | plain | `mfa`, until a real token has been read (section 5) |
 | `migrator/DATABASE_MIGRATOR_URL` | secret | as the first row, with `tinnox_migrator` |
 
-The compose file also needs the three image names, the two host names and the path of the
-API's settings file (`infra/deploy/compose.yml`); the deploy step supplies those.
+Every parameter directly under `api/` becomes a setting of the API at the next release,
+under the parameter's last name. A value may contain letters, digits and
+`_ . : / @ ? & = % + , ~ -` only; the release refuses anything else by name, because the
+settings file would change it on the way. The script's own secrets are hexadecimal.
 
-The migrator's parameter must never go into the API's settings file: the API refuses to
-start with it (`apps/api/src/config.ts`). The server's role can read the whole path,
-including `migrator/`, because the plan runs migrations on the server. What keeps it from
-the API is that containers cannot use the server's role (metadata hop limit of 1) and that
-the deploy step gives it to the migration container only. Narrowing the role to `api/` is
-possible once something other than the server fetches the migrator's parameter.
+How the script handles secrets: database passwords are made in CloudShell and go only
+into the two connection strings; the database gets SCRAM verifiers, so no password is in
+the SQL, the server's command history or the database's log. Parameter Store is the
+truth: a new password is stored first, and every run sets the database's passwords to
+what is stored, so a run that stops half way is repaired by running the script again.
+The master password is copied to `/tinnox-cms/test/tmp/master-password` for the minutes
+the server needs it and deleted again, also when the script fails. If the CloudShell
+session itself dies, nothing deletes it: the script warns when it could not, and the
+parameter is then deleted by hand. On the server the master password is a file in `/run`
+(memory) for psql, never an environment variable.
 
-The database's master password is not among them. RDS keeps it in Secrets Manager
-(`MasterUserSecretArn` output) and changes it every seven days. The server's role cannot
-read it; anyone whose own policy allows `secretsmanager:GetSecretValue` on it can.
+**A release** is started from GitHub: Actions, Deploy, Run workflow, on `main`
+(`.github/workflows/deploy.yml`). A reviewer of the deployment environment `test` approves
+it. The job builds four images for the commit (API, web, media worker and the release
+image, which is the API's code with the migrations, `infra/deploy/compose.yml` and
+`infra/deploy/release.sh`), pushes them, and starts the release document
+`tinnox-cms-test-release` on the server with the commit id. On the server, `release.sh`
+of that commit pulls the images, writes the API's settings file, stops the API, runs the
+migrations, starts everything and waits for `/readyz`. If a migration fails the API stays
+stopped until a release succeeds. Its output is in the workflow run and in
+`/var/log/tinnox-release.log`.
+
+The GitHub deployment environment needs three variables, none of them secret:
+`AWS_REGION` (`ap-southeast-2`), `AWS_DEPLOY_ROLE_ARN` (the `DeployRoleArn` output) and
+`API_PUBLIC_ORIGIN` (the `PortalOrigin` output).
+
+**The migrator's connection string** must never reach the API: the API refuses to start
+with it (`apps/api/src/config.ts`). `release.sh` gives it to the one
+migration container as a file in `/run` (memory), removed when the migrations end, and to
+nothing else; that container is the release image, not the API's. It is not passed in the
+environment, because Docker keeps a container's environment on the data disk.
+The server's role can read the whole path, `migrator/` included, because the migrations
+run on the server; containers cannot use the server's role (metadata hop limit of 1).
+
+The database's master password is not among the parameters. RDS keeps it in Secrets
+Manager (`MasterUserSecretArn` output) and changes it every seven days. The server's role
+cannot read it; anyone whose own policy allows `secretsmanager:GetSecretValue` on it can.
 
 **What is on the data disk.** Docker keeps each container's settings, the API's secrets
 among them, in plain text in its own directory, which is on the data disk, beside Caddy's
@@ -163,19 +203,22 @@ certificate keys. The nightly snapshots and the final snapshot contain them. The
 its snapshots are encrypted with the account's EBS key, so anyone in the account who may
 create and attach a volume from a snapshot can read them.
 
-**The database roles.** `infra/postgres/init/01-roles.sh` cannot run unchanged: the RDS
-master user is not a superuser. The set-up for RDS has to grant the master user `SET` on
-`tinnox_migrator` before `CREATE DATABASE tinnox OWNER tinnox_migrator`, and must not
-create `tinnox_test`.
-
 **Reaching the database.** Only the server can (security group). A person runs `psql`
 from a container on the server, in a Session Manager session, or forwards a port through
 the server with the `AWS-StartPortForwardingSessionToRemoteHost` document.
 
-**TLS to the database.** RDS refuses connections without TLS. The connection string
-needs `sslmode=verify-full` and `sslrootcert` pointing at
-`https://truststore.pki.rds.amazonaws.com/ap-southeast-2/ap-southeast-2-bundle.pem`,
-which is in neither image today. Without the bundle the API cannot connect at all.
+**The incident scripts** (`scripts/revoke-all-sessions.sql`,
+`scripts/revoke-subject-sessions.sql`) run as `tinnox_migrator` on RDS, with the
+connection string in `migrator/DATABASE_MIGRATOR_URL`. There is no superuser, and the
+master user cannot take `tinnox_definer`: it created the roles but holds no `SET` on
+them, and `rds-roles.sql` takes its `SET` on `tinnox_migrator` away again.
+
+**TLS to the database.** RDS refuses connections without TLS. The API image and the
+release image carry the certificate authorities of RDS in Sydney at
+`/etc/ssl/rds/ap-southeast-2-bundle.pem`, pinned by checksum in `apps/api/Dockerfile`;
+the connection strings name that file with `sslmode=verify-full`. When AWS changes the
+bundle the image build fails until the checksum is updated, in the Dockerfile and in
+`bootstrap.sh`.
 
 **People.** Users are created in the Cognito console (or with `AdminCreateUser`, with
 `DesiredDeliveryMediums EMAIL`). A person signs in with the e-mail address and sets up
@@ -207,8 +250,10 @@ an authenticator app at the first sign-in.
    `["pwd","otp","mfa"]` for a password plus an authenticator code through managed login,
    but says the claims are "rolling out gradually". Read a real token before choosing.
 4. **The provisioning tool** reads users from Keycloak only (`scripts/lib/idp.ts`).
-5. **The deploy step.** How images arrive is settled: GitHub pushes them to the three
-   repositories through the deploy role. The workflow that does it is not written.
+5. **The first release.** Everything before it is done: the stacks are updated,
+   `bootstrap.sh` has run, the GitHub variables are set, and the two host names resolve to
+   the server (A records at GoDaddy, where the domain's DNS is hosted, 25 November). The
+   workflow can be started once it is on `main`.
 
 ## 6. Running it
 
@@ -299,7 +344,8 @@ What stays behind on purpose, and keeps costing until removed by hand:
 - the user pool (free). A new identity stack makes a new, empty pool, in which every
   person is a new subject; to use the old pool again it must be imported into the new
   stack;
-- for the delivery stack: the three repositories must be emptied before they can be deleted.
+- for the delivery stack: every image repository must be emptied before it can be deleted
+  (four once the stack is updated: `api`, `web`, `media-worker`, `release`).
 
 ## 7. Limits of what these templates protect
 
@@ -312,12 +358,20 @@ What stays behind on purpose, and keeps costing until removed by hand:
 - The deploy role trusts a GitHub subject that proves the repository and the deployment
   environment, not the branch or the event. The branch rule and the reviewers are set in
   GitHub.
+- Whoever can push an image and start the release document controls the server and the
+  database: the release script comes from the image and runs as root, and the migration
+  container is given the migrator's connection string. That is the deploy role, which
+  only a run of this repository in the GitHub environment `test` can take, after a
+  reviewer approves it, from `main`. Repository administrators can bypass the reviewer.
+- The deploy role can read the output of every Systems Manager command in the account and
+  Region, not only its own: AWS offers no narrower permission. The release prints no
+  secret; do not print one in any other command either.
+- A release has a short outage: the API is stopped while the migrations run.
 - The sign-in pages are Cognito's and are served through AWS's own edge network. The pool,
   its users and its tokens are in Sydney.
 
 ## 8. Not in these templates
 
-- The deploy step, the RDS role set-up and the migration step.
 - CloudTrail. The account has no trail; the console's event history keeps 90 days.
 - A budget alert. A budget for the CMS alone needs its tag activated for cost allocation,
   which is done in the organisation's management account.
@@ -326,6 +380,18 @@ What stays behind on purpose, and keeps costing until removed by hand:
 
 ## 9. Unverified pending runtime
 
+- The release path has been rehearsed on a developer's machine, not on AWS (25 November):
+  the role script against PostgreSQL 17.12 with a master user that is not a superuser;
+  the four images built; and the release document's script with `release.sh` run in an
+  Amazon Linux 2023 container with Compose 2.40.3 against that database, with a stand-in
+  for the AWS CLI. The migrations applied, the three containers came up healthy, a
+  repeated release kept them, and the failure cases stopped where they should (a value
+  the settings file cannot carry, Parameter Store unreachable, a migration that cannot
+  connect, a second release started while one runs). The role script refused a role with
+  the wrong attributes and a role with an unexpected membership. `bootstrap.sh` then ran
+  against AWS once and succeeded; RDS accepts SCRAM verifiers. Still not run: the
+  workflow, the deploy role's permissions, the release document inside Systems Manager,
+  and a login with the stored passwords.
 - Creating the four stacks on 25 November showed: the organisation's policies allow
   their resource types, including the IAM roles and the identity provider; the data disk
   appears under the by-id name the set-up waits for; the set-up's report reaches the

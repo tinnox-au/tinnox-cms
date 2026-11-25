@@ -709,7 +709,67 @@ Resources:
       TTL: '3600'
       ResourceRecords: ['0 issue "letsencrypt.org"']
 
+  # ------------------------------------------------------------------ releases
+  # The one thing the deploy workflow may run on the server (infra/aws/delivery.yml allows
+  # its role this document and no other). It takes a commit id and nothing else. It pulls
+  # that commit's release image, takes the compose file and the release script out of it
+  # and runs the script, which is infra/deploy/release.sh of that commit. So what a
+  # release does on the server is decided by the commit, and whoever may push images and
+  # start this document controls the server: see "Limits" in the README.
+  ReleaseDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub 'tinnox-cms-${EnvironmentName}-release'
+      DocumentType: Command
+      DocumentFormat: YAML
+      TargetType: /AWS::EC2::Instance
+      UpdateMethod: NewVersion
+      Content:
+        schemaVersion: '2.2'
+        description: !Sub 'TINNOX CMS ${EnvironmentName}: release one commit on the server.'
+        parameters:
+          Tag:
+            type: String
+            description: The full commit id whose images are released.
+            allowedPattern: '^[0-9a-f]{40}$'
+        mainSteps:
+          - action: aws:runShellScript
+            name: release
+            inputs:
+              timeoutSeconds: '1500'
+              runCommand:
+                - !Sub |
+                  #!/bin/bash
+                  set -Eeuo pipefail
+                  umask 077
+                  export HOME=/root
+                  TAG='{{ Tag }}'
+                  [[ $TAG =~ ^[0-9a-f]{40}$ ]] || { echo 'the tag is not a full commit id' >&2; exit 64; }
+                  exec 9>/run/tinnox-release.lock
+                  flock -n 9 || { echo 'another release is running' >&2; exit 75; }
+                  REGISTRY='${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com'
+                  IMAGE="$REGISTRY/tinnox-cms/release:$TAG"
+                  DIR="/var/lib/tinnox/releases/$TAG"
+                  docker pull --quiet "$IMAGE" >/dev/null
+                  rm -rf "$DIR.new"
+                  mkdir -p "$DIR.new"
+                  CONTAINER=$(docker create "$IMAGE")
+                  docker cp "$CONTAINER:/app/infra/deploy/." "$DIR.new/" || { docker rm "$CONTAINER" >/dev/null; exit 1; }
+                  docker rm "$CONTAINER" >/dev/null
+                  rm -rf "$DIR"
+                  mv "$DIR.new" "$DIR"
+                  export TINNOX_ENV='${EnvironmentName}'
+                  export TINNOX_REGION='${AWS::Region}'
+                  export TINNOX_REGISTRY="$REGISTRY"
+                  export TINNOX_TAG="$TAG"
+                  export PORTAL_HOST='${PortalHostName}'
+                  export PLAYER_HOST='${PlayerHostName}'
+                  exec bash "$DIR/release.sh"
+
 Outputs:
+  ReleaseDocumentName:
+    Description: The Systems Manager document that releases a commit on the server.
+    Value: !Ref ReleaseDocument
   ServerPublicIp:
     Description: The server's fixed public address. Both host names point here.
     Value: !GetAtt ServerAddress.PublicIp

@@ -1,8 +1,9 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  TINNOX CMS, how images get from GitHub to AWS: the three image repositories and the
+  TINNOX CMS, how a release gets from GitHub to AWS: the four image repositories and the
   role that the deploy workflow of tinnox-au/tinnox-cms takes through OpenID Connect,
-  with no stored key. One stack for the account. See infra/aws/README.md.
+  with no stored key. The role may push images and start the release document of one
+  environment, nothing else. One stack for the account. See infra/aws/README.md.
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -87,6 +88,18 @@ Resources:
         LifecyclePolicyText: !Sub |
           {"rules":[{"rulePriority":1,"description":"keep the newest images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":${ImagesKept}},"action":{"type":"expire"}}]}
 
+  # The release image: the API's code with the migrations, the server's compose file and
+  # the release script (apps/api/Dockerfile, target release).
+  ReleaseRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: tinnox-cms/release
+      ImageTagMutability: IMMUTABLE
+      EncryptionConfiguration: { EncryptionType: AES256 }
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub |
+          {"rules":[{"rulePriority":1,"description":"keep the newest images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":${ImagesKept}},"action":{"type":"expire"}}]}
+
   GitHubProvider:
     Type: AWS::IAM::OIDCProvider
     Condition: CreateProvider
@@ -126,7 +139,7 @@ Resources:
                 Effect: Allow
                 Action: ecr:GetAuthorizationToken
                 Resource: '*'
-              - Sid: PushToTheThreeRepositories
+              - Sid: PushToTheFourRepositories
                 Effect: Allow
                 Action:
                   - ecr:BatchCheckLayerAvailability
@@ -135,10 +148,38 @@ Resources:
                   - ecr:CompleteLayerUpload
                   - ecr:PutImage
                   - ecr:BatchGetImage
+                  - ecr:DescribeImages
                 Resource:
                   - !GetAtt ApiRepository.Arn
                   - !GetAtt WebRepository.Arn
                   - !GetAtt MediaWorkerRepository.Arn
+                  - !GetAtt ReleaseRepository.Arn
+        # Starting a release: the release document of the environment, on the servers that
+        # carry the environment's tags, and nothing else. Systems Manager checks a command
+        # against both the document and each server, so the two statements work together.
+        - PolicyName: start-a-release
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: TheReleaseDocumentOnly
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:document/tinnox-cms-${GitHubEnvironment}-release'
+              - Sid: OnTheServersOfThisEnvironmentOnly
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*'
+                Condition:
+                  StringEquals:
+                    ssm:resourceTag/project: tinnox-cms
+                    ssm:resourceTag/environment: !Ref GitHubEnvironment
+              # Reading how a command ended cannot be limited to one command or one
+              # server: this lets the role read the output of every Run Command in the
+              # account and Region. The release script prints no secret for that reason.
+              - Sid: ReadHowACommandEnded
+                Effect: Allow
+                Action: ssm:ListCommandInvocations
+                Resource: '*'
 
 Outputs:
   DeployRoleArn:
@@ -153,3 +194,6 @@ Outputs:
   MediaWorkerRepositoryUri:
     Description: Where the media worker image is pushed and pulled.
     Value: !GetAtt MediaWorkerRepository.RepositoryUri
+  ReleaseRepositoryUri:
+    Description: Where the release image is pushed and pulled.
+    Value: !GetAtt ReleaseRepository.RepositoryUri
