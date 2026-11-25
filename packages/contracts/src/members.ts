@@ -21,7 +21,10 @@ const SINGLE_LINE = /^[^\u0000-\u001f\u007f-\u009f\u2028\u2029]*$/;
 const NO_DIRECTION_CONTROLS = /^[^\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]*$/;
 
 /**
- * A work e-mail address in an invite request. The database twin checks only length and an "@".
+ * A work e-mail address in an invite request. Twin of member_invite_email_length and
+ * member_invite_email_shape (0016), which hold this shape with PostgreSQL's [:space:]: the database
+ * stores the few whitespace, control and text-direction characters refused here that it does not
+ * name (TWIN_ALLOW_LIST, tests/integration/twins-registers.ts), and nothing this accepts is refused.
  * No control or text-direction characters, as every other label: PostgreSQL text cannot hold NUL,
  * and Owners, Admins and TINNOX staff read the address (Users page, `provision-member pending`).
  */

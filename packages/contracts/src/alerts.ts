@@ -23,7 +23,7 @@ export function alertDelayText(minutes: number): string {
 /**
  * An alert address: an invite e-mail without the characters of RFC 5322 names, groups, lists and
  * quoted parts, so the mailer delivers to exactly the stored string (twin of
- * alert_recipient_email_shape, 0014). Lower-cased here, then measured again, because lower-casing
+ * alert_recipient_email_shape, 0016). Lower-cased here, then measured again, because lower-casing
  * can lengthen a string ('İ' becomes two code points).
  */
 export const AlertEmailSchema = InviteEmailSchema.regex(

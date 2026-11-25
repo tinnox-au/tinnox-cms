@@ -147,7 +147,8 @@ describe('planSchedulePublication: today’s behaviour outside the generators', 
 
   it('a media window year outside 1000 to 9999 is planned, then buildManifest throws (database guard: step 31, D7)', () => {
     // timestamp(0) holds such a year (0006) and to_char gives '0999' or '10000'; the manifest's
-    // LocalDateTimeSchema refuses both. Step 31 adds the year range to the column (D7).
+    // LocalDateTimeSchema refuses both. Since 0016 the column refuses them (media_availability_year,
+    // D7), so only a database older than 0016 could hand the planner one.
     for (const from of ['0999-12-31T23:00', '10000-01-01T00:00']) {
       const plan = planSchedule(
         {
