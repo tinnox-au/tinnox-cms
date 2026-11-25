@@ -197,6 +197,35 @@ const NO_RANDOM_IN_TESTS = [
   },
 ];
 
+// D11 (adoption plan step 29): every fast-check run draws a fresh seed, so a property keeps
+// exploring. A seed or path in the options of the runner replays one run for ever, and stops
+// reproducing once a generator changes. The options object is matched as a direct child of the
+// call (or under `as` or `satisfies`; a computed `fc['assert']` counts), so a generator's own fields (`fc.record({ path: fc.string() })`) pass. The second entry
+// keeps the runner reachable as `fc`, the only name the first one sees (types may be imported by
+// name). Not seen: options held in a variable or spread from one.
+const FC_RUNNER_CALL =
+  "CallExpression[callee.object.name='fc']:matches([callee.property.name=/^(assert|check|configureGlobal)$/], [callee.property.value=/^(assert|check|configureGlobal)$/])";
+const FC_REPLAY_PROPERTY =
+  'Property:matches([key.name=/^(seed|path)$/], [key.value=/^(seed|path)$/])';
+const FC_REPLAY_SELECTOR = [
+  `${FC_RUNNER_CALL} > ObjectExpression > ${FC_REPLAY_PROPERTY}`,
+  `${FC_RUNNER_CALL} > TSAsExpression > ObjectExpression > ${FC_REPLAY_PROPERTY}`,
+  `${FC_RUNNER_CALL} > TSSatisfiesExpression > ObjectExpression > ${FC_REPLAY_PROPERTY}`,
+].join(', ');
+const NO_FC_REPLAY = [
+  {
+    selector: FC_REPLAY_SELECTOR,
+    message:
+      'Do not commit a fast-check seed or path (D11): every run draws its own seed, and a replay stops reproducing once a generator changes. Add the shrunk counterexample that the failure printed as a plain example test in the same *.property.test.ts, beside its fix (as in packages/domain/src/layout.property.test.ts).',
+  },
+  {
+    selector:
+      "ImportDeclaration[source.value='fast-check'][importKind!='type'] > :matches(ImportSpecifier[importKind!='type'], ImportDefaultSpecifier[local.name!='fc'], ImportNamespaceSpecifier[local.name!='fc'])",
+    message:
+      "Import fast-check as `import fc from 'fast-check'` and call it through `fc` (fc.property, fc.assert, fc.integer): the lint that keeps seeds and paths out of committed tests (D11) sees runner calls on `fc` only.",
+  },
+];
+
 // RCX-03 (adoption plan step 23): a status asserted as a range or as "not 401" passes on a 500, a
 // 429 or any other answer nobody meant. Matched on expect(...) and expect.soft(...) whose subject
 // reads a status: a `.status` or `.statusCode` member (optional, awaited or Playwright's
@@ -1683,8 +1712,39 @@ const outboundSyntax = (dir, allowed) => [
   ...NO_OUTBOUND_GLOBAL_DESTRUCTURING,
 ];
 
+// The no-restricted-syntax list of the test files that run against real services; the seeders'
+// block adds to it.
+const REAL_SERVICE_TEST_SYNTAX = [
+  ...NO_SKIPPED_TESTS,
+  ...NO_RANDOM_IN_TESTS,
+  ...NO_FC_REPLAY,
+  ...NO_RANGE_STATUS,
+  ...NO_RESPONSE_NOT_OK,
+  ...NO_BRAND_CAST,
+  ...NO_HTML_SINK_CALLS,
+];
+
+// D13, step 34: the seeders of the migrate-forward chain (packages/db/test/levels).
+const SEEDER_FILES = ['packages/db/test/levels/**'];
+const SEEDER_LOADER_MESSAGE =
+  'A seeder of the migrate-forward chain is plain SQL through the client it is given (D13): it reads no file and loads no module by a path lint cannot check. Write the rows with inOrg, asDefiner, id and bytes32 of ./sql.ts, and import earlier seeders (./seed-NNNN.ts) with a static import.';
+const SEEDER_BANNED_MODULES = [
+  'node:module',
+  'module',
+  'node:fs',
+  'node:fs/promises',
+  'fs',
+  'fs/promises',
+].map((name) => ({ name, message: SEEDER_LOADER_MESSAGE }));
+// A computed import() (a template with an expression, a variable, a URL, a concatenation) names a
+// module the import rules cannot read. Only the seeders refuse it: the rest of the tree loads a
+// computed path where it must (levels.ts loads each seeder so).
+const NO_COMPUTED_IMPORT = [
+  { selector: "ImportExpression[source.type!='Literal']", message: SEEDER_LOADER_MESSAGE },
+];
+
 // Extra patterns for a subset of the files: each facet adds its patterns (or the patterns it
-// gives for the workspace) to the workspace's own.
+// gives for the workspace) to the workspace's own, and its `paths`, if any.
 // `only` and `except` name the workspaces a facet can touch, and facets of one `group` match
 // disjoint files and are never combined. Facets of different groups are combined whether or not
 // their files can meet, so a few generated blocks match nothing (the route-file facet with a
@@ -1854,6 +1914,26 @@ const IMPORT_FACETS = [
     ],
   },
   {
+    // D13, step 34: a seeder of the migrate-forward chain is plain SQL valid at its own level. A
+    // helper of today (createOrg, a sec.* wrapper) writes today's columns, so an old level's
+    // fixture written with one breaks when the helper changes (it did once: the 0011 fixture of
+    // migration-0012.integration.test.ts had to pass { role: 'operator' } after 0013). The rule
+    // compares the specifier text: '..' anywhere, or an absolute path, leaves the folder. The
+    // loaders that take a specifier the rule cannot read are banned outright: node:module
+    // (createRequire), the file system (readFileSync of another file) here, and a computed
+    // import() by NO_COMPUTED_IMPORT.
+    only: ['packages/db'],
+    files: SEEDER_FILES,
+    paths: SEEDER_BANNED_MODULES,
+    patterns: [
+      {
+        regex: '^(@tinnox/|/|file:)|(^|/)\\.\\.(/|$)',
+        message:
+          "A seeder of the migrate-forward chain imports only from its own folder, packages/db/test/levels (D13): write the rows in plain SQL valid at the seeder's level through the client it is given, with inOrg, asDefiner, id and bytes32 of ./sql.ts, and take ids of earlier levels from their seeders (./seed-NNNN.ts). Helpers of @tinnox/* and of packages/db/test write today's columns, which an old level does not have.",
+      },
+    ],
+  },
+  {
     // Rule (i), D6: a route file imports no other route file. The rule compares the specifier
     // text and never resolves it, so it needs both halves: './media.ts' and '../routes/media.ts'.
     only: ['apps/api'],
@@ -1926,6 +2006,9 @@ function importBoundaryBlocks() {
         'no-restricted-imports': [
           'error',
           {
+            ...(set.some((facet) => facet.paths)
+              ? { paths: set.flatMap((facet) => facet.paths ?? []) }
+              : {}),
             patterns: [
               ...layerPatterns(dir),
               ...set.flatMap((facet) =>
@@ -2416,6 +2499,7 @@ export default tseslint.config(
         'error',
         ...NO_SKIPPED_TESTS,
         ...NO_RANDOM_IN_TESTS,
+        ...NO_FC_REPLAY,
         ...NO_RANGE_STATUS,
         ...NO_BRAND_CAST,
         ...NO_HTML_SINK_CALLS,
@@ -2426,15 +2510,14 @@ export default tseslint.config(
     // The test files that send real requests also refuse a response's `ok` asserted false.
     files: REAL_SERVICE_TEST_FILES,
     rules: {
-      'no-restricted-syntax': [
-        'error',
-        ...NO_SKIPPED_TESTS,
-        ...NO_RANDOM_IN_TESTS,
-        ...NO_RANGE_STATUS,
-        ...NO_RESPONSE_NOT_OK,
-        ...NO_BRAND_CAST,
-        ...NO_HTML_SINK_CALLS,
-      ],
+      'no-restricted-syntax': ['error', ...REAL_SERVICE_TEST_SYNTAX],
+    },
+  },
+  {
+    // D13, step 34: the seeders also refuse an import() whose specifier lint cannot read.
+    files: SEEDER_FILES,
+    rules: {
+      'no-restricted-syntax': ['error', ...REAL_SERVICE_TEST_SYNTAX, ...NO_COMPUTED_IMPORT],
     },
   },
   {
@@ -2446,6 +2529,7 @@ export default tseslint.config(
         ...NO_RAW_HTML,
         ...NO_SKIPPED_TESTS,
         ...NO_RANDOM_IN_TESTS,
+        ...NO_FC_REPLAY,
         ...NO_RANGE_STATUS,
         ...NO_BARE_KEYBOARD,
         ...NO_BRAND_CAST,
@@ -2464,6 +2548,7 @@ export default tseslint.config(
         ...NO_RAW_HTML,
         ...NO_SKIPPED_TESTS,
         ...NO_RANDOM_IN_TESTS,
+        ...NO_FC_REPLAY,
         ...NO_RANGE_STATUS,
         ...NO_BRAND_CAST,
         ...NO_HTML_SINK_CALLS,

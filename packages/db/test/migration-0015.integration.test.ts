@@ -2,20 +2,19 @@
  * Migration 0015: sec.session_revoke_membership locks the member row itself, then takes the
  * cut-off (review round 6, RCX-02; its follow-up RFX-01).
  *
- * Rebuilds the test database at migration 0014 with members, cut-offs and sessions, runs the
- * race there once to record the defect (a bare call that waits for the member row stamps the
- * start of its wait), applies 0015 with the real migration runner, and checks that no row
- * changed, that the function kept its owner, settings and grants, and that the same race now
- * ends with the cut-off after the wait.
+ * Builds a database at migration 0014 with the seeders of the migrate-forward chain (levels.ts,
+ * atLevel), whose level 0013 leaves two organisations with an Owner each
+ * (levels/seed-0013.ts). On it, the test adds members, cut-offs and sessions, runs the race once
+ * to record the defect (a bare call that waits for the member row stamps the start of its wait),
+ * applies 0015 with the real migration runner, and checks that no row changed, that the function
+ * kept its owner, settings and grants, and that the same race now ends with the cut-off after
+ * the wait.
  *
- * It resets the shared integration-test database; `afterAll` always leaves it at the newest
- * migration.
+ * The database is atLevel's own, dropped in `afterAll`; the shared integration-test database is
+ * not touched.
  */
 import { randomUUID } from 'node:crypto';
-import { copyFile, mkdtemp, readdir, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { readdir } from 'node:fs/promises';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -28,29 +27,20 @@ import {
   type SessionCreateResult,
 } from '../src/index.ts';
 import { withOrg, type Pool, databaseOn } from '../src/testing.ts';
-import { resetTestDatabase, runMigrations, type MigrationResult } from '../src/migrate.ts';
+import type { MigrationResult } from '../src/migrate.ts';
+import { MIGRATIONS, atLevel, type LevelDatabase } from './levels.ts';
+import { BEFORE_ALERTS_A, BEFORE_ALERTS_B } from './levels/seed-0013.ts';
 import {
   appPool,
   asDefiner,
-  createOrg,
   inTx,
-  migratorClient,
-  migratorUrl,
   PG,
   pgCode,
   stillWaiting,
+  testOrgId,
   twoTransactions,
-  type TestOrg,
 } from './support.ts';
 
-const MIGRATIONS = join(
-  dirname(fileURLToPath(import.meta.url)),
-  '..',
-  '..',
-  '..',
-  'db',
-  'migrations',
-);
 const TARGET = '0015_session_revoke_locks_first.sql';
 
 /**
@@ -73,21 +63,29 @@ interface Race {
   readonly inFlight: SignIn | null;
 }
 
-let scratch: string | undefined;
+let level: LevelDatabase | undefined;
 let migrator: pg.Client | undefined;
 let pool: Pool | undefined;
 let db: Autocommit;
-let org: TestOrg;
-let other: TestOrg;
 let upgrade: MigrationResult;
 /** The race at 0014, and a sign-in authenticated during its wait, tried after it committed. */
 let before: { race: Race; lateSignIn: SignIn };
 /** Members and sessions as they stood just before 0015. */
 let rowsBefore: unknown[];
 
-function clients(): { migrator: pg.Client; pool: Pool } {
-  if (migrator === undefined || pool === undefined) throw new Error('beforeAll did not finish');
-  return { migrator, pool };
+/** Two organisations of level 0013, each with its Owner. */
+const seeded = (o: typeof BEFORE_ALERTS_B) => ({
+  orgId: testOrgId(o.org),
+  membershipId: o.owner,
+});
+const org = seeded(BEFORE_ALERTS_A);
+const other = seeded(BEFORE_ALERTS_B);
+
+function clients(): { level: LevelDatabase; migrator: pg.Client; pool: Pool } {
+  if (level === undefined || migrator === undefined || pool === undefined) {
+    throw new Error('beforeAll did not finish');
+  }
+  return { level, migrator, pool };
 }
 
 /** One statement as the owner of the sec.* functions (BYPASSRLS). */
@@ -198,19 +196,13 @@ async function revokeWhileRowIsHeld(member: Member, signInDuringWait = false): P
 
 beforeAll(async () => {
   const names = (await readdir(MIGRATIONS)).filter((n) => n.endsWith('.sql')).sort();
-  const earlier = names.filter((n) => n < TARGET);
   expect(names).toContain(TARGET);
-  expect(earlier).toHaveLength(14);
-  scratch = await mkdtemp(join(tmpdir(), 'tinnox-migration-0015-'));
-  for (const name of earlier) await copyFile(join(MIGRATIONS, name), join(scratch, name));
-  await resetTestDatabase(migratorUrl());
-  await runMigrations({ connectionString: migratorUrl(), directory: scratch });
+  expect(names.filter((n) => n < TARGET)).toHaveLength(14);
+  level = await atLevel('0014', { seed: true });
 
-  migrator = await migratorClient();
-  pool = appPool('tries the revocation as the runtime role', 6);
+  migrator = await level.migrator();
+  pool = appPool('tries the revocation as the runtime role', 6, level.appUrl);
   db = poolAsTx(databaseOn(pool));
-  org = await createOrg(migrator, 'Before 0015');
-  other = await createOrg(migrator, 'Before 0015, other');
 
   // A member whose sessions were ended once and who signed in again, and one never cut off.
   const cutOffOnce = await addMember(org.orgId);
@@ -224,15 +216,13 @@ beforeAll(async () => {
   before = { race, lateSignIn: await signIn(raced.oidcSub, wholeSecond(race.duringWait)) };
 
   rowsBefore = await everyMemberAndSession();
-  upgrade = await runMigrations({ connectionString: migratorUrl(), directory: MIGRATIONS });
+  upgrade = await level.upgrade();
 }, 60_000);
 
 afterAll(async () => {
   await pool?.end();
   await migrator?.end();
-  // Whatever happened above, leave the shared test database at the newest migration.
-  await runMigrations({ connectionString: migratorUrl(), directory: MIGRATIONS });
-  if (scratch !== undefined) await rm(scratch, { recursive: true, force: true });
+  await level?.drop();
 });
 
 describe('migration 0015 on a database that already holds members and sessions', () => {
@@ -240,7 +230,7 @@ describe('migration 0015 on a database that already holds members and sessions',
     const later = (await readdir(MIGRATIONS)).filter((n) => n.endsWith('.sql') && n > TARGET);
     expect(upgrade.alreadyApplied).toHaveLength(14);
     expect(upgrade.applied).toEqual([TARGET, ...later.sort()]);
-    const again = await runMigrations({ connectionString: migratorUrl(), directory: MIGRATIONS });
+    const again = await clients().level.upgrade();
     expect(again.applied).toEqual([]);
     expect(again.alreadyApplied).toContain(TARGET);
   });

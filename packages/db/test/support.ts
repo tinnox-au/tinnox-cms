@@ -30,11 +30,12 @@ function need(name: string): string {
  * these tests write themselves: they try what the role may and may not do (row-level security,
  * grants, constraints, the sec.* functions), so most of their writes carry no audit row. The
  * name tells the audit-debt guard that this is not product code (../src/audit-debt-guard.ts),
- * and `why` says what the SQL is.
+ * and `why` says what the SQL is. `connectionString` names another database, such as one
+ * `atLevel` built (./levels.ts).
  */
-export function appPool(why: string, max = 4): Pool {
+export function appPool(why: string, max = 4, connectionString = need('TEST_DATABASE_URL')): Pool {
   return createPool({
-    connectionString: need('TEST_DATABASE_URL'),
+    connectionString,
     applicationName: unjudgedSql(why),
     max,
   });

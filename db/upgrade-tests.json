@@ -65,6 +65,10 @@
     {
       "file": "0015_session_revoke_locks_first.sql",
       "test": "packages/db/test/migration-0015.integration.test.ts"
+    },
+    {
+      "file": "0016_twin_guards.sql",
+      "test": "packages/db/test/migration-0016.integration.test.ts"
     }
   ]
 }

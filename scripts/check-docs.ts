@@ -1,9 +1,11 @@
 // Keeps the rule files and the documents' references true (rules in scripts/lib/docs-check.ts):
 // .cursor/BUGBOT.md generated from AGENTS.md, no nested or override rule files, size limits,
 // backticked paths that exist, decision ranges that match the register, pinned actions and
-// images, and no undated hand-typed counts in live text.
+// images, no undated hand-typed counts in live text, and the state chart of the player protocol
+// generated from the player's transition table (rules in scripts/lib/player-chart.ts).
 //   npm run check:docs              check
-//   npm run check:docs -- --write   regenerate .cursor/BUGBOT.md from AGENTS.md, then check
+//   npm run check:docs -- --write   regenerate .cursor/BUGBOT.md from AGENTS.md and the state
+//                                   chart of docs/player-protocol-v1.md, then check
 import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -30,6 +32,14 @@ import {
   splitAtLinks,
 } from './lib/docs-check.ts';
 import { repoRoot } from './lib/env.ts';
+import {
+  PROTOCOL_PATH,
+  TABLE_PATH,
+  checkPlayerChart,
+  playerStateChart,
+  transitionTableOf,
+  withChart,
+} from './lib/player-chart.ts';
 
 function git(args: string[], input?: string): string {
   const result = spawnSync('git', ['-C', repoRoot, ...args], {
@@ -62,6 +72,16 @@ if (process.argv.includes('--write')) {
   const generated = bugbotFrom(read(AGENTS_PATH) ?? '');
   writeFileSync(join(repoRoot, BUGBOT_PATH), generated);
   console.log(`wrote ${BUGBOT_PATH} from the Code Review Rules of ${AGENTS_PATH}`);
+  // A table that cannot be read, or a document without the chart's marker lines, is left as it
+  // is: the check below says how to fix either.
+  const protocol = read(PROTOCOL_PATH);
+  const table = transitionTableOf(read(TABLE_PATH) ?? '');
+  const charted =
+    protocol === undefined || !table.ok ? null : withChart(protocol, playerStateChart(table.table));
+  if (charted !== null) {
+    writeFileSync(join(repoRoot, PROTOCOL_PATH), charted);
+    console.log(`wrote the state chart of ${PROTOCOL_PATH} from ${TABLE_PATH}`);
+  }
 }
 
 const agents = read(AGENTS_PATH) ?? '';
@@ -104,6 +124,7 @@ const findings = [
   ...checkDecisionRanges(read(README_PATH) ?? '', decisionRegister(read(REGISTER_PATH) ?? '')),
   ...checkPins(docs(pinSources(files))),
   ...checkCounts(docs(COUNT_DOCS)),
+  ...checkPlayerChart(read(PROTOCOL_PATH), read(TABLE_PATH)),
 ];
 
 for (const finding of findings) console.error(finding);
@@ -112,5 +133,5 @@ if (findings.length > 0) {
   process.exit(1);
 }
 console.log(
-  `check:docs passed: ${BUGBOT_PATH} matches ${AGENTS_PATH}, ${candidates.length} path candidates, decision ranges, pins and live counts`,
+  `check:docs passed: ${BUGBOT_PATH} matches ${AGENTS_PATH}, ${candidates.length} path candidates, decision ranges, pins, live counts and the player state chart`,
 );
