@@ -318,6 +318,7 @@ from: CMS-30
 
 **Notes**
 - 24 Nov: Michael, 24 Nov: media is served direct from Sydney storage, no CDN, if possible. Michael is the incident owner for now. Native players: Linux only for now, Windows 11 set aside.
+- 25 Nov: Michael, 25 Nov: the product domain is tinnox-one.com.au, bought. Stage 0 keeps the API on tsx (compiled image is CMS-39).
 
 ### CMS-38
 from: CMS-37
