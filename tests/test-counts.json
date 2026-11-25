@@ -24,7 +24,7 @@
   "vitest": {
     "unit": 4893,
     "component (chromium)": 101,
-    "integration": 783,
-    "api-integration": 199
+    "integration": 843,
+    "api-integration": 205
   }
 }

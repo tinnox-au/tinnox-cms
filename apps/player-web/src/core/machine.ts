@@ -53,6 +53,12 @@ export type PlayerEvent =
 
 export type PlayerEventType = PlayerEvent['type'];
 
+/**
+ * Every allowed change of phase. The state chart in docs/player-protocol-v1.md is generated
+ * from this table (`npm run check:docs -- --write`, which reads this file as text: keep the
+ * table one object literal of plain keys and string values), and `npm run check:docs` fails
+ * when the two differ.
+ */
 const TABLE: { readonly [P in PlayerPhase]: { readonly [E in PlayerEventType]?: PlayerPhase } } = {
   booting: {
     LEADERSHIP_WAITING: 'standby',

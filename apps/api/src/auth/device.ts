@@ -10,12 +10,14 @@
  * its row.
  *
  * Nothing is read again inside the change: a request already past the lookup finishes its one
- * transaction, which is the window D8 states.
+ * transaction, which is the window D8 states. One write looks all the same: the heartbeat's
+ * UPDATE takes effect only while the registration is still active (../routes/player.ts).
  */
 import {
   changeOrg,
   deviceByTokenHash,
   issueWritePermit,
+  settle,
   termsOfStatement,
   type AnyScope,
   type Change,
@@ -25,6 +27,7 @@ import {
 import type { FastifyRequest } from 'fastify';
 import type { AppContext } from '../context.ts';
 import { routeStatement } from '../route-audit.ts';
+import { lockTimeoutAsUnavailable } from './permissions.ts';
 
 /** Marks what `verifyDeviceCredential` returns. Not exported, so nothing else makes one. */
 const verified: unique symbol = Symbol('verifiedDevice');
@@ -62,6 +65,9 @@ export async function verifyDeviceCredential(
  *
  * `fn` returns `{ value, audit }` and writes no audit row itself. The change is refused before
  * COMMIT when it recorded an action the route's entry in OTHER_ROUTE_AUDIT does not state.
+ * A lock timeout (55P03) raised anywhere inside becomes 503 service_unavailable with
+ * retry-after 2, as in changeAsOperator; it rolled back, so nothing of it is stored. A COMMIT
+ * that did not confirm is thrown as it came (CommitOutcomeUnknownError).
  */
 export async function changeAsDevice<T>(
   ctx: AppContext,
@@ -83,5 +89,13 @@ export async function changeAsDevice<T>(
     // Nothing to read again (D8): the lookup that made `device` is the check.
     recheck: () => Promise.resolve(),
   });
-  return changeOrg(ctx.db, device.orgId, permit, (tx) => fn(tx));
+  const ended = await settle(changeOrg(ctx.db, device.orgId, permit, (tx) => fn(tx)));
+  switch (ended.end) {
+    case 'committed':
+      return ended.value;
+    case 'rolled_back':
+      throw lockTimeoutAsUnavailable(request, ended.error);
+    case 'unknown':
+      throw ended.unconfirmed;
+  }
 }

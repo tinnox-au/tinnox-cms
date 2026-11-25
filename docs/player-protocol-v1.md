@@ -74,7 +74,7 @@ No body, no credential. Response `201` (`PairingCreateResponseSchema`):
 |---|---|---|
 | `200 {"status":"pending","expiresAt"}` | Not claimed yet | Keep polling |
 | `200 {"status":"claimed", deviceToken, registrationId, orgId, display:{id,name,canvas,contentRect}}` | Claimed. **Returned exactly once.** | Store the token, registration id, org id and display; start syncing |
-| `200 {"status":"consumed"}` | The token was already handed out, or the claim was cancelled between this poll and the collection | If the player has no token, start a new pairing |
+| `200 {"status":"consumed"}` | The token was already handed out; or the claim ended before this collection: it was cancelled between this poll and the collection, or the member who claimed the code has since been removed from the organisation or had their sessions ended (removal, a lower role, sign out everywhere), which a later return of that member does not undo | If the player has no token, start a new pairing |
 | `200 {"status":"expired"}` | The code expired unclaimed, or its claim was cancelled before the player collected it (a newer code was claimed for the display, or the operator revoked the display's player) | Start a new pairing |
 | `404 not_found` | Unknown id, wrong polling token, missing header, or locked session. Deliberately indistinguishable. | Start a new pairing |
 
@@ -99,6 +99,50 @@ Revocation stops **future** server access. It cannot erase a device that is offl
 Player-initiated reset. `Authorization: Bearer <deviceToken>`. Response `204`. The registration is revoked with reason `player_reset`. The player should call this before deleting its local state when it is online; when offline it clears locally and the operator revokes from the portal. (This route is not in `ROUTES` of `packages/contracts`.)
 
 A player that is paired to a display of another organisation must first delete every cached asset and all state of the previous registration. Cache names must include the organisation id and registration id from the `claimed` response.
+
+### Player phases
+
+The browser player is in one phase at a time, and an event either moves it along an arrow below or is refused and changes nothing. The chart is generated from the player's transition table (`apps/player-web/src/core/machine.ts`); `npm run check:docs` fails when the two differ, and `npm run check:docs -- --write` writes it again. A player starts in `booting`. It holds a credential and talks to the credentialed routes only in `idle`, `playing` and `faulted`. `REVOKED` is the answer `401` to any player call; `resetting` reloads the page into `booting`.
+
+<!-- player-state-chart:start (generated from the transition table in apps/player-web/src/core/machine.ts by `npm run check:docs -- --write`; do not edit by hand) -->
+
+```mermaid
+stateDiagram-v2
+    booting --> standby: LEADERSHIP_WAITING
+    booting --> unpaired: NO_REGISTRATION
+    booting --> idle: REGISTRATION_LOADED
+    booting --> revoked: REVOKED_REGISTRATION_LOADED
+    standby --> standby: LEADERSHIP_WAITING
+    standby --> unpaired: NO_REGISTRATION
+    standby --> idle: REGISTRATION_LOADED
+    standby --> revoked: REVOKED_REGISTRATION_LOADED
+    unpaired --> pairing: PAIRING_CODE_ISSUED
+    unpaired --> resetting: RESET_REQUESTED
+    pairing --> pairing: PAIRING_CODE_ISSUED
+    pairing --> unpaired: PAIRING_LOST
+    pairing --> idle: PAIRED
+    pairing --> resetting: RESET_REQUESTED
+    idle --> playing: ITEM_STARTED
+    idle --> idle: NO_CONTENT
+    idle --> faulted: PLAYBACK_FAILED
+    idle --> revoked: REVOKED
+    idle --> resetting: RESET_REQUESTED
+    playing --> playing: ITEM_STARTED
+    playing --> idle: NO_CONTENT
+    playing --> faulted: PLAYBACK_FAILED
+    playing --> revoked: REVOKED
+    playing --> resetting: RESET_REQUESTED
+    faulted --> playing: ITEM_STARTED
+    faulted --> idle: NO_CONTENT
+    faulted --> faulted: PLAYBACK_FAILED
+    faulted --> revoked: REVOKED
+    faulted --> resetting: RESET_REQUESTED
+    revoked --> revoked: REVOKED
+    revoked --> resetting: RESET_REQUESTED
+    resetting
+```
+
+<!-- player-state-chart:end -->
 
 ## 5. Manifest
 
@@ -358,10 +402,12 @@ Rules:
 
 - **Sequence.** `seq` must increase with every report of one registration (persist it locally, so it survives a reload). A report whose `seq` is not greater than the stored one is answered `200 {"accepted": false, "ignoredReason": "stale_seq"}` and changes nothing. A delayed or replayed report therefore cannot overwrite newer state. The check and the update run under one row lock, so concurrent reports cannot interleave.
 - **New registration, new sequence.** The stored sequence belongs to the registration that produced it. A newly paired player starts again from any number.
+- **Registration still active.** A report is stored only while the credential's registration is still the active one at the moment of the write. A request whose credential was accepted, and whose registration was revoked before its write (an operator revoke, a reset, a new player paired to the display), is still answered `200` by the sequence rule above, but stores nothing and is not kept as history; the next request gets `401 device_revoked`. A late report from a replaced player therefore never replaces the new player's report.
 - **Display.** `displayId` must be the display of the credential: otherwise `403 forbidden`.
 - **Publications.** Every publication id named anywhere in the report (downloaded, active, staging, errors) must be a publication of that display: otherwise `409 conflict`. This includes publications of another display of the same organisation.
 - **Shape.** Schema violations (unknown fields, `playing` without an active publication, `activePublicationId` and `activeItemIndex` not both set, `assetsDone > assetsTotal`, more than 10 errors, messages over 300 characters): `400 validation_failed`.
 - **Rejected reports change nothing** and are not stored.
+- **Lock wait.** A report that waits longer than the server's lock timeout (5 s) for the display's row, held by another report of the same display, is answered `503 service_unavailable` with `Retry-After: 2`, as an operator's change is, and changes nothing; retry it as any 5xx (section 10).
 - `errors` is the most recent problems, newest first, replaced as a whole by each accepted report. Messages must not contain URLs or tokens.
 - Send every `nextHeartbeatInMs` (default 15 s). The portal marks a display stale when the last **accepted** report is older than 60 s (`LIMIT_HEARTBEAT_STALE_AFTER_SECONDS`), measured on the server clock at the time the status is read. Nothing stores an "online" flag. Raw reports are kept as diagnostic history only when accepted, at most one per display per 10 s, for `LIMIT_HEARTBEAT_LOG_RETENTION_HOURS` (default 24); ignored reports (stale `seq`) are not stored.
 - Rate limit: 120 reports per minute per credential.
