@@ -35,7 +35,9 @@ Parameters:
     Type: String
     Default: db.t4g.micro
     AllowedValues: [db.t4g.micro, db.t4g.small, db.t4g.medium, db.t4g.large]
-    Description: A change restarts the database.
+    Description: >-
+      A change restarts the database. These classes bill extra for CPU used above their
+      allowance over a day (about US$0.075 for each vCPU-hour); RDS cannot turn that off.
   StorageGiB:
     Type: Number
     Default: 20
@@ -79,6 +81,9 @@ Rules:
           All data stays in Australia (DEC-13): this stack may only be created in
           Sydney (ap-southeast-2) or Melbourne (ap-southeast-4).
 
+Conditions:
+  OneZone: !Equals [!Ref MultiAZ, 'false']
+
 Resources:
   SubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
@@ -116,6 +121,12 @@ Resources:
       EngineLifecycleSupport: open-source-rds-extended-support-disabled
       DBInstanceClass: !Ref InstanceClass
       MultiAZ: !Ref MultiAZ
+      # With one zone, the server's: the environment then depends on one zone, not two,
+      # and nothing is charged for traffic between zones.
+      AvailabilityZone: !If
+        - OneZone
+        - Fn::ImportValue: !Sub '${EnvironmentStackName}-ServerAvailabilityZone'
+        - !Ref 'AWS::NoValue'
       StorageType: gp3
       AllocatedStorage: !Ref StorageGiB
       MaxAllocatedStorage: !Ref MaxStorageGiB
@@ -131,7 +142,9 @@ Resources:
       CACertificateIdentifier: rds-ca-rsa2048-g1
       # The master user is for the role set-up and for incidents only; the application
       # never uses it. RDS creates its password, keeps it in Secrets Manager and changes
-      # it every seven days, so it appears in no template, parameter or file.
+      # it every seven days, so it appears in no template, parameter or file. The secret
+      # is encrypted with the account's Secrets Manager key, so anyone in the account
+      # whose policy allows secretsmanager:GetSecretValue on it can read it.
       MasterUsername: tinnox_master
       ManageMasterUserPassword: true
       # No database is created here: the role set-up creates "tinnox", owned by

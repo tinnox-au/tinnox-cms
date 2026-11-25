@@ -28,8 +28,9 @@ Parameters:
     Default: test
     AllowedPattern: '^[A-Za-z0-9_-]{1,64}$'
     Description: >-
-      The GitHub deployment environment whose jobs may take the role. Restrict that
-      environment to the main branch in the repository's settings.
+      The GitHub deployment environment whose jobs may take the role. Create it first,
+      limited to the main branch and with required reviewers, in the repository's
+      settings.
   ExistingGitHubProviderArn:
     Type: String
     Default: ''
@@ -95,9 +96,13 @@ Resources:
       Url: https://token.actions.githubusercontent.com
       ClientIdList: [sts.amazonaws.com]
 
-  # Only a job of this repository that runs in the named deployment environment gets
-  # the role: the subject is compared whole, with no wildcard. A pull request from a
-  # fork has another subject and no token at all.
+  # Only a job of this repository that names the deployment environment gets the role:
+  # the subject is compared whole, with no wildcard. The subject proves the repository
+  # and the environment, nothing else. Which branch and which people may use the
+  # environment is set in GitHub (main only, required reviewers), and that must be in
+  # place before this stack exists: GitHub creates a missing environment, unprotected,
+  # for the first job that names it. No workflow triggered by pull_request_target may
+  # name it.
   DeployRole:
     Type: AWS::IAM::Role
     Properties:

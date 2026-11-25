@@ -6,8 +6,9 @@ infrastructure only. They start no container, hold no secret and run no migratio
 deploy step and the database role set-up come after them and are not written yet.
 
 **Status, 25 November 2026.** No stack has been created from these templates. They pass
-`cfn-lint` 1.61 and were reviewed by reading; nothing here has run against AWS. Section 8
-lists what is unverified pending runtime.
+`cfn-lint` 1.61, and five reviewers read them with a second reader checking each finding.
+The server set-up script was run in parts in an Amazon Linux 2023 container. Nothing here
+has run against AWS. Section 9 lists what is unverified pending runtime.
 
 ## 1. The account
 
@@ -17,62 +18,109 @@ launched in September 2026, and this shapes the templates:
 
 | Fact | Consequence |
 | --- | --- |
-| AWS manages the organisation and its policies; the project cannot edit them | An "Australia only" policy cannot be added from here. AWS's own policy already confines the project to Sydney plus the global endpoints of two US Regions. Each template also refuses to be created outside Sydney and Melbourne |
+| AWS manages the organisation and its policies; the project cannot edit them | An "Australia only" policy cannot be added from here. AWS's own policy already confines the project to Sydney plus the global endpoints of two US Regions; Melbourne is refused too |
 | Identity providers are forbidden (`iam:*Provider*`) | `delivery.yml` cannot be created: GitHub cannot take a role without a stored key |
 | Both end with "Activate advanced features" in AWS Settings | It cannot be undone and only the owner can do it. It is Michael's decision |
+| The CloudFormation console may attach a role of its own to a stack ("role manager") | That role may be unable to create IAM roles, and a stack keeps its role for life. See step 0 in section 3 |
 | Another system shares the account | Own network, own security groups, own roles, own key for secrets. The server's role is denied every Parameter Store parameter outside its own path |
+
+On 25 November the account had 13 IAM roles, all of them AWS's own; the other server has
+no role. So today only the people who administer the account can read what the templates
+protect. The protections matter once another system's role exists.
 
 Until advanced features are activated there is no keyless way for GitHub to push images to
 this account. Either they are activated and `delivery.yml` is created, or the server pulls
 public images from GitHub's registry. This is open.
+
+A spend limit, if one is ever set in AWS Settings, makes AWS refuse new stacks, keys, user
+pools and database instances as the limit comes near. None is set today.
 
 ## 2. The templates
 
 | Template | Stack name | Creates | About, per month |
 | --- | --- | --- | --- |
 | `environment.yml` | `tinnox-cms-test` | Network, the server with its fixed address and data disk, its role, log group, nightly disk snapshots, weekly patching, the key for secrets, optional DNS records | US$26 |
-| `database.yml` | `tinnox-cms-test-database` | RDS PostgreSQL 17, one zone, 7 days of backups, in subnets with no route to the internet | US$21 |
+| `database.yml` | `tinnox-cms-test-database` | RDS PostgreSQL 17, one zone (the server's), 7 days of backups, in subnets with no route to the internet | US$21 |
 | `identity.yml` | `tinnox-cms-test-identity` | Cognito user pool with an authenticator app required, the sign-in pages, the API's app client | US$0 |
 | `delivery.yml` | `tinnox-cms-delivery` | Three image repositories, the GitHub identity provider, the deploy role. Needs advanced features | under US$1 |
 
 The costs are estimates from the prices of 24 November 2026: server US$15.50 (t4g.small),
 disks US$4.40, public address US$3.65, key US$1, snapshots and logs about US$1; database
 US$18.25, its disk US$2.76, the master password's secret US$0.40. Together about US$47,
-A$71 at the plan's rate.
+A$71 at the plan's rate. Two things can add to it: an RDS t4g instance bills CPU used above
+its daily allowance (about US$0.075 for each vCPU-hour, and RDS cannot turn that off), and
+the key costs US$1 more a month after each of its first two yearly rotations.
 
 They are separate stacks because they live and die separately. The user pool must never
 be deleted with a server; the database may have to be removed again (section 5); the
 delivery stack cannot exist yet.
 
+**Where this differs from the plan.** Container logs go to CloudWatch Logs, not to files
+on the server: at this volume it costs cents and the logs survive the server. The disk is
+two disks, 16 GB for the system and 30 GB for data, so the server can be replaced without
+losing data. There is no CloudTrail trail and no budget alert yet (section 8). DNS records
+are only created when the domain's zone is in Route 53 in this account, which it is not.
+
 ## 3. Creating the stacks
 
-Create them in the CloudFormation console, in Sydney, in this order. Turn on **stack
-termination protection** for each.
+In Sydney, in this order. For every stack:
+
+- Add the tags `project` = `tinnox-cms` and `environment` = `test`. Stack tags are copied to
+  every resource that takes tags; the plan relies on the first to tell the CMS's
+  resources and costs from the other system's.
+- For the first creation choose **Stack failure options: Preserve successfully provisioned
+  resources**. A failed stack then stops as it is, and what went wrong can be read
+  before it is deleted.
+- Turn on **stack termination protection** after the stack is complete, not in the wizard:
+  a failed stack must be deleted before its name can be used again.
+
+0. **Check which role CloudFormation will use.** On "Configure stack options", under
+   Permissions, the console of a project account may show a role it attaches by itself.
+   If that role cannot create IAM roles, `environment.yml` fails at `ServerRole` with
+   "not authorized to perform: iam:CreateRole". If the console offers no way to use your
+   own session instead, create the stacks from CloudShell, which runs them as you:
+
+   ```bash
+   aws cloudformation create-stack --stack-name tinnox-cms-test --template-body file://environment.yml --capabilities CAPABILITY_IAM --disable-rollback --tags Key=project,Value=tinnox-cms Key=environment,Value=test --parameters ParameterKey=ImageId,ParameterValue=ami-…
+   ```
+
+   Whichever way: afterwards the stack's "IAM role" must be empty. A role attached to a
+   stack cannot be removed, and everyone who may update the stack can use it.
 
 1. **`environment.yml`** as `tinnox-cms-test`. It needs the box "I acknowledge that
    CloudFormation might create IAM resources".
    - `ImageId`: the current Amazon Linux 2023 arm64 image. In the console: Systems Manager,
      Parameter Store, Public parameters, service `ami-amazon-linux-latest`, parameter
-     `al2023-ami-kernel-default-arm64`; copy its value (`ami-…`).
+     `al2023-ami-kernel-default-arm64`; copy its value (`ami-…`). An x86 image fails at
+     once, because the instance types are arm64.
    - `HostedZoneId`: empty unless the domain's DNS is in Route 53 in this account.
-   - Leave `DataVolumeAttached` true and `DataVolumeSnapshotId` empty.
-   - The stack waits up to 30 minutes for the server to report that its set-up finished,
-     and fails if it reports a failure. The set-up log is `/var/log/tinnox-bootstrap.log`.
+   - Leave `DataVolumeAttached` true, `DataVolumeSnapshotId` empty and
+     `TerminationProtection` false.
+   - The stack waits up to 30 minutes for the server to report how its set-up ended. While
+     it waits, the set-up can be watched in a Session Manager session:
+     `sudo tail -f /var/log/tinnox-bootstrap.log`.
+   - If it fails: read that log, then delete the stack. The server must be stopped first
+     (EC2 console, Instance state, Stop), or the data disk may refuse to detach.
+   - When it is complete: update the stack with `TerminationProtection` true.
 2. **DNS**, if `HostedZoneId` was empty: two A records, `app.test.tinnox-one.com.au` and
    `player.test.tinnox-one.com.au`, to the `ServerPublicIp` output. Optionally a CAA record
    `0 issue "letsencrypt.org"` on each. Caddy can only get certificates once these resolve.
 3. **`database.yml`** as `tinnox-cms-test-database`. `EnvironmentStackName` is the name
-   from step 1. About 10 minutes.
+   from step 1; a wrong name fails at once ("No export named …"). About 10 minutes.
 4. **`identity.yml`** as `tinnox-cms-test-identity`. `DomainPrefix` must be unused by any
-   AWS customer in the Region; if the stack fails on the domain, choose another.
-5. **`delivery.yml`**, only after advanced features are activated.
+   AWS customer in the Region. If the stack fails on the domain, update the failed stack
+   with another prefix; do not delete and re-create it, which would leave an empty user
+   pool behind each time.
+5. **`delivery.yml`**, only after advanced features are activated. First create the
+   GitHub deployment environment `test`, limited to the main branch and with required
+   reviewers: GitHub creates a missing environment, unprotected, for the first job that
+   names it. It needs the same IAM acknowledgement as step 1.
 
 ## 4. What the templates leave to be done by hand
 
 **Secrets and settings.** CloudFormation cannot create encrypted parameters. They are
 written once, as SecureString with the key `alias/tinnox-cms-test-secrets`, under the path
-`/tinnox-cms/test/`. The server's role can read that path and nothing else. Proposed
-layout, to be fixed by the deploy step:
+`/tinnox-cms/test/`. Proposed layout, to be fixed by the deploy step:
 
 | Parameter | Kind | Value |
 | --- | --- | --- |
@@ -80,12 +128,32 @@ layout, to be fixed by the deploy step:
 | `api/SESSION_SECRET`, `api/MEDIA_URL_HMAC_SECRET`, `api/PAIRING_CLIENT_KEY_SECRET` | secret | three different random values of 32 characters or more |
 | `api/OIDC_CLIENT_SECRET` | secret | the app client's secret, read once in the Cognito console |
 | `api/OIDC_ISSUER`, `api/OIDC_CLIENT_ID` | plain | the `Issuer` and `ClientId` outputs |
-| `api/OIDC_MFA_AMR_VALUES` or `api/OIDC_MFA_ACR_VALUES` | plain | only after reading a real token (section 8) |
-| `migrator/DATABASE_MIGRATOR_URL` | secret | as above with `tinnox_migrator`. Read by the migration step only; it never goes into the API's settings file (`apps/api/src/config.ts` refuses to start with it) |
+| `api/API_PUBLIC_ORIGIN`, `api/PORTAL_ORIGIN` | plain | the `PortalOrigin` output |
+| `api/PLAYER_ORIGIN` | plain | the `PlayerOrigin` output |
+| `api/OIDC_REDIRECT_URI` | plain | `<PortalOrigin>/api/auth/callback` |
+| `api/OIDC_POST_LOGOUT_REDIRECT_URI` | plain | `<PortalOrigin>/` |
+| `api/OIDC_MFA_AMR_VALUES` or `api/OIDC_MFA_ACR_VALUES` | plain | only after reading a real token (section 5) |
+| `migrator/DATABASE_MIGRATOR_URL` | secret | as the first row, with `tinnox_migrator` |
+
+The compose file also needs the three image names, the two host names and the path of the
+API's settings file (`infra/deploy/compose.yml`); the deploy step supplies those.
+
+The migrator's parameter must never go into the API's settings file: the API refuses to
+start with it (`apps/api/src/config.ts`). The server's role can read the whole path,
+including `migrator/`, because the plan runs migrations on the server. What keeps it from
+the API is that containers cannot use the server's role (metadata hop limit of 1) and that
+the deploy step gives it to the migration container only. Narrowing the role to `api/` is
+possible once something other than the server fetches the migrator's parameter.
 
 The database's master password is not among them. RDS keeps it in Secrets Manager
-(`MasterUserSecretArn` output) and changes it every seven days; the server's role cannot
-read it.
+(`MasterUserSecretArn` output) and changes it every seven days. The server's role cannot
+read it; anyone whose own policy allows `secretsmanager:GetSecretValue` on it can.
+
+**What is on the data disk.** Docker keeps each container's settings, the API's secrets
+among them, in plain text in its own directory, which is on the data disk, beside Caddy's
+certificate keys. The nightly snapshots and the final snapshot contain them. The disk and
+its snapshots are encrypted with the account's EBS key, so anyone in the account who may
+create and attach a volume from a snapshot can read them.
 
 **The database roles.** `infra/postgres/init/01-roles.sh` cannot run unchanged: the RDS
 master user is not a superuser. The set-up for RDS has to grant the master user `SET` on
@@ -133,46 +201,106 @@ an authenticator app at the first sign-in.
   key pair.
 - **Logs**: CloudWatch Logs group `/tinnox-cms/test`, one stream per container, kept 30
   days. `docker logs` on the server shows the latest lines.
-- **Updates**: operating system updates install every Sunday about 04:30 Sydney time
-  (05:30 in summer), with a restart when one needs it; the containers come back by
-  themselves. RDS applies minor versions in its window an hour or so earlier.
-- **Backups**: the database keeps 7 days and can be restored to any minute of them, as a
-  new instance. The data disk is snapshotted every night, 7 kept. Neither has been
-  restored yet; the plan's restore drill is in month two.
+- **Updates**: operating system updates install on Saturday at 18:30 UTC, which is Sunday
+  04:30 in Sydney and 05:30 in summer, with a restart when one needs it; the containers
+  come back by themselves. RDS has its own window, 17:00 to 18:00 UTC the same day, and
+  backs up at 16:00. Whether the weekly run installs anything newer than the image's own
+  release is not yet known (section 9).
 - **A larger disk**: raise `DataVolumeSizeGiB`, then on the server `xfs_growfs /var/lib/tinnox`.
 - **Compose** is pinned to 2.40.3 in the server set-up, with its checksum. To change it
   later, install the new file by hand on the server; changing the template alone does not
   rerun the set-up.
+- **Never change on an existing stack**: `EnvironmentName`, `VpcCidr`,
+  `DataVolumeSnapshotId`, `DomainPrefix`.
+
+### Backups
+
+The database keeps 7 days and can be restored to any minute of them. The data disk is
+snapshotted every night, 7 kept, while the server runs: the file system recovers as after
+a power cut. The two are not taken at the same moment, so a restore of both can leave
+media rows without files or files without rows. Neither has been restored yet; the plan's
+restore drill is in month two.
 
 ### Replacing the server
 
 A new image id (`ImageId`) replaces the server. CloudFormation creates the new server
 before it removes the old one, and the data disk cannot be attached to both, so:
 
-1. On the server: `docker compose … down`, `systemctl stop docker`, `umount /var/lib/tinnox`.
+1. Stop the server (EC2 console, Instance state, Stop). A disk detaches cleanly from a
+   stopped server and can hang on a running one.
 2. Update the stack with `DataVolumeAttached` false and `TerminationProtection` false.
-3. Update the stack with the new `ImageId`, `DataVolumeAttached` true and
-   `TerminationProtection` true. The new server finds the disk, keeps its contents and
-   starts Docker on it; the containers that were defined come back.
+3. Update the stack with the new `ImageId` and `DataVolumeAttached` true. The new server
+   waits for the disk, keeps its contents and starts Docker on it.
 4. Check `/var/log/tinnox-bootstrap.log` on the new server: on a replacement the stack
    does not wait for the set-up.
+5. Deploy again. The new server has an empty `/etc/tinnox`, and the old containers are
+   still defined on the data disk with the settings of the last deployment.
+6. Update the stack with `TerminationProtection` true.
 
 The fixed address moves to the new server. Certificates and media are on the data disk.
 
 ### Going back to a snapshot of the data disk
 
-Steps 1 and 2 above, then update with `DataVolumeSnapshotId` set to the snapshot and
-`DataVolumeAttached` true. The disk that is replaced is snapshotted first.
+CloudFormation cannot change where an existing disk came from, so this is done beside the
+stack:
+
+1. In the EC2 console create a volume from the snapshot, in the server's zone, and attach
+   it to the server as `/dev/sdg`.
+2. On the server: `mkdir /mnt/restore && mount -o ro,nouuid /dev/sdg /mnt/restore`.
+3. Stop the containers, copy back what is needed from `/mnt/restore`, start them.
+4. `umount /mnt/restore`, then detach and delete the volume.
+
+To rebuild a whole environment from a snapshot instead, create a new environment stack
+with `DataVolumeSnapshotId` set and `DataVolumeSizeGiB` at least the snapshot's size.
+
+### Restoring the database
+
+A restore, to a point in time or from a snapshot, always makes a new instance outside the
+stack. Give it the stack's subnet group and the security group
+`tinnox-cms-test-database`, or the server cannot reach it. Then put the new host name
+into `DATABASE_URL` and `DATABASE_MIGRATOR_URL` and deploy. RDS does not manage the
+restored instance's master password until it is told to (Modify, "Manage master
+credentials in AWS Secrets Manager"). Bringing the restored instance under the stack
+(CloudFormation's "Import resources into stack") is not written yet.
 
 ### Deleting
 
-Update each stack with its protection parameter false, turn off stack termination
-protection, then delete the database stack before the environment stack (it uses the
-environment's network). What stays behind on purpose, and keeps costing until removed by
-hand: the final database snapshot, the final data disk snapshot and the last nightly ones,
-the secrets key (US$1 a month), the user pool, and the parameters under `/tinnox-cms/test/`.
+1. Remove the A and CAA records of both host names if they were made by hand, and switch
+   off or unpair the test players. The fixed address is released with the stack, and
+   another AWS customer may later receive it.
+2. Stop the server (EC2 console).
+3. Update each stack with its protection parameter false, and turn off stack termination
+   protection.
+4. Delete the database stack, then the environment stack (the database uses the
+   environment's network).
 
-## 7. Not in these templates
+What stays behind on purpose, and keeps costing until removed by hand:
+
+- the final database snapshot;
+- the final data disk snapshot and the last nightly ones (cents each);
+- the secrets key (US$1 a month), until its deletion is scheduled in the KMS console;
+- the parameters under `/tinnox-cms/test/` (free). They stay encrypted with the old key:
+  if the environment is created again, write each of them again with the new key;
+- the user pool (free). A new identity stack makes a new, empty pool, in which every
+  person is a new subject; to use the old pool again it must be imported into the new
+  stack;
+- for the delivery stack: the three repositories must be emptied before they can be deleted.
+
+## 7. Limits of what these templates protect
+
+- One server in one zone. If the server's hardware fails, AWS restarts it on other
+  hardware with the same disks and address. If the zone is lost, the service is down until
+  the zone returns, or until a new environment is built from the last snapshots in the
+  other zone, by hand. The plan accepts this for stage 0.
+- The snapshot role carries AWS's managed policy, which can snapshot and delete snapshots
+  of any volume in the account. Only the schedule is limited to this environment's disk.
+- The deploy role trusts a GitHub subject that proves the repository and the deployment
+  environment, not the branch or the event. The branch rule and the reviewers are set in
+  GitHub.
+- The sign-in pages are Cognito's and are served through AWS's own edge network. The pool,
+  its users and its tokens are in Sydney.
+
+## 8. Not in these templates
 
 - The deploy step, the RDS role set-up and the migration step.
 - CloudTrail. The account has no trail; the console's event history keeps 90 days.
@@ -181,16 +309,23 @@ the secrets key (US$1 a month), the user pool, and the parameters under `/tinnox
 - Alarms, dashboards, VPC flow logs: monitoring is left out of stage 0 on purpose.
 - S3 for media (month two), e-mail (off), a second zone, Melbourne.
 
-## 8. Unverified pending runtime
+## 9. Unverified pending runtime
 
 - Everything, in the sense that no stack has been created. In particular:
+- Which role the CloudFormation console uses in a project account, and what it may do
+  (section 3, step 0).
 - That a project account allows each resource type here. AWS's published policies for
   projects allow these services and forbid IAM paths under `/managed/`, which the
   templates do not use; identity providers are the one known refusal.
-- The server set-up script on a real Amazon Linux 2023 instance, including the name under
-  which the data disk appears and Compose 2.40.3 with Docker 25.
+- On a real Amazon Linux 2023 instance: the name under which the data disk appears
+  (`/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol…`), the root device name
+  `/dev/xvda`, and that the set-up's report reaches the stack. In a container the
+  packages installed, Compose 2.40.3 verified against its checksum and ran this compose
+  file on Docker 25, and Docker started with this configuration.
 - That a metadata hop limit of 1 keeps containers from the server's credentials.
-- `AWS-RunPatchBaseline` on Amazon Linux 2023 with the default baseline.
+- `AWS-RunPatchBaseline` on Amazon Linux 2023. An instance stays on the release its image
+  was built with unless told otherwise, so the weekly run may install nothing newer. Check
+  after the first Sunday with `dnf check-release-update`.
 - `EngineVersion: '17'` (the major version alone) on creation.
 - Managed login with only `ALLOW_REFRESH_TOKEN_AUTH` among the explicit flows, the first
   sign-in of a user created by an administrator when account recovery is `admin_only`,

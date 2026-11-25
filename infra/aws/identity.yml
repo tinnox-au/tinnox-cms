@@ -35,15 +35,18 @@ Parameters:
     Description: >-
       First part of the address of the sign-in pages,
       https://<prefix>.auth.<region>.amazoncognito.com. It must be unused by any AWS
-      customer in the Region and must not contain "aws", "amazon" or "cognito".
+      customer in the Region and must not contain "aws", "amazon" or "cognito". Treat
+      it as fixed once the stack exists: a pool has one such address, and CloudFormation
+      would create the new one before removing the old.
 
 Rules:
   AustraliaOnly:
     Assertions:
-      - Assert: !Contains [[ap-southeast-2, ap-southeast-4], !Ref 'AWS::Region']
+      - Assert: !Equals [!Ref 'AWS::Region', ap-southeast-2]
         AssertDescription: >-
-          All data stays in Australia (DEC-13): this stack may only be created in
-          Sydney (ap-southeast-2) or Melbourne (ap-southeast-4).
+          All data stays in Australia (DEC-13): this stack may only be created in Sydney
+          (ap-southeast-2). Not Melbourne: a user pool there sends its invitation
+          e-mail, with the temporary password, through Sydney or Singapore.
 
 Resources:
   # Deleting or replacing the pool deletes every user, and a new pool gives every person
