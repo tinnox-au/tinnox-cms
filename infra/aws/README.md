@@ -14,9 +14,11 @@ identity provider, the deploy role). Stack termination protection is on for all 
 the server's termination protection too. `bootstrap.sh test` has run: the three database
 roles and the database `tinnox` exist, and the settings are in Parameter Store. The
 GitHub deployment environment `test` exists (main branch only, one required reviewer;
-repository administrators can bypass it) and has its three variables. No release has
-run: no image pushed, no migration applied, no user signed in. Section 9 lists what is
-unverified pending runtime.
+repository administrators can bypass it) and has its three variables. The first
+release ran on 25 November, from the Deploy workflow, and succeeded at the first attempt:
+four images pushed, sixteen migrations applied on RDS, three containers healthy, and both
+host names answer over https with Let's Encrypt certificates. The organisation "TINNOX Internal" and its first Owner exist (created with
+`provision.sh` on 25 November); the Owner has signed in. Section 9 lists what is unverified pending runtime.
 
 ## 1. The account
 
@@ -244,16 +246,24 @@ an authenticator app at the first sign-in.
    `client_id` and `logout_uri`, has not been tried. If it refuses, the CMS session
    ends but Cognito's own lasts up to an hour, so the same browser can sign in again
    without a password, and `apps/api/src/auth/oidc.ts` needs a change.
-3. **Proof of the second factor.** In production the API refuses to start without
-   `OIDC_MFA_ACR_VALUES` or `OIDC_MFA_AMR_VALUES`, and refuses every sign-in whose token
-   does not match. Cognito documents `acr` `urn:cognito:loa:4` and `amr`
-   `["pwd","otp","mfa"]` for a password plus an authenticator code through managed login,
-   but says the claims are "rolling out gradually". Read a real token before choosing.
-4. **The provisioning tool** reads users from Keycloak only (`scripts/lib/idp.ts`).
-5. **The first release.** Everything before it is done: the stacks are updated,
-   `bootstrap.sh` has run, the GitHub variables are set, and the two host names resolve to
-   the server (A records at GoDaddy, where the domain's DNS is hosted, 25 November). The
-   workflow can be started once it is on `main`.
+3. **Proof of the second factor: settled for `amr`.** The API runs with
+   `OIDC_MFA_AMR_VALUES=mfa` and refuses every sign-in whose token lacks it. The first
+   sign-in through Cognito's managed login, with a password and an authenticator code,
+   was accepted (25 November), so the ID token's `amr` contains `mfa`. Not read: the
+   token's other `amr` values and its `acr`; and a sign-in that Cognito lets through
+   without a second factor cannot happen while the pool requires one.
+4. **Provisioning.** `infra/aws/provision.sh <environment> <command …>` runs
+   `provision-member` from a person's CloudShell, never on the server: it builds a small
+   image from the checkout (CloudShell is an Intel machine, so the server's ARM images do
+   not run there), opens a Session Manager port forward to the database through the
+   server, and gives the tool the migrator's connection string and the person's temporary
+   AWS credentials for as long as it runs. Against a Cognito pool the tool makes one
+   `AdminGetUser` call (`scripts/lib/idp.ts`), and the username of a command is the
+   person's e-mail address; the account is created first, in the Cognito console or with
+   `aws cognito-idp admin-create-user`.
+5. **After the first sign-in.** The first Owner signed in on 25 November. Left from this
+   list: sign-out against Cognito (item 2), a forced re-authentication (`prompt=login`
+   and `auth_time`), and a check that replaces `verify:oidc` for this provider.
 
 ## 6. Running it
 
@@ -389,18 +399,19 @@ What stays behind on purpose, and keeps costing until removed by hand:
   the settings file cannot carry, Parameter Store unreachable, a migration that cannot
   connect, a second release started while one runs). The role script refused a role with
   the wrong attributes and a role with an unexpected membership. `bootstrap.sh` then ran
-  against AWS once and succeeded; RDS accepts SCRAM verifiers. Still not run: the
-  workflow, the deploy role's permissions, the release document inside Systems Manager,
-  and a login with the stored passwords.
+  against AWS once and succeeded; RDS accepts SCRAM verifiers.
+- The first release (25 November) settled: GitHub takes the deploy role (the subject
+  `…:environment:test` is right), pushes to the four repositories and may start the
+  release document on the tagged server; the document and `release.sh` run under Systems
+  Manager; the migrations and the `sec.*` functions apply on RDS; the API connects with
+  its stored password over verified TLS and reports ready; Caddy obtains certificates.
+  Not settled by it: a second release over a running one on the server, a failed
+  migration on the server, and the weekly image clean-up.
 - Creating the four stacks on 25 November showed: the organisation's policies allow
   their resource types, including the IAM roles and the identity provider; the data disk
   appears under the by-id name the set-up waits for; the set-up's report reaches the
   stack; and `EngineVersion: '17'` is accepted (it gave 17.9).
-- The migrations and the `sec.*` functions on RDS: the server reaches the database and
-  RDS accepts the roles (section 5), but no migration has run there.
 - The organisation's resource control policy was not read.
-- That GitHub can take the deploy role: the provider and the role exist, and the role's
-  trust names the subject `…:environment:test`, but no workflow has tried.
 - What the server looks like from inside: nobody has opened a session on it yet. The
   set-up checks the mount, Docker and Compose before it reports success, and it did.
 - That a metadata hop limit of 1 keeps containers from the server's credentials.
@@ -410,5 +421,3 @@ What stays behind on purpose, and keeps costing until removed by hand:
 - Managed login with only `ALLOW_REFRESH_TOKEN_AUTH` among the explicit flows, the first
   sign-in of a user created by an administrator when account recovery is `admin_only`,
   and what the ID token then contains.
-- The exact subject of a GitHub token for a deployment environment in the immutable
-  format (the prefix is confirmed, the `:environment:<name>` ending is inferred).

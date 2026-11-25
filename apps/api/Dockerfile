@@ -89,6 +89,15 @@ COPY scripts/lib/env.ts ./scripts/lib/env.ts
 COPY infra/deploy/compose.yml infra/deploy/release.sh ./infra/deploy/
 ENTRYPOINT ["node", "--disable-warning=ExperimentalWarning", "scripts/migrate.ts"]
 
+# The provisioning image: the same code with TINNOX's membership provisioning tool
+# (scripts/provision-member.ts). It is built where a person runs the tool
+# (infra/aws/provision.sh, in their CloudShell) and is pushed nowhere: no server has it.
+#   docker build -f apps/api/Dockerfile --target provision -t tinnox-cms-provision .
+FROM base AS provision
+COPY scripts/provision-member.ts ./scripts/provision-member.ts
+COPY scripts/lib/env.ts scripts/lib/idp.ts scripts/lib/provision.ts scripts/lib/sigv4.ts ./scripts/lib/
+ENTRYPOINT ["node", "--disable-warning=ExperimentalWarning", "scripts/provision-member.ts"]
+
 # The API image. It is the last stage, so a build without --target makes it.
 FROM base AS runtime
 EXPOSE 4000
