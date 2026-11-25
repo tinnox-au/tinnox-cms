@@ -251,12 +251,15 @@ an authenticator app at the first sign-in.
    does not match. Cognito documents `acr` `urn:cognito:loa:4` and `amr`
    `["pwd","otp","mfa"]` for a password plus an authenticator code through managed login,
    but says the claims are "rolling out gradually". Read a real token before choosing.
-4. **Provisioning.** `provision-member` reads a Cognito pool when the issuer is one
-   (`scripts/lib/idp.ts`): one `AdminGetUser` call, signed with the AWS credentials of the
-   person who runs it, and the username of a command is the person's e-mail address. It
-   has not run against the pool yet, and where it runs is not decided: it needs the
-   migrator's connection string and a route to the database, which only the server has,
-   while `docs/portal-v2/stage-c.md` section 8.2 says never to run it on the API's host.
+4. **Provisioning.** `infra/aws/provision.sh <environment> <command …>` runs
+   `provision-member` from a person's CloudShell, never on the server: it builds a small
+   image from the checkout (CloudShell is an Intel machine, so the server's ARM images do
+   not run there), opens a Session Manager port forward to the database through the
+   server, and gives the tool the migrator's connection string and the person's temporary
+   AWS credentials for as long as it runs. Against a Cognito pool the tool makes one
+   `AdminGetUser` call (`scripts/lib/idp.ts`), and the username of a command is the
+   person's e-mail address; the account is created first, in the Cognito console or with
+   `aws cognito-idp admin-create-user`.
 5. **The first sign-in.** The first release is done (25 November; the two host names
    are A records at GoDaddy, where the domain's DNS is hosted). What is left before
    anybody can use the environment is items 2 to 4: an organisation and its members
