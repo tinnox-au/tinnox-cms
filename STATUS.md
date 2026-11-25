@@ -36,7 +36,6 @@ None.
 | CMS-26 | Ruleset on main: no force push or deletion, merge or squash only, pull requests and the three CI jobs required (poteto D12, D14); Michael creates it | proposed | - | 22 Nov |
 | CMS-27 | Ask TINNOX whether DEC-13 (data stays in Australia) allows alert e-mails to mailboxes outside Australia (poteto D23) | proposed | - | 22 Nov |
 | CMS-29 | Revoke three unused tinnox_definer grants in a new migration: member_invite.invited_by SELECT, UPDATE on login_state and pairing_claim_failure (poteto step 6) | proposed | - | 23 Nov |
-| CMS-32 | Poteto pyramid refactor, group D: verification (steps 29 to 37 of the adoption plan); Michael starts it | proposed | - | 24 Nov |
 | CMS-33 | Poteto pyramid refactor, group E: frontend (steps 38 to 44a of the adoption plan); Michael starts it | proposed | - | 24 Nov |
 | CMS-34 | Poteto pyramid refactor, group F: prose (steps 45 to 48 of the adoption plan); Michael starts it | proposed | - | 24 Nov |
 | CMS-35 | Provider review for alert e-mail: name the reviewed SMTP host; production sends no alert e-mail until then (poteto D23) | proposed | - | 24 Nov |
@@ -53,6 +52,7 @@ None.
 | Id | Card | Agreed | PR | Since |
 |---|---|---|---|---|
 | CMS-4 | Real-hardware check on Raspberry Pi 5 (8GB) under Linux: the browser player in Chromium kiosk mode on a monitor | Michael 23 Nov | - | 23 Nov |
+| CMS-32 | Poteto pyramid refactor, group D: verification (steps 29 to 37 of the adoption plan); Michael starts it | Michael 25 Nov | - | 25 Nov |
 
 ## In review
 
