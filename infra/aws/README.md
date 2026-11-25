@@ -17,8 +17,8 @@ GitHub deployment environment `test` exists (main branch only, one required revi
 repository administrators can bypass it) and has its three variables. The first
 release ran on 25 November, from the Deploy workflow, and succeeded at the first attempt:
 four images pushed, sixteen migrations applied on RDS, three containers healthy, and both
-host names answer over https with Let's Encrypt certificates. No organisation and no user
-exist yet, so nobody has signed in. Section 9 lists what is unverified pending runtime.
+host names answer over https with Let's Encrypt certificates. The organisation "TINNOX Internal" and its first Owner exist (created with
+`provision.sh` on 25 November); nobody has signed in yet. Section 9 lists what is unverified pending runtime.
 
 ## 1. The account
 
@@ -261,9 +261,8 @@ an authenticator app at the first sign-in.
    person's e-mail address; the account is created first, in the Cognito console or with
    `aws cognito-idp admin-create-user`.
 5. **The first sign-in.** The first release is done (25 November; the two host names
-   are A records at GoDaddy, where the domain's DNS is hosted). What is left before
-   anybody can use the environment is items 2 to 4: an organisation and its members
-   need the provisioning tool run against the pool, and the first sign-in will show whether
+   are A records at GoDaddy, where the domain's DNS is hosted), and the first organisation
+   and Owner exist. What is left is items 2 and 3: the first sign-in will show whether
    `OIDC_MFA_AMR_VALUES=mfa` and the sign-out are right.
 
 ## 6. Running it
