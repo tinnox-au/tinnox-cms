@@ -39,6 +39,8 @@ async function flagged(path: string, code: string): Promise<string[]> {
 const SKIPPED = /^A skipped, focused or expected-to-fail test is a red run \(U-15\)/;
 const RANDOM = /^Do not call Math\.random\(\) in a test/;
 const MOCKED = /Integration and e2e tests use real services \(OTH-13/;
+const REPLAY = /^Do not commit a fast-check seed or path \(D11\)/;
+const FC_IMPORT = /^Import fast-check as `import fc from 'fast-check'`/;
 
 // The first case loads eslint.config.js, which a busy CI runner can stretch towards the unit
 // project's 5 s default (GAP-1).
@@ -164,6 +166,71 @@ describe('Math.random() in tests', () => {
 
   it('leaves product code alone', async () => {
     expect(await flagged('apps/player-web/src/platform/fixture.ts', 'Math.random();')).toEqual([]);
+  });
+});
+
+describe('fast-check replays (D11)', { timeout: 30_000 }, () => {
+  it.each([
+    ['packages/domain/src/fixture.property.test.ts', 'fc.assert(p, { seed: 1 });'],
+    ['packages/domain/src/fixture.property.test.ts', 'fc.assert(p, { numRuns: 50, path: "3:0" });'],
+    ['packages/domain/src/fixture.property.test.ts', "fc.check(p, { 'seed': 42 });"],
+    ['packages/domain/src/fixture.property.test.ts', 'fc.assert(p, { seed: 1 } as any);'],
+    ['packages/domain/src/fixture.property.test.ts', 'fc.assert(p, { seed: 1 } satisfies object);'],
+    ['packages/domain/src/fixture.property.test.ts', "fc['assert'](p, { seed: 1 });"],
+    ['apps/api/test/fixture.integration.test.ts', 'await fc.assert(p, { seed: 1 });'],
+    ['packages/db/test/fixture.integration.test.ts', 'fc.configureGlobal({ seed: 7 });'],
+    ['apps/portal/src/fixture.test.tsx', 'fc.assert(p, { path: "0:1" });'],
+    ['apps/portal/src/componentTests.setup.ts', 'fc.configureGlobal({ seed: 7 });'],
+  ])('flags a seed or path in %s: %s', async (path, code) => {
+    const messages = await flagged(path, code);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatch(REPLAY);
+    expect(messages[0]).toMatch(
+      /plain example test .*packages\/domain\/src\/layout\.property\.test\.ts/,
+    );
+  });
+
+  it.each([
+    'fc.record({ path: fc.string() });',
+    'fc.assert(fc.property(fc.record({ seed: fc.nat(), path: fc.string() }), () => true));',
+    'fc.assert(p, { numRuns: 200, verbose: true });',
+    'fc.configureGlobal({ numRuns: 200 });',
+    'other.assert(p, { seed: 1 });',
+  ])('leaves %s alone', async (code) => {
+    expect(await flagged('packages/domain/src/fixture.property.test.ts', code)).toEqual([]);
+  });
+
+  it('flags fast-check imported under another name, which the seed rule cannot see', async () => {
+    for (const code of [
+      "import { assert } from 'fast-check';",
+      "import check from 'fast-check';",
+      "import fc, { property } from 'fast-check';",
+      "import * as f from 'fast-check';",
+    ]) {
+      expect(await flagged('packages/domain/src/fixture.property.test.ts', code)).toEqual([
+        expect.stringMatching(FC_IMPORT),
+      ]);
+    }
+    for (const code of [
+      "import fc from 'fast-check';",
+      "import * as fc from 'fast-check';",
+      "import type { Arbitrary } from 'fast-check';",
+      "import fc, { type Arbitrary } from 'fast-check';",
+    ]) {
+      expect(await flagged('packages/domain/src/fixture.property.test.ts', code)).toEqual([]);
+    }
+  });
+
+  it('keeps the other test rules where it flags a seed', async () => {
+    const messages = await flagged(
+      'packages/domain/src/fixture.property.test.ts',
+      "it.skip('a', () => {}); Math.random(); fc.assert(p, { seed: 1 });",
+    );
+    expect(messages).toEqual([
+      expect.stringMatching(SKIPPED),
+      expect.stringMatching(RANDOM),
+      expect.stringMatching(REPLAY),
+    ]);
   });
 });
 

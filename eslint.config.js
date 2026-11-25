@@ -197,6 +197,35 @@ const NO_RANDOM_IN_TESTS = [
   },
 ];
 
+// D11 (adoption plan step 29): every fast-check run draws a fresh seed, so a property keeps
+// exploring. A seed or path in the options of the runner replays one run for ever, and stops
+// reproducing once a generator changes. The options object is matched as a direct child of the
+// call (or under `as` or `satisfies`; a computed `fc['assert']` counts), so a generator's own fields (`fc.record({ path: fc.string() })`) pass. The second entry
+// keeps the runner reachable as `fc`, the only name the first one sees (types may be imported by
+// name). Not seen: options held in a variable or spread from one.
+const FC_RUNNER_CALL =
+  "CallExpression[callee.object.name='fc']:matches([callee.property.name=/^(assert|check|configureGlobal)$/], [callee.property.value=/^(assert|check|configureGlobal)$/])";
+const FC_REPLAY_PROPERTY =
+  'Property:matches([key.name=/^(seed|path)$/], [key.value=/^(seed|path)$/])';
+const FC_REPLAY_SELECTOR = [
+  `${FC_RUNNER_CALL} > ObjectExpression > ${FC_REPLAY_PROPERTY}`,
+  `${FC_RUNNER_CALL} > TSAsExpression > ObjectExpression > ${FC_REPLAY_PROPERTY}`,
+  `${FC_RUNNER_CALL} > TSSatisfiesExpression > ObjectExpression > ${FC_REPLAY_PROPERTY}`,
+].join(', ');
+const NO_FC_REPLAY = [
+  {
+    selector: FC_REPLAY_SELECTOR,
+    message:
+      'Do not commit a fast-check seed or path (D11): every run draws its own seed, and a replay stops reproducing once a generator changes. Add the shrunk counterexample that the failure printed as a plain example test in the same *.property.test.ts, beside its fix (as in packages/domain/src/layout.property.test.ts).',
+  },
+  {
+    selector:
+      "ImportDeclaration[source.value='fast-check'][importKind!='type'] > :matches(ImportSpecifier[importKind!='type'], ImportDefaultSpecifier[local.name!='fc'], ImportNamespaceSpecifier[local.name!='fc'])",
+    message:
+      "Import fast-check as `import fc from 'fast-check'` and call it through `fc` (fc.property, fc.assert, fc.integer): the lint that keeps seeds and paths out of committed tests (D11) sees runner calls on `fc` only.",
+  },
+];
+
 // RCX-03 (adoption plan step 23): a status asserted as a range or as "not 401" passes on a 500, a
 // 429 or any other answer nobody meant. Matched on expect(...) and expect.soft(...) whose subject
 // reads a status: a `.status` or `.statusCode` member (optional, awaited or Playwright's
@@ -2416,6 +2445,7 @@ export default tseslint.config(
         'error',
         ...NO_SKIPPED_TESTS,
         ...NO_RANDOM_IN_TESTS,
+        ...NO_FC_REPLAY,
         ...NO_RANGE_STATUS,
         ...NO_BRAND_CAST,
         ...NO_HTML_SINK_CALLS,
@@ -2430,6 +2460,7 @@ export default tseslint.config(
         'error',
         ...NO_SKIPPED_TESTS,
         ...NO_RANDOM_IN_TESTS,
+        ...NO_FC_REPLAY,
         ...NO_RANGE_STATUS,
         ...NO_RESPONSE_NOT_OK,
         ...NO_BRAND_CAST,
@@ -2446,6 +2477,7 @@ export default tseslint.config(
         ...NO_RAW_HTML,
         ...NO_SKIPPED_TESTS,
         ...NO_RANDOM_IN_TESTS,
+        ...NO_FC_REPLAY,
         ...NO_RANGE_STATUS,
         ...NO_BARE_KEYBOARD,
         ...NO_BRAND_CAST,
@@ -2464,6 +2496,7 @@ export default tseslint.config(
         ...NO_RAW_HTML,
         ...NO_SKIPPED_TESTS,
         ...NO_RANDOM_IN_TESTS,
+        ...NO_FC_REPLAY,
         ...NO_RANGE_STATUS,
         ...NO_BRAND_CAST,
         ...NO_HTML_SINK_CALLS,

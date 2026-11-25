@@ -219,6 +219,8 @@ export const PUBLISH_REJECTION_CODES = [
   'audio_unsupported',
   'multiple_regions_unsupported',
   'zone_too_small',
+  'zone_count_out_of_range',
+  'zone_overlap',
 ] as const;
 export const PublishRejectionCodeSchema = z.enum(PUBLISH_REJECTION_CODES);
 export type PublishRejectionCode = z.infer<typeof PublishRejectionCodeSchema>;
