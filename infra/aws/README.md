@@ -250,10 +250,10 @@ an authenticator app at the first sign-in.
    `["pwd","otp","mfa"]` for a password plus an authenticator code through managed login,
    but says the claims are "rolling out gradually". Read a real token before choosing.
 4. **The provisioning tool** reads users from Keycloak only (`scripts/lib/idp.ts`).
-5. **The first release.** Everything before it is done except DNS: the stacks are
-   updated, `bootstrap.sh` has run, the GitHub variables are set. The workflow can be
-   started once it is on `main`. Without the DNS records the release itself can succeed,
-   but Caddy cannot get certificates, so nothing answers on the host names.
+5. **The first release.** Everything before it is done: the stacks are updated,
+   `bootstrap.sh` has run, the GitHub variables are set, and the two host names resolve to
+   the server (A records at GoDaddy, where the domain's DNS is hosted, 25 November). The
+   workflow can be started once it is on `main`.
 
 ## 6. Running it
 
