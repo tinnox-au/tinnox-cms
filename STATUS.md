@@ -3,7 +3,7 @@ contract: status/v2
 repo: tinnox-au/tinnox-cms
 initiative: TINNOX CMS
 key: CMS
-next_id: 40
+next_id: 41
 phase: Not written yet: one sentence on what this project is and where it stands
 gate: -
 seeded: 17 Nov 2026 by status init
@@ -41,6 +41,7 @@ None.
 | CMS-36 | Decide two unaudited writes: an alert episode closed without an e-mail, and the expiry mark on a pairing session; audit or exempt them in D3 (poteto step 16) | proposed | - | 24 Nov |
 | CMS-38 | Player push channel for instant commands (reload, restart, screenshot): the player only polls today; add when a customer needs faster than the 15 s poll | proposed | - | 24 Nov |
 | CMS-39 | Compiled API image before stage 1 (first customer): add a build step and a CI job that tests the compiled build; stage 0 runs the API through tsx | proposed | - | 25 Nov |
+| CMS-40 | Sign-in that fails on a server error shows a raw JSON 500; redirect to the sign-in page with an error instead | proposed | - | 25 Nov |
 
 ## To do
 
@@ -332,3 +333,6 @@ from: CMS-37
 
 **Notes**
 - 25 Nov: 25 Nov: the stage 0 image (pull request 42) runs the source on Node 24's type stripping: production dependencies only, no tsx. Left for this card: CI tests the API through tsx on Node 22, so before stage 1 CI tests the image as built or a compiled build replaces it.
+
+### CMS-40
+from: CMS-32
