@@ -241,6 +241,9 @@ from: CMS-23
 ### CMS-26
 from: CMS-24
 
+**Notes**
+- 25 Nov: Michael, 25 Nov: ruleset 'main' created and active on the default branch: no deletion, no force push, pull request required (0 approvals, merge or squash only), the three ci.yml checks required, not strict; Repository admin bypass always. e2e not required yet (D14).
+
 ### CMS-27
 from: CMS-23
 
