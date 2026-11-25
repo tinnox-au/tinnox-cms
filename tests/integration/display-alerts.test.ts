@@ -21,7 +21,6 @@ import {
   confirmAlertAddress,
   createDisplay,
   createOrg,
-  expectError,
   faultHarness,
   faultyPool,
   heartbeatBody,
@@ -558,34 +557,8 @@ describe('alert addresses', () => {
     expect(JSON.stringify(await auditEvents(owner))).not.toContain('new.person');
   });
 
-  it('sends no confirmation when the COMMIT that stores an address does not confirm, and adding it again answers 409 (SCX-03, D9)', async () => {
-    const lossy = await startTestApp({}, 1000, {
-      wrapPool: (pool) =>
-        faultyPool(pool, { mode: 'lost-commit-answer', at: /INSERT INTO alert_recipient/ }),
-    });
-    try {
-      const operator = await signIn(lossy, await createOrg('Alert address unconfirmed'));
-      const answer = await addAlertAddress(operator, 'maybe@example.com');
-      expect(answer.headers.get('retry-after')).toBeNull();
-      await expectError(answer, 'commit_outcome_unknown');
-      // No link goes to an address the server cannot say it stored.
-      expect(lossy.sentMail).toEqual([]);
-      // It was stored: the list shows it waiting...
-      expect(await (await operator.fetch('/api/alert-recipients')).json()).toMatchObject({
-        items: [{ email: 'maybe@example.com', status: 'waiting' }],
-      });
-      // ...and sending the request again neither adds a second row nor mails the first.
-      const again = await addAlertAddress(operator, 'maybe@example.com');
-      expect((await expectError(again, 'conflict')).message).toBe(
-        'This address is already on the alert list.',
-      );
-      expect(lossy.sentMail).toEqual([]);
-      const added = (await auditEvents(operator, '&category=alert_recipient')).map((e) => e.action);
-      expect(added).toEqual(['alert_recipient.add']);
-    } finally {
-      await lossy.close();
-    }
-  });
+  // An address whose COMMIT answer is lost (no confirmation, then 409 on a repeat; SCX-03, D9) is
+  // the row of POST /api/alert-recipients in apps/api/test/commit-outcome.integration.test.ts.
 
   it('refuses an address that is not one, and unknown fields', async () => {
     expect((await addAlertAddress(owner, 'not an address')).status).toBe(400);

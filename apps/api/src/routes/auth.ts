@@ -28,7 +28,6 @@ import {
 import {
   auditStandalone,
   changePreOrg,
-  classifyDbError,
   loginStatePut,
   loginStateTake,
   poolAsTx,
@@ -36,9 +35,11 @@ import {
   sessionCreate,
   sessionRevoke,
   sessionRevokeUnaudited,
+  settle,
   sha256,
   unaudited,
   type Change,
+  type DbFailure,
   type SessionCreateResult,
 } from '@tinnox/db';
 import { permissionsOf } from '@tinnox/domain';
@@ -92,9 +93,45 @@ function clearLoginCookie(ctx: AppContext, reply: FastifyReply): void {
   });
 }
 
+/** The `reason` of the `auth.login` failure row a sign-in writes when its transaction rolled back. */
+type LoginFailureReason = 'member_locked' | 'database_error' | 'server_error';
+
+/**
+ * Why a sign-in's transaction rolled back, as classifyDbError of @tinnox/db read its error
+ * (SCR-07): one of three fixed words, so the row never carries the error's text.
+ * - `member_locked`: a transient failure; a wait past the lock timeout for the member row, and
+ *   since step 26 a deadlock, a serialization failure or a statement timeout too.
+ * - `database_error`: any other error the database raised.
+ * - `server_error`: not an error of the database; a lost connection, or an error of the API.
+ */
+function loginFailureReason(failure: DbFailure | null): LoginFailureReason {
+  if (failure === null) return 'server_error';
+  switch (failure.kind) {
+    case 'transient':
+      return 'member_locked';
+    case 'constraint':
+    case 'unmapped_constraint':
+    case 'denied':
+    case 'other':
+      return 'database_error';
+  }
+}
+
 export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void {
   const authRateLimit = { rateLimit: perMinute(ctx, 30) };
   const unscoped = poolAsTx(ctx.db);
+
+  /** The unscoped failure row of a sign-in whose transaction rolled back (auditStandalone, D2). */
+  const recordLoginFailure = (reason: LoginFailureReason): Promise<void> =>
+    auditStandalone(ctx.db, {
+      actorType: 'anonymous',
+      actorId: null,
+      action: 'auth.login',
+      objectType: null,
+      objectId: null,
+      result: 'failure',
+      detail: { reason },
+    });
 
   app.get(
     ROUTES.authLogin,
@@ -220,9 +257,8 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
       const idToken =
         identity.idToken !== null && identity.idToken.length <= 8192 ? identity.idToken : null;
       const statement = routeStatement(request);
-      let created: SessionCreateResult;
-      try {
-        created = await changePreOrg(
+      const ended = await settle(
+        changePreOrg(
           ctx.db,
           statement,
           async (pre, enterOrg): Promise<Change<SessionCreateResult>> => {
@@ -287,30 +323,40 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
               },
             };
           },
-        );
-      } catch (error) {
-        // A member change held the member row past lock_timeout, or another transient failure
-        // (a deadlock, a serialization failure, a statement timeout) ended the transaction:
-        // nothing was committed, the transaction's audit row included, so the failed sign-in is
-        // recorded on its own (step 26: the classifier's transient kind, not one SQLSTATE).
-        const failure = classifyDbError(error);
-        if (failure?.kind === 'transient') {
-          request.log.warn(
-            { pgCode: failure.sqlstate },
-            'sign-in ended by a lock wait or another transient failure',
-          );
-          await auditStandalone(ctx.db, {
-            actorType: 'anonymous',
-            actorId: null,
-            action: 'auth.login',
-            objectType: null,
-            objectId: null,
-            result: 'failure',
-            detail: { reason: 'member_locked' },
+        ),
+      );
+      let created: SessionCreateResult;
+      switch (ended.end) {
+        case 'committed':
+          created = ended.value;
+          break;
+        case 'rolled_back': {
+          // Nothing was committed, the transaction's audit row included, so the failed sign-in
+          // is recorded on its own, whatever ended it (SCR-07; adoption plan step 33). The
+          // reason is the classifier's reading of the error, never the error's own text.
+          const reason = loginFailureReason(ended.failure);
+          if (ended.failure?.kind === 'transient') {
+            // A member change held the member row past lock_timeout, or a deadlock, a
+            // serialization failure or a statement timeout ended the transaction (step 26).
+            request.log.warn(
+              { pgCode: ended.failure.sqlstate },
+              'sign-in ended by a lock wait or another transient failure',
+            );
+            await recordLoginFailure(reason);
+            return failureRedirect(ctx, reply, 'provider_unavailable');
+          }
+          // Any other failure keeps its answer. A row that cannot be written either (the
+          // database may be what failed) is logged, and the first error is still the answer.
+          await recordLoginFailure(reason).catch((auditError: unknown) => {
+            request.log.error({ err: auditError }, 'a failed sign-in could not be recorded');
           });
-          return failureRedirect(ctx, reply, 'provider_unavailable');
+          throw ended.error;
         }
-        throw error;
+        case 'unknown':
+          // COMMIT did not confirm: the session and its auth.login row may both be stored, so
+          // no failure row is written beside them. The browser gets no cookie either way (D9:
+          // a GET answers internal_error).
+          throw ended.unconfirmed;
       }
 
       if (created.outcome === 'no_membership') {

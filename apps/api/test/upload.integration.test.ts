@@ -792,43 +792,127 @@ describe('upload limits and validation results', () => {
     }
   });
 
-  it('keeps the refusal of an upload whose refusal row lost the answer to its COMMIT, not commit_outcome_unknown: nothing of the upload was saved (SEC-1 of the group C review)', async () => {
-    const before = await mediaCount();
-    const emptyFileRefusals = async (): Promise<{ result: string }[]> =>
-      withOrg(t.pool, org.orgId, async (tx) => {
-        const { rows } = await tx.query<{ result: string }>(
-          `SELECT result FROM audit_event
-           WHERE action = 'media.upload' AND detail->>'reason' = 'empty_file'`,
+  // Every refusal of an upload that is recorded in a transaction of its own (recordUploadRefusal,
+  // routes/media.ts), six cases for the six sites: the empty file, content of an unrecognised
+  // type, a declared length far above the limit, a body cut off at the file limit, a full quota
+  // refused before the body is read, and a body cut off at the quota that is left. Step 33 of the
+  // adoption plan; until then only the empty file was driven.
+  describe('an upload refused before any row was written, whose refusal row lost the answer to its COMMIT', () => {
+    let lossy: TestApp;
+
+    beforeAll(async () => {
+      // The marker is the refusal's audit row, the only audit row this app writes: signIn writes
+      // the session on the test's own pool.
+      lossy = await startTestApp(
+        {
+          LIMIT_MAX_UPLOAD_BYTES: String(UPLOAD_LIMIT),
+          LIMIT_MAX_ORG_STORAGE_BYTES: String(QUOTA),
+        },
+        1000,
+        {
+          wrapPool: (pool) =>
+            faultyPool(pool, { mode: 'lost-commit-answer', at: /INSERT INTO audit_event/ }),
+        },
+      );
+    });
+    afterAll(async () => {
+      await lossy.close();
+    });
+
+    /** Uses up the organisation's quota with ready media of `sizes` KiB, arranged as rows. */
+    const fill = async (o: TestOrg, sizes: readonly number[]): Promise<void> => {
+      for (const size of sizes) {
+        await asMigratorIn(o.orgId, (c) =>
+          c.query(
+            `INSERT INTO media (id, org_id, kind, status, mime_type, bytes, sha256, width, height, storage_key, original_name)
+             VALUES ($1, $2, 'image', 'ready', 'image/png', $3, $4, 4, 4, $5, 'filler.png')`,
+            [randomUUID(), o.orgId, size * 1024, 'ab'.repeat(32), `${o.orgId}/${randomUUID()}`],
+          ),
+        );
+      }
+    };
+    const refusalRows = (o: TestOrg): Promise<{ result: string; detail: unknown }[]> =>
+      withOrg(t.pool, o.orgId, async (tx) => {
+        const { rows } = await tx.query<{ result: string; detail: unknown }>(
+          `SELECT result, detail FROM audit_event
+           WHERE action = 'media.upload' AND result <> 'success' ORDER BY id`,
         );
         return rows;
       });
-    const refusedBefore = (await emptyFileRefusals()).length;
-    // The marker is the refusal's audit row, the only audit row this app writes: signIn writes
-    // the session on the test's own pool.
-    const lossy = await startTestApp(
+
+    it.each([
       {
-        LIMIT_MAX_UPLOAD_BYTES: String(UPLOAD_LIMIT),
-        LIMIT_MAX_ORG_STORAGE_BYTES: String(QUOTA),
+        refused: 'an empty file',
+        used: [],
+        file: () => Buffer.alloc(0),
+        answer: 'bad_request',
+        message: 'The file is empty.',
+        row: { result: 'failure', detail: { reason: 'empty_file' } },
       },
-      1000,
       {
-        wrapPool: (pool) =>
-          faultyPool(pool, { mode: 'lost-commit-answer', at: /INSERT INTO audit_event/ }),
+        refused: 'content that is not JPEG, PNG or MP4',
+        used: [],
+        file: () => Buffer.from('just text pretending to be a photo'),
+        answer: 'unsupported_media_type',
+        message:
+          'The file content is not a JPEG, PNG or MP4 file. The file name and extension are ignored; only the content counts.',
+        row: { result: 'failure', detail: { reason: 'unrecognised_type', bytes: 34 } },
+      },
+      {
+        refused: 'a declared size far above the limit',
+        used: [],
+        file: () => fakePng(4 * 1024 * 1024),
+        answer: 'payload_too_large',
+        message: 'The file is larger than the upload limit of 0.1 MB.',
+        // The declared length is that of the whole body, so only its presence is asserted.
+        row: {
+          result: 'denied',
+          detail: { reason: 'too_large', declaredBytes: expect.any(Number) as number },
+        },
+      },
+      {
+        refused: 'a file one byte over the limit, cut off while it is received',
+        used: [],
+        file: () => fakePng(UPLOAD_LIMIT + 1),
+        answer: 'payload_too_large',
+        message: 'The file is larger than the upload limit of 0.1 MB.',
+        row: { result: 'denied', detail: { reason: 'too_large' } },
+      },
+      {
+        refused: 'a full quota, before the body is read',
+        used: [60, 60, 60, 20],
+        file: () => fakePng(1024),
+        answer: 'storage_quota_exceeded',
+        message: "The organisation's storage is full (0.2 MB). Delete unused media first.",
+        row: { result: 'denied', detail: { reason: 'storage_quota_exceeded' } },
+      },
+      {
+        refused: 'a file larger than the quota that is left, cut off while it is received',
+        used: [60, 60, 60],
+        file: () => fakePng(30 * 1024),
+        answer: 'storage_quota_exceeded',
+        message: 'The file does not fit in the remaining storage (0.0 MB free).',
+        row: { result: 'denied', detail: { reason: 'storage_quota_exceeded' } },
+      },
+    ] as const)(
+      'keeps the refusal of $refused ($answer), not commit_outcome_unknown: nothing of the upload was saved (SEC-1 of the group C review)',
+      async ({ used, file, answer, message, row }) => {
+        const refusedOrg = await createOrg('Upload refusal unconfirmed');
+        await fill(refusedOrg, used);
+        const before = await mediaCount(refusedOrg);
+        const owner = await signIn(lossy, refusedOrg);
+
+        const response = await uploadBytes(owner, file(), 'refused.png');
+        expect(response.headers.get('retry-after')).toBeNull();
+        expect((await expectError(response, answer)).message).toBe(message);
+
+        // The refusal row did commit, once; only its answer was lost.
+        expect(await refusalRows(refusedOrg)).toEqual([row]);
+        // Nothing of the upload was kept: no row and no received bytes.
+        expect(await mediaCount(refusedOrg)).toBe(before);
+        expect(await listDir(join(lossy.jobsDir, 'inbox'))).toEqual([]);
       },
     );
-    try {
-      const owner = await signIn(lossy, org);
-      const answer = await uploadBytes(owner, Buffer.alloc(0), 'empty.png');
-      expect((await expectError(answer, 'bad_request')).message).toBe('The file is empty.');
-      // The refusal row did commit; only its answer was lost.
-      const refusals = await emptyFileRefusals();
-      expect(refusals).toHaveLength(refusedBefore + 1);
-      expect(refusals.every((row) => row.result === 'failure')).toBe(true);
-      expect(await mediaCount()).toBe(before);
-      expect(await listDir(join(lossy.jobsDir, 'inbox'))).toEqual([]);
-    } finally {
-      await lossy.close();
-    }
   });
 
   it('answers a POST whose only lost COMMIT was a read with internal_error, not commit_outcome_unknown: a read-only transaction changed nothing (step 24, D9)', async () => {

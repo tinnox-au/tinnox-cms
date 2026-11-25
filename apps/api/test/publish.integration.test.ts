@@ -4,14 +4,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   CLOCK,
   appItem,
-  auditEvents,
   createApp,
   createDisplay,
   createOrg,
   createPlaylist,
-  desiredPublicationId,
-  expectError,
-  faultyPool,
   imageItem,
   pairPlayer,
   pngBytes,
@@ -110,46 +106,8 @@ describe('publishing', () => {
     expect(lateBody.manifest.assets).toHaveLength(2);
   });
 
-  it('answers commit_outcome_unknown when the COMMIT of a publish does not confirm, and the same key then replays the one publication it made (SCX-03, D9)', async () => {
-    const display = await createDisplay(alice, orgA);
-    const image = await readyImage(t, alice);
-    const playlistId = await playlistWith(alice, [image.id]);
-    // Every publication of this app commits for real, and the answer to its COMMIT is lost.
-    const lossy = await startTestApp({}, 1000, {
-      wrapPool: (pool) =>
-        faultyPool(pool, { mode: 'lost-commit-answer', at: /INSERT INTO publication \(id/ }),
-    });
-    try {
-      const operator = await signIn(lossy, orgA);
-      const key = randomUUID();
-      const publish = (): Promise<Response> =>
-        operator.fetch(`/api/playlists/${playlistId}/publish`, {
-          method: 'POST',
-          json: { displayId: display.id },
-          headers: { 'idempotency-key': key },
-        });
-      const lost = await publish();
-      expect(lost.headers.get('retry-after')).toBeNull();
-      await expectError(lost, 'commit_outcome_unknown');
-      // The publication exists, once: the server did not run the publish again by itself.
-      expect(await publicationCount(orgA, display.id)).toBe(1);
-
-      // The client's repeat with the same key finds it and creates nothing.
-      const again = await publish();
-      expect(again.status).toBe(200);
-      const body = (await again.json()) as Publish;
-      expect(body.replayed).toBe(true);
-      expect(await publicationCount(orgA, display.id)).toBe(1);
-      expect(await desiredPublicationId(alice, display.id)).toBe(body.publicationId);
-      // One audit row for the publication, none for the replay.
-      const created = (await auditEvents(alice, '&category=publication')).filter(
-        (e) => e.objectId === body.publicationId,
-      );
-      expect(created.map((e) => [e.action, e.result])).toEqual([['publication.create', 'success']]);
-    } finally {
-      await lossy.close();
-    }
-  });
+  // A publish whose COMMIT answer is lost, and the replay of its key afterwards (SCX-03, D9), is
+  // the row of this route in the commit-outcome table (./commit-outcome.integration.test.ts).
 
   it('writes manifest v1 at the default options and v2 with fade, which the player is served', async () => {
     const display = await createDisplay(alice, orgA);
