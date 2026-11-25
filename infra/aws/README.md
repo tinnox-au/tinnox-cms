@@ -1,9 +1,9 @@
 # AWS infrastructure for a deployed environment
 
-Four CloudFormation templates that create what stage 0 of
-`docs/deployment-plan-2026-11-24.md` runs on, in Sydney (ap-southeast-2). They create
-infrastructure only. They start no container, hold no secret and run no migration: the
-deploy step and the database role set-up come after them and are not written yet.
+Five CloudFormation templates, in Sydney (ap-southeast-2): four that create what stage 0
+of `docs/deployment-plan-2026-11-24.md` runs on, and `account.yml` for the account as a
+whole. They create infrastructure only. They start no container, hold no secret and run no
+migration: `bootstrap.sh` and a release do that (section 4).
 
 **Status, 25 November 2026.** All four stacks exist in Sydney, created and updated from
 CloudShell: `tinnox-cms-test` from `environment.yml` (server, release document),
@@ -42,8 +42,8 @@ On 25 November the account had 13 IAM roles, all of them AWS's own; the other se
 no role. So today only the people who administer the account can read what the templates
 protect. The protections matter once another system's role exists.
 
-Spend limits ended with activation. A budget alert takes their place and is not set yet
-(section 8).
+Spend limits ended with activation. A budget warning by e-mail takes their place
+(`account.yml`); it stops nothing.
 
 ## 2. The templates
 
@@ -53,6 +53,7 @@ Spend limits ended with activation. A budget alert takes their place and is not 
 | `database.yml` | `tinnox-cms-test-database` | RDS PostgreSQL 17, one zone (the server's), 7 days of backups, in subnets with no route to the internet | US$21 |
 | `identity.yml` | `tinnox-cms-test-identity` | Cognito user pool with an authenticator app required, the sign-in pages, the API's app client | US$0 |
 | `delivery.yml` | `tinnox-cms-delivery` | Four image repositories, the GitHub identity provider, the deploy role | under US$1 |
+| `account.yml` | `tinnox-account` | For the whole account, not the CMS alone: a CloudTrail trail of management events from every Region into its own bucket (kept a year), and a monthly budget that e-mails a warning | cents |
 
 The costs are estimates from the prices of 24 November 2026: server US$15.50 (t4g.small),
 disks US$4.40, public address US$3.65, key US$1, snapshots and logs about US$1; database
@@ -68,7 +69,7 @@ delivery stack cannot exist yet.
 **Where this differs from the plan.** Container logs go to CloudWatch Logs, not to files
 on the server: at this volume it costs cents and the logs survive the server. The disk is
 two disks, 16 GB for the system and 30 GB for data, so the server can be replaced without
-losing data. There is no CloudTrail trail and no budget alert yet (section 8). DNS records
+losing data. The account's CloudTrail trail and budget warning are in `account.yml`. DNS records
 are only created when the domain's zone is in Route 53 in this account, which it is not.
 
 ## 3. Creating the stacks
@@ -127,6 +128,14 @@ In Sydney, in this order. For every stack:
    GitHub deployment environment `test`, limited to the main branch and with required
    reviewers: GitHub creates a missing environment, unprotected, for the first job that
    names it. It needs `--capabilities CAPABILITY_IAM`, as step 1 does.
+
+6. **`account.yml`** as `tinnox-account`, once for the account. It needs no
+   `--capabilities`, and two parameters: `MonthlyLimitUsd` and `AlertEmail`. It is not
+   tagged `project` = `tinnox-cms`: it covers the other system too, and that tag is what
+   tells the CMS's costs apart. Before creating it, check that no trail already covers
+   the account (`aws cloudtrail describe-trails --include-shadow-trails`): a second copy
+   of management events is charged. If the creation fails, update the failed stack
+   rather than delete it, or an empty bucket stays behind each time.
 
 ## 4. Before the first release, and what a release does
 
@@ -249,7 +258,8 @@ an authenticator app at the first sign-in.
    to the registered URL. The identity stack is updated before the API release that
    needs it: the new API with the old app client would fail every sign-out the same
    way. The API refuses to start with a post-logout URI other than `<portal>/` against a
-   Cognito pool. Not yet seen in a browser with the new release.
+   Cognito pool. Seen in a browser on 25 November, after the release: sign-out returns to the portal
+   with its notice, and the next sign-in asks for the password and the code.
 3. **Proof of the second factor: settled for `amr`.** The API runs with
    `OIDC_MFA_AMR_VALUES=mfa` and refuses every sign-in whose token lacks it. The first
    sign-in through Cognito's managed login, with a password and an authenticator code,
@@ -351,6 +361,7 @@ credentials in AWS Secrets Manager"). Bringing the restored instance under the s
 What stays behind on purpose, and keeps costing until removed by hand:
 
 - the final database snapshot;
+- the trail's bucket (`account.yml`), with its files, which its own rule expires;
 - the final data disk snapshot and the last nightly ones (cents each);
 - the secrets key (US$1 a month), until its deletion is scheduled in the KMS console;
 - the parameters under `/tinnox-cms/test/` (free). They stay encrypted with the old key:
@@ -386,9 +397,11 @@ What stays behind on purpose, and keeps costing until removed by hand:
 
 ## 8. Not in these templates
 
-- CloudTrail. The account has no trail; the console's event history keeps 90 days.
-- A budget alert. A budget for the CMS alone needs its tag activated for cost allocation,
-  which is done in the organisation's management account.
+- A budget for the CMS alone. `account.yml` warns about the whole account's bill; one for
+  the CMS needs its tag activated for cost allocation, which is done in the
+  organisation's management account.
+- A record of data events (each object or parameter read). The trail records management
+  events only.
 - Alarms, dashboards, VPC flow logs: monitoring is left out of stage 0 on purpose.
 - S3 for media (month two), e-mail (off), a second zone, Melbourne.
 

@@ -146,8 +146,14 @@ Resources:
       IdTokenValidity: 5
       AccessTokenValidity: 5
       RefreshTokenValidity: 60
-      # Long enough to set up an authenticator app at the first sign-in.
-      AuthSessionValidity: 15
+      # How long a person has for one step of the sign-in pages (password, new password,
+      # authenticator set-up, code). The API gives a sign-in it has started ten minutes
+      # in all (LOGIN_STATE_TTL_SECONDS in apps/api/src/routes/auth.ts), so a longer step
+      # here could only end in a sign-in the API refuses as too late. It does not make the
+      # two limits one: several steps of under ten minutes each can still add up to more,
+      # and the person then starts again from the portal. Someone new should install the
+      # authenticator app before they begin.
+      AuthSessionValidity: 10
       # With the scope "openid" the ID token carries every attribute the client may
       # read. The API needs none of them, and the rule is no name or e-mail in the token.
       ReadAttributes: [email_verified]

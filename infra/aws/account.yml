@@ -1,0 +1,212 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  TINNOX, what the AWS account needs whatever runs in it: a record of who did what
+  (a CloudTrail trail into a bucket of its own) and an e-mail when the month's bill
+  passes a limit. One stack for the account, in Sydney. It covers everything in the
+  account, the CMS and the other system alike. See infra/aws/README.md.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Bill }
+        Parameters: [MonthlyLimitUsd, AlertEmail]
+      - Label: { default: Record of actions }
+        Parameters: [TrailRetentionDays]
+
+Parameters:
+  MonthlyLimitUsd:
+    Type: Number
+    MinValue: 1
+    Description: >-
+      The month's bill for the whole account, in US dollars, that should not be passed.
+      An e-mail is sent at 80 % and at 100 % of it, and when AWS forecasts the month
+      will end above it. Nothing is stopped: it is a warning, not a spend limit.
+  AlertEmail:
+    Type: String
+    AllowedPattern: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+    ConstraintDescription: One e-mail address.
+    Description: Who gets the bill warnings. It is stored in the budget, not in this repository.
+  TrailRetentionDays:
+    Type: Number
+    Default: 365
+    MinValue: 90
+    MaxValue: 3650
+    Description: >-
+      How long the record of actions is kept in its bucket. A file is marked deleted after
+      this many days and removed for good 30 days later.
+
+Rules:
+  Sydney:
+    Assertions:
+      - Assert: !Equals [!Ref 'AWS::Region', ap-southeast-2]
+        AssertDescription: The account's baseline is kept in Sydney (ap-southeast-2).
+
+Resources:
+  # ------------------------------------------------------------------ record of actions
+  # The console's own event history keeps 90 days and cannot be exported as a whole. A
+  # trail keeps this account's management events (who created, changed or deleted what)
+  # from every Region, the global services included. Sign-ins of people and changes to
+  # the organisation's policies happen in the organisation's other accounts and are not
+  # in it. Data events (each object read or written) are not recorded: they cost money
+  # and stage 0 has no need of them.
+  #
+  # What the record is worth: each file has a signed digest (log file validation), so a
+  # changed or missing file shows when someone runs `aws cloudtrail validate-logs`. It
+  # does not stop an administrator of this account, who can delete files and digests
+  # alike, or change the bucket's rules; then the gap in the digests and the 90 days of
+  # event history are what remains. Only S3 Object Lock would stop that, and it is not
+  # used here.
+  TrailBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      VersioningConfiguration: { Status: Enabled }
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-the-record
+            Status: Enabled
+            ExpirationInDays: !Ref TrailRetentionDays
+            NoncurrentVersionExpiration: { NoncurrentDays: 30 }
+            AbortIncompleteMultipartUpload: { DaysAfterInitiation: 7 }
+
+  # Among AWS services only this account's trail may write, and only under its own
+  # prefix. Nothing reaches the bucket without TLS. No person or role may write or delete
+  # a file: only AWS's own services do (the trail writes, the lifecycle rule expires).
+  # That keeps another system's role out even if it holds wide S3 rights; it does not
+  # bind an administrator, who can change this policy. Reading is left to this account's
+  # own identities, by their own policies.
+  TrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TrailBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: TrailChecksTheBucket
+            Effect: Allow
+            Principal: { Service: cloudtrail.amazonaws.com }
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt TrailBucket.Arn
+            Condition:
+              StringEquals:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/tinnox-account'
+          - Sid: TrailWritesItsFiles
+            Effect: Allow
+            Principal: { Service: cloudtrail.amazonaws.com }
+            Action: s3:PutObject
+            Resource: !Sub '${TrailBucket.Arn}/AWSLogs/${AWS::AccountId}/*'
+            Condition:
+              StringEquals:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/tinnox-account'
+                s3:x-amz-acl: bucket-owner-full-control
+          - Sid: NoPersonOrRoleWritesOrDeletes
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:DeleteObjectVersion
+            Resource: !Sub '${TrailBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:PrincipalIsAWSService: 'false'
+          - Sid: NothingWithoutTls
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt TrailBucket.Arn
+              - !Sub '${TrailBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  Trail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn: TrailBucketPolicy
+    Properties:
+      TrailName: tinnox-account
+      S3BucketName: !Ref TrailBucket
+      IsLogging: true
+      IsMultiRegionTrail: true
+      IncludeGlobalServiceEvents: true
+      EnableLogFileValidation: true
+      EventSelectors:
+        - ReadWriteType: All
+          IncludeManagementEvents: true
+
+  # ------------------------------------------------------------------ bill
+  # A warning by e-mail, for the whole account. A budget for the CMS alone needs its
+  # "project" tag activated for cost allocation, which is done in the organisation's
+  # management account, and is not here.
+  #
+  # It counts what was used, before credits and refunds: with credits counted, the
+  # month would look free until they ran out. It has no fixed name, because changing the
+  # address or a threshold replaces the budget, and a fixed name would then collide with
+  # the one being replaced.
+  MonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref MonthlyLimitUsd
+          Unit: USD
+        CostTypes:
+          IncludeCredit: false
+          IncludeRefund: false
+          IncludeDiscount: true
+          IncludeTax: true
+          IncludeSupport: true
+          IncludeSubscription: true
+          IncludeOtherSubscription: true
+          IncludeRecurring: true
+          IncludeUpfront: true
+          UseAmortized: false
+          UseBlended: false
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - { SubscriptionType: EMAIL, Address: !Ref AlertEmail }
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - { SubscriptionType: EMAIL, Address: !Ref AlertEmail }
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - { SubscriptionType: EMAIL, Address: !Ref AlertEmail }
+
+Outputs:
+  TrailName:
+    Description: The CloudTrail trail of the account.
+    Value: !Ref Trail
+  TrailBucketName:
+    Description: The bucket that holds the record of actions. It stays when the stack is deleted.
+    Value: !Ref TrailBucket
+  BudgetName:
+    Description: The monthly budget whose warnings go to the alert address.
+    Value: !Ref MonthlyBudget
