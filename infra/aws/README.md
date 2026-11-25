@@ -5,12 +5,13 @@ Four CloudFormation templates that create what stage 0 of
 infrastructure only. They start no container, hold no secret and run no migration: the
 deploy step and the database role set-up come after them and are not written yet.
 
-**Status, 25 November 2026.** `environment.yml` has been created once, as the stack
-`tinnox-cms-test` in Sydney, from CloudShell: it completed on the first attempt and the
-server's set-up reported success. The stack's and the server's termination protection are
-on. The other three templates have not run against AWS. All four pass `cfn-lint` 1.61, and
-five reviewers read them with a second reader checking each finding. Section 9 lists what
-is unverified pending runtime.
+**Status, 25 November 2026.** Two stacks exist in Sydney, both created from CloudShell and
+both complete on the first attempt: `tinnox-cms-test` from `environment.yml` (the server's
+set-up reported success) and `tinnox-cms-test-database` from `database.yml` (PostgreSQL
+17.9, available). Stack termination protection is on for both, and the server's
+termination protection too. `identity.yml` and `delivery.yml` have not run against AWS.
+All four pass `cfn-lint` 1.61, and five reviewers read them with a second reader checking
+each finding. Section 9 lists what is unverified pending runtime.
 
 ## 1. The account
 
@@ -315,11 +316,14 @@ What stays behind on purpose, and keeps costing until removed by hand:
 
 ## 9. Unverified pending runtime
 
-- `database.yml`, `identity.yml` and `delivery.yml` have not been created. Creating
-  `environment.yml` on 25 November showed: the organisation's policies allow its
-  resource types, including the IAM role; the data disk appears under the by-id name the
-  set-up waits for; and the set-up's report reaches the stack.
-- That the organisation's policies allow the resource types of the other three
+- `identity.yml` and `delivery.yml` have not been created. Creating the other two on
+  25 November showed: the organisation's policies allow their resource types, including
+  the IAM role; the data disk appears under the by-id name the set-up waits for; the
+  set-up's report reaches the stack; and `EngineVersion: '17'` is accepted (it gave
+  17.9).
+- That the server can reach the database, and that the database accepts the three roles
+  (section 5): nothing has connected to it yet.
+- That the organisation's policies allow the resource types of the other two
   templates. As read on 25 November they refuse other Regions and IAM paths under
   `/managed/`, which the templates do not use. The resource control policy was not read.
 - That GitHub can take the deploy role: the ban on identity providers is gone from the
@@ -330,7 +334,6 @@ What stays behind on purpose, and keeps costing until removed by hand:
 - `AWS-RunPatchBaseline` on Amazon Linux 2023. An instance stays on the release its image
   was built with unless told otherwise, so the weekly run may install nothing newer. Check
   after the first Sunday with `dnf check-release-update`.
-- `EngineVersion: '17'` (the major version alone) on creation.
 - Managed login with only `ALLOW_REFRESH_TOKEN_AUTH` among the explicit flows, the first
   sign-in of a user created by an administrator when account recovery is `admin_only`,
   and what the ID token then contains.
