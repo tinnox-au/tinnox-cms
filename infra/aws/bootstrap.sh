@@ -235,6 +235,9 @@ aws ssm get-command-invocation --command-id "$command_id" --instance-id "$instan
   --query '[StandardOutputContent, StandardErrorContent]' --output text
 [ "$status" = Success ] ||
   fail "the database set-up ended as $status. The stored connection strings may not match the database yet: correct the cause and run this script again, which sets the database's passwords to what is stored"
+# The server no longer needs the master password; the EXIT trap would delete it only at
+# the end, after the settings below.
+aws ssm delete-parameter --name "$TEMPORARY" >/dev/null
 
 # ---------------------------------------------------------------- 2. settings
 for name in SESSION_SECRET MEDIA_URL_HMAC_SECRET PAIRING_CLIENT_KEY_SECRET; do

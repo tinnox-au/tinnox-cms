@@ -5,16 +5,18 @@ Four CloudFormation templates that create what stage 0 of
 infrastructure only. They start no container, hold no secret and run no migration: the
 deploy step and the database role set-up come after them and are not written yet.
 
-**Status, 25 November 2026.** All four stacks exist in Sydney, created from CloudShell and
-complete on the first attempt: `tinnox-cms-test` from `environment.yml` (the server's
-set-up reported success), `tinnox-cms-test-database` from `database.yml` (PostgreSQL 17.9,
-available), `tinnox-cms-test-identity` from `identity.yml` (an empty user pool) and
-`tinnox-cms-delivery` from `delivery.yml` (three empty image repositories, the GitHub
-identity provider, the deploy role; the fourth repository comes with the next update). Stack termination protection is on for all four, and
-the server's termination protection too. The GitHub deployment environment `test` exists:
-main branch only, one required reviewer; repository administrators can bypass it.
-Nothing has been deployed: no image pushed, no role taken by GitHub, no user signed in.
-Section 9 lists what is unverified pending runtime.
+**Status, 25 November 2026.** All four stacks exist in Sydney, created and updated from
+CloudShell: `tinnox-cms-test` from `environment.yml` (server, release document),
+`tinnox-cms-test-database` from `database.yml` (PostgreSQL 17.9),
+`tinnox-cms-test-identity` from `identity.yml` (an empty user pool) and
+`tinnox-cms-delivery` from `delivery.yml` (four empty image repositories, the GitHub
+identity provider, the deploy role). Stack termination protection is on for all four, and
+the server's termination protection too. `bootstrap.sh test` has run: the three database
+roles and the database `tinnox` exist, and the settings are in Parameter Store. The
+GitHub deployment environment `test` exists (main branch only, one required reviewer;
+repository administrators can bypass it) and has its three variables. No release has
+run: no image pushed, no migration applied, no user signed in. Section 9 lists what is
+unverified pending runtime.
 
 ## 1. The account
 
@@ -248,10 +250,10 @@ an authenticator app at the first sign-in.
    `["pwd","otp","mfa"]` for a password plus an authenticator code through managed login,
    but says the claims are "rolling out gradually". Read a real token before choosing.
 4. **The provisioning tool** reads users from Keycloak only (`scripts/lib/idp.ts`).
-5. **The first release.** The scripts and the workflow are written and rehearsed (section
-   9) but have not run against AWS: the delivery and environment stacks must be updated
-   first (the release repository, the role's right to start a release, the release
-   document), then `bootstrap.sh`, the three GitHub variables, DNS, and a run of Deploy.
+5. **The first release.** Everything before it is done except DNS: the stacks are
+   updated, `bootstrap.sh` has run, the GitHub variables are set. The workflow can be
+   started once it is on `main`. Without the DNS records the release itself can succeed,
+   but Caddy cannot get certificates, so nothing answers on the host names.
 
 ## 6. Running it
 
@@ -386,9 +388,10 @@ What stays behind on purpose, and keeps costing until removed by hand:
   repeated release kept them, and the failure cases stopped where they should (a value
   the settings file cannot carry, Parameter Store unreachable, a migration that cannot
   connect, a second release started while one runs). The role script refused a role with
-  the wrong attributes and a role with an unexpected membership. Not rehearsed: `bootstrap.sh` itself (it needs AWS), the workflow, the role's
-  permissions, the release document inside Systems Manager, and RDS accepting SCRAM
-  verifiers in `ALTER ROLE … PASSWORD`.
+  the wrong attributes and a role with an unexpected membership. `bootstrap.sh` then ran
+  against AWS once and succeeded; RDS accepts SCRAM verifiers. Still not run: the
+  workflow, the deploy role's permissions, the release document inside Systems Manager,
+  and a login with the stored passwords.
 - Creating the four stacks on 25 November showed: the organisation's policies allow
   their resource types, including the IAM roles and the identity provider; the data disk
   appears under the by-id name the set-up waits for; the set-up's report reaches the
