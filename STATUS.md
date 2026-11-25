@@ -321,10 +321,11 @@ from: CMS-30
 - 24 Nov: Michael, 24 Nov: media is served direct from Sydney storage, no CDN, if possible. Michael is the incident owner for now. Native players: Linux only for now, Windows 11 set aside.
 - 25 Nov: Michael, 25 Nov: the product domain is tinnox-one.com.au, bought. Stage 0 keeps the API on tsx (compiled image is CMS-39).
 - 25 Nov: Michael, 25 Nov: hostnames are app. and player. under tinnox-one.com.au (app.test. and player.test. for stage 0); the bare domain carries no application and redirects to tinnox.com.au for now.
-- 25 Nov: Michael, 25 Nov: stage 0 goes in the existing AWS account Tinnox Production, not a new account. It already runs one server for another system.
+- 25 Nov: Michael, 25 Nov: stage 0 goes in the existing AWS account Tinnox Production, not a new account.
 - 25 Nov: Michael activated AWS advanced features (cannot be undone). TINNOX now administers the organisation and its policies. The region policy still allows Sydney only; identity providers are allowed, so keyless GitHub deploys are possible.
 - 25 Nov: stacks tinnox-cms-test (network, server, data disk, key, snapshots, patching) and tinnox-cms-test-database (RDS PostgreSQL 17, private) created in Sydney; both completed first time. Billing has started. Michael set the root password and MFA.
-- 25 Nov: tested on the new RDS instance: it accepts a BYPASSRLS role, so RDS stays. Sign-in (Cognito) and delivery (image repositories, GitHub deploy role, GitHub environment test) stacks created. Next: DNS records, database roles, the deploy workflow.
+- 25 Nov: tested on the new RDS instance: it accepts a BYPASSRLS role, so RDS stays. Sign-in (Cognito) and delivery (image repositories, GitHub deploy role, GitHub environment test) stacks created.
+- 25 Nov: release path written and rehearsed locally (pull request 47), not applied to AWS yet. Next: DNS records, apply it, first release.
 
 ### CMS-38
 from: CMS-37
