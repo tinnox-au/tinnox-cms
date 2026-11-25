@@ -5,13 +5,14 @@ Four CloudFormation templates that create what stage 0 of
 infrastructure only. They start no container, hold no secret and run no migration: the
 deploy step and the database role set-up come after them and are not written yet.
 
-**Status, 25 November 2026.** Two stacks exist in Sydney, both created from CloudShell and
-both complete on the first attempt: `tinnox-cms-test` from `environment.yml` (the server's
-set-up reported success) and `tinnox-cms-test-database` from `database.yml` (PostgreSQL
-17.9, available). Stack termination protection is on for both, and the server's
-termination protection too. `identity.yml` and `delivery.yml` have not run against AWS.
-All four pass `cfn-lint` 1.61, and five reviewers read them with a second reader checking
-each finding. Section 9 lists what is unverified pending runtime.
+**Status, 25 November 2026.** Three stacks exist in Sydney, all created from CloudShell and
+all complete on the first attempt: `tinnox-cms-test` from `environment.yml` (the server's
+set-up reported success), `tinnox-cms-test-database` from `database.yml` (PostgreSQL 17.9,
+available) and `tinnox-cms-test-identity` from `identity.yml` (an empty user pool).
+Stack termination protection is on for all three, and the server's termination
+protection too. `delivery.yml` has not run against AWS. All four pass `cfn-lint` 1.61, and
+five reviewers read them with a second reader checking each finding. Section 9 lists what
+is unverified pending runtime.
 
 ## 1. The account
 
@@ -191,11 +192,13 @@ an authenticator app at the first sign-in.
    `GRANT tinnox_migrator TO CURRENT_USER WITH SET TRUE` has run. The test used throwaway
    roles and dropped them; the real roles and databases are not created yet. Still: do
    not grant `rds_superuser` to anything.
-2. **Sign-out.** The API builds a standard sign-out address from `end_session_endpoint`,
-   which Cognito is not known to publish. Without it the CMS session ends but Cognito's
-   own session lasts up to an hour, so the same browser can sign in again without a
-   password. Cognito's `/logout?client_id=…&logout_uri=…` needs a code change in
-   `apps/api/src/auth/oidc.ts`.
+2. **Sign-out.** The pool's discovery document does publish an `end_session_endpoint`
+   (`…/logout` on the sign-in pages; read 25 November), so the API will build its
+   standard sign-out address (`post_logout_redirect_uri` with `id_token_hint` or
+   `client_id`). Whether Cognito accepts those parameters, or only its own
+   `client_id` and `logout_uri`, has not been tried. If it refuses, the CMS session
+   ends but Cognito's own lasts up to an hour, so the same browser can sign in again
+   without a password, and `apps/api/src/auth/oidc.ts` needs a change.
 3. **Proof of the second factor.** In production the API refuses to start without
    `OIDC_MFA_ACR_VALUES` or `OIDC_MFA_AMR_VALUES`, and refuses every sign-in whose token
    does not match. Cognito documents `acr` `urn:cognito:loa:4` and `amr`
@@ -320,15 +323,14 @@ What stays behind on purpose, and keeps costing until removed by hand:
 
 ## 9. Unverified pending runtime
 
-- `identity.yml` and `delivery.yml` have not been created. Creating the other two on
+- `delivery.yml` has not been created. Creating the other three on
   25 November showed: the organisation's policies allow their resource types, including
   the IAM role; the data disk appears under the by-id name the set-up waits for; the
   set-up's report reaches the stack; and `EngineVersion: '17'` is accepted (it gave
   17.9).
 - The migrations and the `sec.*` functions on RDS: the server reaches the database and
   RDS accepts the roles (section 5), but no migration has run there.
-- That the organisation's policies allow the resource types of the other two
-  templates. As read on 25 November they refuse other Regions and IAM paths under
+- That the organisation's policies allow the resource types of `delivery.yml`. As read on 25 November they refuse other Regions and IAM paths under
   `/managed/`, which the templates do not use. The resource control policy was not read.
 - That GitHub can take the deploy role: the ban on identity providers is gone from the
   policies, but no provider has been created yet.
