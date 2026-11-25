@@ -2,9 +2,7 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
   TINNOX CMS, how images get from GitHub to AWS: the three image repositories and the
   role that the deploy workflow of tinnox-au/tinnox-cms takes through OpenID Connect,
-  with no stored key. One stack for the account. It cannot be created while the account
-  is a project of the new AWS experience without advanced features, which forbids
-  identity providers. See infra/aws/README.md.
+  with no stored key. One stack for the account. See infra/aws/README.md.
 
 Metadata:
   AWS::CloudFormation::Interface:

@@ -13,27 +13,27 @@ has run against AWS. Section 9 lists what is unverified pending runtime.
 ## 1. The account
 
 Stage 0 goes into the existing account "Tinnox Production" (Michael, 25 Nov), which also
-runs an unrelated server. That account is a _project_ of the AWS sign-up experience
-launched in September 2026, and this shapes the templates:
+runs an unrelated server. The account began as a _project_ of the AWS sign-up experience
+launched in September 2026, with AWS managing its organisation. On 25 November Michael
+activated "advanced features", which cannot be undone. TINNOX now administers the
+organisation: the management account, "Tinnox Production" and "Tinnox Identity Delegated
+Admin", which AWS added for sign-in administration. As read in the console that day:
 
 | Fact | Consequence |
 | --- | --- |
-| AWS manages the organisation and its policies; the project cannot edit them | An "Australia only" policy cannot be added from here. AWS's own policy already confines the project to Sydney plus the global endpoints of two US Regions; Melbourne is refused too |
-| Identity providers are forbidden (`iam:*Provider*`) | `delivery.yml` cannot be created: GitHub cannot take a role without a stored key |
-| Both end with "Activate advanced features" in AWS Settings | It cannot be undone and only the owner can do it. It is Michael's decision |
-| The CloudFormation console may attach a role of its own to a stack ("role manager") | That role may be unable to create IAM roles, and a stack keeps its role for life. See step 0 in section 3 |
+| The organisation's policies are TINNOX's own ("customer managed") | Nobody else maintains them. A change to them is a change to every account |
+| The region policy is attached to the whole organisation: Sydney only, plus the global services that answer from two US Regions | This is the "Australia only" lock. Melbourne is refused until the policy names it. It does not bind the management account, so nothing is built there |
+| Identity providers are no longer forbidden | `delivery.yml` can be created: GitHub takes a role with no stored key |
+| Roles under the IAM path `/managed/` are protected | The templates use no such path |
+| The CloudFormation console may attach a role of its own to a stack ("role manager") | That role may be unable to create IAM roles, and a stack keeps its role for life. See step 0 in section 3. Role manager can now be turned off per account |
 | Another system shares the account | Own network, own security groups, own roles, own key for secrets. The server's role is denied every Parameter Store parameter outside its own path |
 
 On 25 November the account had 13 IAM roles, all of them AWS's own; the other server has
 no role. So today only the people who administer the account can read what the templates
 protect. The protections matter once another system's role exists.
 
-Until advanced features are activated there is no keyless way for GitHub to push images to
-this account. Either they are activated and `delivery.yml` is created, or the server pulls
-public images from GitHub's registry. This is open.
-
-A spend limit, if one is ever set in AWS Settings, makes AWS refuse new stacks, keys, user
-pools and database instances as the limit comes near. None is set today.
+Spend limits ended with activation. A budget alert takes their place and is not set yet
+(section 8).
 
 ## 2. The templates
 
@@ -42,7 +42,7 @@ pools and database instances as the limit comes near. None is set today.
 | `environment.yml` | `tinnox-cms-test` | Network, the server with its fixed address and data disk, its role, log group, nightly disk snapshots, weekly patching, the key for secrets, optional DNS records | US$26 |
 | `database.yml` | `tinnox-cms-test-database` | RDS PostgreSQL 17, one zone (the server's), 7 days of backups, in subnets with no route to the internet | US$21 |
 | `identity.yml` | `tinnox-cms-test-identity` | Cognito user pool with an authenticator app required, the sign-in pages, the API's app client | US$0 |
-| `delivery.yml` | `tinnox-cms-delivery` | Three image repositories, the GitHub identity provider, the deploy role. Needs advanced features | under US$1 |
+| `delivery.yml` | `tinnox-cms-delivery` | Three image repositories, the GitHub identity provider, the deploy role | under US$1 |
 
 The costs are estimates from the prices of 24 November 2026: server US$15.50 (t4g.small),
 disks US$4.40, public address US$3.65, key US$1, snapshots and logs about US$1; database
@@ -75,7 +75,7 @@ In Sydney, in this order. For every stack:
   a failed stack must be deleted before its name can be used again.
 
 0. **Check which role CloudFormation will use.** On "Configure stack options", under
-   Permissions, the console of a project account may show a role it attaches by itself.
+   Permissions, the console may show a role it attaches by itself ("role manager").
    If that role cannot create IAM roles, `environment.yml` fails at `ServerRole` with
    "not authorized to perform: iam:CreateRole". If the console offers no way to use your
    own session instead, create the stacks from CloudShell, which runs them as you:
@@ -111,7 +111,7 @@ In Sydney, in this order. For every stack:
    AWS customer in the Region. If the stack fails on the domain, update the failed stack
    with another prefix; do not delete and re-create it, which would leave an empty user
    pool behind each time.
-5. **`delivery.yml`**, only after advanced features are activated. First create the
+5. **`delivery.yml`** as `tinnox-cms-delivery`. First create the
    GitHub deployment environment `test`, limited to the main branch and with required
    reviewers: GitHub creates a missing environment, unprotected, for the first job that
    names it. It needs the same IAM acknowledgement as step 1.
@@ -305,18 +305,20 @@ What stays behind on purpose, and keeps costing until removed by hand:
 - The deploy step, the RDS role set-up and the migration step.
 - CloudTrail. The account has no trail; the console's event history keeps 90 days.
 - A budget alert. A budget for the CMS alone needs its tag activated for cost allocation,
-  which only the organisation's management account can do.
+  which is done in the organisation's management account.
 - Alarms, dashboards, VPC flow logs: monitoring is left out of stage 0 on purpose.
 - S3 for media (month two), e-mail (off), a second zone, Melbourne.
 
 ## 9. Unverified pending runtime
 
 - Everything, in the sense that no stack has been created. In particular:
-- Which role the CloudFormation console uses in a project account, and what it may do
+- Which role the CloudFormation console uses in this account, and what it may do
   (section 3, step 0).
-- That a project account allows each resource type here. AWS's published policies for
-  projects allow these services and forbid IAM paths under `/managed/`, which the
-  templates do not use; identity providers are the one known refusal.
+- That the organisation's policies allow each resource type here. As read on 25 November
+  they refuse other Regions and IAM paths under `/managed/`, which the templates do not
+  use. The resource control policy was not read.
+- That GitHub can take the deploy role: the ban on identity providers is gone from the
+  policies, but no provider has been created yet.
 - On a real Amazon Linux 2023 instance: the name under which the data disk appears
   (`/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol…`), the root device name
   `/dev/xvda`, and that the set-up's report reaches the stack. In a container the
