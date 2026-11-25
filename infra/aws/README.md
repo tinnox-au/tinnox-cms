@@ -5,10 +5,12 @@ Four CloudFormation templates that create what stage 0 of
 infrastructure only. They start no container, hold no secret and run no migration: the
 deploy step and the database role set-up come after them and are not written yet.
 
-**Status, 25 November 2026.** No stack has been created from these templates. They pass
-`cfn-lint` 1.61, and five reviewers read them with a second reader checking each finding.
-The server set-up script was run in parts in an Amazon Linux 2023 container. Nothing here
-has run against AWS. Section 9 lists what is unverified pending runtime.
+**Status, 25 November 2026.** `environment.yml` has been created once, as the stack
+`tinnox-cms-test` in Sydney, from CloudShell: it completed on the first attempt and the
+server's set-up reported success. The stack's and the server's termination protection are
+on. The other three templates have not run against AWS. All four pass `cfn-lint` 1.61, and
+five reviewers read them with a second reader checking each finding. Section 9 lists what
+is unverified pending runtime.
 
 ## 1. The account
 
@@ -74,21 +76,23 @@ In Sydney, in this order. For every stack:
 - Turn on **stack termination protection** after the stack is complete, not in the wizard:
   a failed stack must be deleted before its name can be used again.
 
-0. **Check which role CloudFormation will use.** On "Configure stack options", under
-   Permissions, the console may show a role it attaches by itself ("role manager").
-   If that role cannot create IAM roles, `environment.yml` fails at `ServerRole` with
-   "not authorized to perform: iam:CreateRole". If the console offers no way to use your
-   own session instead, create the stacks from CloudShell, which runs them as you:
+0. **Create the stacks from CloudShell, not from the console's wizard.** While role
+   manager is on in this account (it is), the wizard's "Permissions" section creates an
+   IAM role and attaches it to the stack; it offers an existing role or a new one, but
+   not your own session. A role attached to a stack cannot be removed, and everyone who
+   may update the stack can use it. CloudShell runs the stack as you. The wizard is
+   still useful for one thing: uploading the template on its first page stores it in
+   the bucket `cf-templates-…-ap-southeast-2` and shows its URL; then cancel the wizard.
 
    ```bash
-   aws cloudformation create-stack --stack-name tinnox-cms-test --template-body file://environment.yml --capabilities CAPABILITY_IAM --disable-rollback --tags Key=project,Value=tinnox-cms Key=environment,Value=test --parameters ParameterKey=ImageId,ParameterValue=ami-…
+   aws cloudformation create-stack --stack-name tinnox-cms-test --template-url https://s3.ap-southeast-2.amazonaws.com/cf-templates-…/…-environment.yml --capabilities CAPABILITY_IAM --disable-rollback --tags Key=project,Value=tinnox-cms Key=environment,Value=test --parameters ParameterKey=ImageId,ParameterValue=ami-…
    ```
 
-   Whichever way: afterwards the stack's "IAM role" must be empty. A role attached to a
-   stack cannot be removed, and everyone who may update the stack can use it.
+   `--disable-rollback` is the wizard's "Preserve successfully provisioned resources".
+   Afterwards the stack's "IAM role" must be empty (`RoleARN` in `describe-stacks`).
 
-1. **`environment.yml`** as `tinnox-cms-test`. It needs the box "I acknowledge that
-   CloudFormation might create IAM resources".
+1. **`environment.yml`** as `tinnox-cms-test`. It creates an IAM role, hence
+   `--capabilities CAPABILITY_IAM`.
    - `ImageId`: the current Amazon Linux 2023 arm64 image. In the console: Systems Manager,
      Parameter Store, Public parameters, service `ami-amazon-linux-latest`, parameter
      `al2023-ami-kernel-default-arm64`; copy its value (`ami-…`). An x86 image fails at
@@ -114,7 +118,7 @@ In Sydney, in this order. For every stack:
 5. **`delivery.yml`** as `tinnox-cms-delivery`. First create the
    GitHub deployment environment `test`, limited to the main branch and with required
    reviewers: GitHub creates a missing environment, unprotected, for the first job that
-   names it. It needs the same IAM acknowledgement as step 1.
+   names it. It needs `--capabilities CAPABILITY_IAM`, as step 1 does.
 
 ## 4. What the templates leave to be done by hand
 
@@ -311,19 +315,17 @@ What stays behind on purpose, and keeps costing until removed by hand:
 
 ## 9. Unverified pending runtime
 
-- Everything, in the sense that no stack has been created. In particular:
-- Which role the CloudFormation console uses in this account, and what it may do
-  (section 3, step 0).
-- That the organisation's policies allow each resource type here. As read on 25 November
-  they refuse other Regions and IAM paths under `/managed/`, which the templates do not
-  use. The resource control policy was not read.
+- `database.yml`, `identity.yml` and `delivery.yml` have not been created. Creating
+  `environment.yml` on 25 November showed: the organisation's policies allow its
+  resource types, including the IAM role; the data disk appears under the by-id name the
+  set-up waits for; and the set-up's report reaches the stack.
+- That the organisation's policies allow the resource types of the other three
+  templates. As read on 25 November they refuse other Regions and IAM paths under
+  `/managed/`, which the templates do not use. The resource control policy was not read.
 - That GitHub can take the deploy role: the ban on identity providers is gone from the
   policies, but no provider has been created yet.
-- On a real Amazon Linux 2023 instance: the name under which the data disk appears
-  (`/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol…`), the root device name
-  `/dev/xvda`, and that the set-up's report reaches the stack. In a container the
-  packages installed, Compose 2.40.3 verified against its checksum and ran this compose
-  file on Docker 25, and Docker started with this configuration.
+- What the server looks like from inside: nobody has opened a session on it yet. The
+  set-up checks the mount, Docker and Compose before it reports success, and it did.
 - That a metadata hop limit of 1 keeps containers from the server's credentials.
 - `AWS-RunPatchBaseline` on Amazon Linux 2023. An instance stays on the release its image
   was built with unless told otherwise, so the weekly run may install nothing newer. Check
