@@ -5,12 +5,13 @@ of `docs/deployment-plan-2026-11-24.md` runs on, and `account.yml` for the accou
 whole. They create infrastructure only. They start no container, hold no secret and run no
 migration: `bootstrap.sh` and a release do that (section 4).
 
-**Status, 25 November 2026.** All four stacks exist in Sydney, created and updated from
-CloudShell: `tinnox-cms-test` from `environment.yml` (server, release document),
+**Status, 26 November 2026.** Five stacks exist in Sydney, created and updated from
+CloudShell: `tinnox-account` from `account.yml` (the trail is recording, the budget warns
+at US$250 a month), `tinnox-cms-test` from `environment.yml` (server, release document),
 `tinnox-cms-test-database` from `database.yml` (PostgreSQL 17.9),
 `tinnox-cms-test-identity` from `identity.yml` (an empty user pool) and
 `tinnox-cms-delivery` from `delivery.yml` (four empty image repositories, the GitHub
-identity provider, the deploy role). Stack termination protection is on for all four, and
+identity provider, the deploy role). Stack termination protection is on for all five, and
 the server's termination protection too. `bootstrap.sh test` has run: the three database
 roles and the database `tinnox` exist, and the settings are in Parameter Store. The
 GitHub deployment environment `test` exists (main branch only, one required reviewer;
@@ -424,6 +425,10 @@ What stays behind on purpose, and keeps costing until removed by hand:
   its stored password over verified TLS and reports ready; Caddy obtains certificates.
   Not settled by it: a second release over a running one on the server, a failed
   migration on the server, and the weekly image clean-up.
+- `account.yml` was created on 26 November: the trail records with no delivery error, a
+  write to its bucket by a person is refused while the trail's own files arrive, and the
+  budget holds its three warnings. Not seen yet: a warning e-mail, and a forecast, which
+  AWS makes only after about five weeks of history.
 - Creating the four stacks on 25 November showed: the organisation's policies allow
   their resource types, including the IAM roles and the identity provider; the data disk
   appears under the by-id name the set-up waits for; the set-up's report reaches the
