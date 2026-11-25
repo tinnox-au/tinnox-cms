@@ -323,9 +323,8 @@ from: CMS-30
 - 25 Nov: Michael, 25 Nov: hostnames are app. and player. under tinnox-one.com.au (app.test. and player.test. for stage 0); the bare domain carries no application and redirects to tinnox.com.au for now.
 - 25 Nov: Michael, 25 Nov: stage 0 goes in the existing AWS account Tinnox Production, not a new account.
 - 25 Nov: Michael activated AWS advanced features (cannot be undone). TINNOX now administers the organisation and its policies. The region policy still allows Sydney only; identity providers are allowed, so keyless GitHub deploys are possible.
-- 25 Nov: stacks tinnox-cms-test (network, server, data disk, key, snapshots, patching) and tinnox-cms-test-database (RDS PostgreSQL 17, private) created in Sydney; both completed first time. Billing has started. Michael set the root password and MFA.
-- 25 Nov: tested on the new RDS instance: it accepts a BYPASSRLS role, so RDS stays. Sign-in (Cognito) and delivery (image repositories, GitHub deploy role, GitHub environment test) stacks created.
-- 25 Nov: first release to test succeeded. Provisioning reads Cognito (pull request 49); TINNOX Internal created; sign-in and sign-out work. Next: the Pi.
+- 25 Nov: four stacks created in Sydney (server, RDS PostgreSQL 17, Cognito, image delivery); RDS accepts the BYPASSRLS role. Billing has started. Michael set the root password and MFA.
+- 25 Nov: first release to test succeeded. Provisioning reads Cognito (pull request 49); TINNOX Internal created; sign-in and sign-out work. CloudTrail and a US$250 budget warning set. Next: the Pi.
 
 ### CMS-38
 from: CMS-37
