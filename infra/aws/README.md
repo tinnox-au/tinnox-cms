@@ -14,9 +14,11 @@ identity provider, the deploy role). Stack termination protection is on for all 
 the server's termination protection too. `bootstrap.sh test` has run: the three database
 roles and the database `tinnox` exist, and the settings are in Parameter Store. The
 GitHub deployment environment `test` exists (main branch only, one required reviewer;
-repository administrators can bypass it) and has its three variables. No release has
-run: no image pushed, no migration applied, no user signed in. Section 9 lists what is
-unverified pending runtime.
+repository administrators can bypass it) and has its three variables. The first
+release ran on 25 November, from the Deploy workflow, and succeeded at the first attempt:
+four images pushed, sixteen migrations applied on RDS, three containers healthy, and both
+host names answer over https with Let's Encrypt certificates. No organisation and no user
+exist yet, so nobody has signed in. Section 9 lists what is unverified pending runtime.
 
 ## 1. The account
 
@@ -255,10 +257,11 @@ an authenticator app at the first sign-in.
    has not run against the pool yet, and where it runs is not decided: it needs the
    migrator's connection string and a route to the database, which only the server has,
    while `docs/portal-v2/stage-c.md` section 8.2 says never to run it on the API's host.
-5. **The first release.** Everything before it is done: the stacks are updated,
-   `bootstrap.sh` has run, the GitHub variables are set, and the two host names resolve to
-   the server (A records at GoDaddy, where the domain's DNS is hosted, 25 November). The
-   workflow can be started once it is on `main`.
+5. **The first sign-in.** The first release is done (25 November; the two host names
+   are A records at GoDaddy, where the domain's DNS is hosted). What is left before
+   anybody can use the environment is items 2 to 4: an organisation and its members
+   need the provisioning tool run against the pool, and the first sign-in will show whether
+   `OIDC_MFA_AMR_VALUES=mfa` and the sign-out are right.
 
 ## 6. Running it
 
@@ -394,18 +397,19 @@ What stays behind on purpose, and keeps costing until removed by hand:
   the settings file cannot carry, Parameter Store unreachable, a migration that cannot
   connect, a second release started while one runs). The role script refused a role with
   the wrong attributes and a role with an unexpected membership. `bootstrap.sh` then ran
-  against AWS once and succeeded; RDS accepts SCRAM verifiers. Still not run: the
-  workflow, the deploy role's permissions, the release document inside Systems Manager,
-  and a login with the stored passwords.
+  against AWS once and succeeded; RDS accepts SCRAM verifiers.
+- The first release (25 November) settled: GitHub takes the deploy role (the subject
+  `…:environment:test` is right), pushes to the four repositories and may start the
+  release document on the tagged server; the document and `release.sh` run under Systems
+  Manager; the migrations and the `sec.*` functions apply on RDS; the API connects with
+  its stored password over verified TLS and reports ready; Caddy obtains certificates.
+  Not settled by it: a second release over a running one on the server, a failed
+  migration on the server, and the weekly image clean-up.
 - Creating the four stacks on 25 November showed: the organisation's policies allow
   their resource types, including the IAM roles and the identity provider; the data disk
   appears under the by-id name the set-up waits for; the set-up's report reaches the
   stack; and `EngineVersion: '17'` is accepted (it gave 17.9).
-- The migrations and the `sec.*` functions on RDS: the server reaches the database and
-  RDS accepts the roles (section 5), but no migration has run there.
 - The organisation's resource control policy was not read.
-- That GitHub can take the deploy role: the provider and the role exist, and the role's
-  trust names the subject `…:environment:test`, but no workflow has tried.
 - What the server looks like from inside: nobody has opened a session on it yet. The
   set-up checks the mount, Docker and Compose before it reports success, and it did.
 - That a metadata hop limit of 1 keeps containers from the server's credentials.
@@ -415,5 +419,3 @@ What stays behind on purpose, and keeps costing until removed by hand:
 - Managed login with only `ALLOW_REFRESH_TOKEN_AUTH` among the explicit flows, the first
   sign-in of a user created by an administrator when account recovery is `admin_only`,
   and what the ID token then contains.
-- The exact subject of a GitHub token for a deployment environment in the immutable
-  format (the prefix is confirmed, the `:environment:<name>` ending is inferred).
