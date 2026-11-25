@@ -246,7 +246,10 @@ an authenticator app at the first sign-in.
    registered with the app client, passing no `state` on. The API now sends those for a
    Cognito issuer (`apps/api/src/auth/oidc.ts`), and the app client has a second sign-out
    URL that carries the portal's "signed out" marker. Asked directly, `/logout` redirects
-   to the registered URL. Not yet seen in a browser with the new release.
+   to the registered URL. The identity stack is updated before the API release that
+   needs it: the new API with the old app client would fail every sign-out the same
+   way. The API refuses to start with a post-logout URI other than `<portal>/` against a
+   Cognito pool. Not yet seen in a browser with the new release.
 3. **Proof of the second factor: settled for `amr`.** The API runs with
    `OIDC_MFA_AMR_VALUES=mfa` and refuses every sign-in whose token lacks it. The first
    sign-in through Cognito's managed login, with a password and an authenticator code,

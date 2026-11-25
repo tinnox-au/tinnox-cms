@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ConfigError,
   isAdministratorName,
+  isCognitoIssuer,
   loadConfig,
   REPO_ROOT,
   REVIEWED_SMTP_HOSTS,
@@ -236,6 +237,46 @@ describe('loadConfig in production (D19)', () => {
     expect(problems({ ...production, [name]: value }).join(' ')).toContain(
       `${name} must use https in production`,
     );
+  });
+
+  it('holds the post-logout URI to the one address a Cognito app client has registered', () => {
+    // Cognito returns only to a sign-out URL registered character for character
+    // (infra/aws/identity.yml registers "<portal>/?state=signed_out", built from "<portal>/").
+    const cognito = {
+      ...production,
+      OIDC_ISSUER: 'https://cognito-idp.ap-southeast-2.amazonaws.com/ap-southeast-2_Example01',
+    };
+    expect(problems(cognito)).toEqual([]);
+    for (const uri of [
+      'https://portal.signage.example/signed-out',
+      'https://portal.signage.example/?next=/home',
+      'https://portal.signage.example/#top',
+    ]) {
+      expect(problems({ ...cognito, OIDC_POST_LOGOUT_REDIRECT_URI: uri })).toEqual([
+        'OIDC_POST_LOGOUT_REDIRECT_URI must be PORTAL_ORIGIN followed by "/" and nothing else when OIDC_ISSUER is a Cognito user pool',
+      ]);
+      // Any other provider may send people where it likes on the portal.
+      expect(problems({ ...production, OIDC_POST_LOGOUT_REDIRECT_URI: uri })).toEqual([]);
+    }
+  });
+
+  it('takes only a Cognito host for a Cognito issuer', () => {
+    for (const issuer of [
+      'https://cognito-idp.ap-southeast-2.amazonaws.com/ap-southeast-2_Example01',
+      'https://cognito-idp.us-gov-west-1.amazonaws.com/us-gov-west-1_Example01',
+    ]) {
+      expect(isCognitoIssuer(issuer)).toBe(true);
+    }
+    for (const issuer of [
+      'https://id.signage.example/realms/operators',
+      'https://cognito-idp.ap-southeast-2.amazonaws.com.evil.example/ap-southeast-2_Example01',
+      'https://cognito-idp-fips.us-east-1.amazonaws.com/us-east-1_Example01',
+      'https://cognito-idp.cn-north-1.amazonaws.com.cn/cn-north-1_Example01',
+      'https://evil.example/cognito-idp.ap-southeast-2.amazonaws.com',
+      'not a url',
+    ]) {
+      expect(isCognitoIssuer(issuer)).toBe(false);
+    }
   });
 
   it('refuses the development realm even over https', () => {

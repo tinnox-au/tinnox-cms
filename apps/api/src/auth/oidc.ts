@@ -10,7 +10,7 @@
  */
 import { LOGOUT_REDIRECT_MAX_LENGTH } from '@tinnox/contracts';
 import * as oidc from 'openid-client';
-import type { AppConfig } from '../config.ts';
+import { isCognitoIssuer, type AppConfig } from '../config.ts';
 
 export interface VerifiedIdentity {
   readonly sub: string;
@@ -96,25 +96,11 @@ export function mfaSatisfied(
 export const SIGNED_OUT_STATE = 'signed_out';
 
 /**
- * A Cognito user pool: https://cognito-idp.<region>.amazonaws.com/<pool id>. Its discovery
- * document names an end_session_endpoint, but that endpoint (managed login's /logout) does not
- * take the parameters of OpenID Connect RP-initiated logout: it answers "Invalid request" to
- * post_logout_redirect_uri and id_token_hint. It takes `client_id` and `logout_uri`, and
- * `logout_uri` must be, character for character, one of the app client's sign-out URLs.
- */
-function isCognitoIssuer(issuer: string): boolean {
-  try {
-    return /^cognito-idp\.[a-z0-9-]+\.amazonaws\.com$/.test(new URL(issuer).hostname);
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Cognito's sign-out URL. Cognito returns to `logout_uri` exactly and passes no `state` on, so
  * the marker the portal looks for is part of the address itself:
  * `<post-logout URI>?state=signed_out`, which is registered as a sign-out URL of the app
  * client (infra/aws/identity.yml). No ID token is sent; Cognito does not use one here.
+ * loadConfig refuses a post-logout URI that would build an address the client does not have.
  */
 function cognitoEndSessionUrl(endpoint: string, config: AppConfig): string {
   const back = new URL(config.oidc.postLogoutRedirectUri);

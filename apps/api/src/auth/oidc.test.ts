@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { LOGOUT_REDIRECT_MAX_LENGTH } from '@tinnox/contracts';
 import * as oidc from 'openid-client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -122,6 +124,24 @@ describe('endSessionUrl', () => {
       // The marker is in the address Cognito returns to, which is registered with the client.
       expect(url.searchParams.get('logout_uri')).toBe(
         'https://app.signage.example/?state=signed_out',
+      );
+    });
+
+    it('asks for the very address the app client template registers', async () => {
+      // Nothing else ties the two: a drift would pass every other test and fail in the browser.
+      const template = readFileSync(
+        join(import.meta.dirname, '../../../../infra/aws/identity.yml'),
+        'utf8',
+      );
+      expect(template).toContain("- !Sub '${PortalOrigin}/?state=signed_out'");
+      const asked = new URL((await cognito().endSessionUrl(null)) ?? '').searchParams.get(
+        'logout_uri',
+      );
+      expect(asked).toBe(
+        '${PortalOrigin}/?state=signed_out'.replace(
+          '${PortalOrigin}',
+          'https://app.signage.example',
+        ),
       );
     });
 
