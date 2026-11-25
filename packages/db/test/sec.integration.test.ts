@@ -50,8 +50,9 @@ import {
   pairingCode,
   PG,
   pgCode,
-  stillWaiting,
+  backendPid,
   twoTransactions,
+  waitForLockWaiters,
   withNoOrgSet,
   type TestOrg,
 } from './support.ts';
@@ -840,7 +841,13 @@ describe('pairing', () => {
         await colleague.query('BEGIN');
         await colleague.query("SELECT set_config('app.org_id', $1, true)", [org.orgId]);
         const late = colleague.query(cancel, [org.displayId]);
-        expect(await stillWaiting(late)).toBe(true);
+        await waitForLockWaiters(
+          pool,
+          backendPid(owner),
+          1,
+          "the colleague's cancel never waited for the owner's lock on the screen",
+          { waiter: late },
+        );
         await owner.query('COMMIT');
         expect((await late).rows).toEqual([{ ids: [] }]);
       } finally {
@@ -904,7 +911,9 @@ describe('pairing', () => {
       const late = second
         .query(sql, [p2.code, org.displayId, colleague])
         .then((result) => result.rows[0] as unknown);
-      expect(await stillWaiting(late)).toBe(true);
+      await waitForLockWaiters(pool, backendPid(first), 1, 'the later claim never waited', {
+        waiter: late,
+      });
       await first.query('COMMIT');
       expect(await late).toEqual({ outcome: 'claimed', cancelled_pairing_ids: [p1.pairingId] });
       await second.query('COMMIT');
@@ -931,7 +940,13 @@ describe('pairing', () => {
       const late = second
         .query(sql, [real.code, guesser.displayId, guesser.membershipId])
         .then((result) => result.rows[0] as unknown);
-      expect(await stillWaiting(late)).toBe(true);
+      await waitForLockWaiters(
+        pool,
+        backendPid(first),
+        1,
+        'the claim with the right code never waited for the fifth wrong one',
+        { waiter: late },
+      );
       await first.query('COMMIT');
       expect(await late).toEqual({ outcome: 'rate_limited' });
       await second.query('COMMIT');

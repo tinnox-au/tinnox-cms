@@ -7,7 +7,7 @@ import type { MediaJobResult } from '@tinnox/contracts';
 import { withOrg, databaseOn } from '@tinnox/db/testing';
 import { LocalObjectStorage } from '@tinnox/storage';
 import sharp from 'sharp';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, onTestFinished } from 'vitest';
 import { MediaPipeline } from '../src/media/pipeline.ts';
 import {
   actAsWorker,
@@ -16,9 +16,9 @@ import {
   createDisplay,
   createOrg,
   expectError,
+  faultyPool,
   isRoleCheck,
   listDir,
-  losingCommitAnswers,
   pairPlayer,
   pngBytes,
   publishImages,
@@ -693,7 +693,9 @@ describe('upload limits and validation results', () => {
     const silent = { info: () => undefined, warn: () => undefined, error: () => undefined };
     const pipeline = new MediaPipeline({
       jobsDir: t.jobsDir,
-      db: databaseOn(losingCommitAnswers(t.pool, /SET status = 'ready'/)),
+      db: databaseOn(
+        faultyPool(t.pool, { mode: 'lost-commit-answer', at: /SET status = 'ready'/ }),
+      ),
       storage: await LocalObjectStorage.create({ root: t.mediaRoot }),
       limits: t.config.limits,
       logger: silent,
@@ -742,7 +744,10 @@ describe('upload limits and validation results', () => {
         LIMIT_MAX_ORG_STORAGE_BYTES: String(QUOTA),
       },
       1000,
-      { wrapPool: (pool) => losingCommitAnswers(pool, /INSERT INTO media AS m/) },
+      {
+        wrapPool: (pool) =>
+          faultyPool(pool, { mode: 'lost-commit-answer', at: /INSERT INTO media AS m/ }),
+      },
     );
     try {
       const owner = await signIn(lossy, org);
@@ -806,7 +811,10 @@ describe('upload limits and validation results', () => {
         LIMIT_MAX_ORG_STORAGE_BYTES: String(QUOTA),
       },
       1000,
-      { wrapPool: (pool) => losingCommitAnswers(pool, /INSERT INTO audit_event/) },
+      {
+        wrapPool: (pool) =>
+          faultyPool(pool, { mode: 'lost-commit-answer', at: /INSERT INTO audit_event/ }),
+      },
     );
     try {
       const owner = await signIn(lossy, org);
@@ -835,10 +843,10 @@ describe('upload limits and validation results', () => {
       1000,
       {
         wrapPool: (pool) =>
-          losingCommitAnswers(
-            pool,
-            /SELECT coalesce\(sum\(bytes\), 0\)::bigint AS used FROM media/,
-          ),
+          faultyPool(pool, {
+            mode: 'lost-commit-answer',
+            at: /SELECT coalesce\(sum\(bytes\), 0\)::bigint AS used FROM media/,
+          }),
       },
     );
     try {
@@ -862,7 +870,10 @@ describe('upload limits and validation results', () => {
     // The marker is the media item's own read (loadMediaRow in routes/media.ts), on readOrg.
     const lossy = await startTestApp({}, 1000, {
       wrapPool: (pool) =>
-        losingCommitAnswers(pool, /WHERE m\.id = \$1 AND m\.org_id = app_org_id\(\)/),
+        faultyPool(pool, {
+          mode: 'lost-commit-answer',
+          at: /WHERE m\.id = \$1 AND m\.org_id = app_org_id\(\)/,
+        }),
     });
     try {
       const owner = await signIn(lossy, org);
@@ -1015,6 +1026,9 @@ describe('upload limits and validation results', () => {
     // The role is checked again in the transaction that writes the row (stage-c.md 6.3). The
     // pool holds that check until the uploader has been made a Viewer.
     const holds = statementHolds();
+    onTestFinished(() => {
+      holds.disarmAll();
+    });
     const racing = await startTestApp(
       {
         LIMIT_MAX_UPLOAD_BYTES: String(UPLOAD_LIMIT),

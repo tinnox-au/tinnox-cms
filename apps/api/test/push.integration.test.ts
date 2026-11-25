@@ -37,9 +37,9 @@ import {
   createSchedule,
   desiredPublicationId,
   expectError,
+  faultyPool,
   imageItem,
   layoutZones,
-  losingCommitAnswers,
   pairPlayer,
   pngBytes,
   push,
@@ -778,7 +778,8 @@ describe('assign, then push', () => {
       const ids = [one.displayId, two.displayId];
       // Every publication of this app commits for real, and the answer to its COMMIT is lost.
       const lossy = await startTestApp({}, 1000, {
-        wrapPool: (pool) => losingCommitAnswers(pool, /INSERT INTO publication \(id/),
+        wrapPool: (pool) =>
+          faultyPool(pool, { mode: 'lost-commit-answer', at: /INSERT INTO publication \(id/ }),
       });
       try {
         const operator = await signIn(lossy, orgA);

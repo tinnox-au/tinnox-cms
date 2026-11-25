@@ -82,6 +82,11 @@ import { installResponseContractCheck } from './response-contract.ts';
 // the light entry '@tinnox/api/test-support/runtime-env' (./runtime-env.ts), so that the
 // stackless layout checks never load this file (CHK-9).
 export type { IdentityProvider };
+// The fault harness and the race helpers (adoption plan step 33): faultHarness, faultyPool and
+// statementHolds; waitForLockWaiters, waitForLockWait, twoTransactions and backendPid.
+export * from './support/faults.ts';
+export * from './support/race.ts';
+
 export {
   installResponseContractCheck,
   routesCheckedForContract,
@@ -973,45 +978,6 @@ export async function settleStrayMediaJobs(pool: Pool): Promise<number> {
   }
 }
 
-/**
- * A pool whose transactions really commit, but report a lost connection instead of the
- * answer to COMMIT once a statement matching `marker` ran in them: the case where the
- * database committed and the API cannot know it.
- */
-export function losingCommitAnswers(pool: Pool, marker: RegExp): Pool {
-  const bound = <T extends object>(target: T, key: string | symbol): unknown => {
-    const value: unknown = Reflect.get(target, key);
-    return typeof value === 'function'
-      ? (value as (...args: unknown[]) => unknown).bind(target)
-      : value;
-  };
-  return new Proxy(pool, {
-    get(target, key) {
-      if (key !== 'connect') return bound(target, key);
-      return async () => {
-        const client = await target.connect();
-        let marked = false;
-        return new Proxy(client, {
-          get(real, name) {
-            if (name !== 'query') return bound(real, name);
-            return async (text: string, values?: unknown[]) => {
-              // 'BEGIN' or 'BEGIN READ ONLY': a mark never carries over from an earlier transaction.
-              if (text.startsWith('BEGIN')) marked = false;
-              if (marker.test(text)) marked = true;
-              const result = await real.query(text, values);
-              if (text === 'COMMIT' && marked) {
-                marked = false;
-                throw new Error('Connection terminated unexpectedly');
-              }
-              return result;
-            };
-          },
-        });
-      };
-    },
-  });
-}
-
 export async function listDir(path: string): Promise<string[]> {
   return (await readdir(path)).filter((name) => !name.startsWith('.worker-alive'));
 }
@@ -1019,81 +985,6 @@ export async function listDir(path: string): Promise<string[]> {
 /** The in-write role check of every write transaction (membershipForCheck, auth/permissions.ts). */
 export const isRoleCheck = (text: string): boolean =>
   text.includes('FROM membership WHERE id = $1 AND org_id = app_org_id() FOR SHARE');
-
-export interface StatementHold {
-  /**
-   * Resolves when the held statement arrives, with the backend pid of the connection that sent
-   * it (for waitForLockWaiters of @tinnox/db/testing); it is not sent until `release`.
-   */
-  readonly reached: Promise<number>;
-  release(): void;
-}
-
-export interface StatementHolds {
-  /** Pass as `startTestApp(…, { wrapPool })`. */
-  readonly wrapPool: (pool: Pool) => Pool;
-  /**
-   * Holds the next statement of any transaction for which `matches` is true, before it is
-   * sent, until `release`: a test then changes the database in between. `matches` is called
-   * for every statement until it matches, so it may count.
-   */
-  hold(matches: (text: string) => boolean): StatementHold;
-}
-
-/** A pool wrapper whose statements a test can hold one at a time (`hold`). */
-export function statementHolds(): StatementHolds {
-  const bound = <T extends object>(target: T, key: string | symbol): unknown => {
-    const value: unknown = Reflect.get(target, key);
-    return typeof value === 'function'
-      ? (value as (...args: unknown[]) => unknown).bind(target)
-      : value;
-  };
-  let armed: {
-    matches: (text: string) => boolean;
-    reached: (pid: number) => void;
-    released: Promise<void>;
-  } | null = null;
-  return {
-    wrapPool: (pool) =>
-      new Proxy(pool, {
-        get(target, key) {
-          if (key !== 'connect') return bound(target, key);
-          return async () => {
-            const client = await target.connect();
-            return new Proxy(client, {
-              get(real, name) {
-                if (name !== 'query') return bound(real, name);
-                return async (text: string, values?: unknown[]) => {
-                  const hold = armed;
-                  if (hold !== null && typeof text === 'string' && hold.matches(text)) {
-                    armed = null;
-                    // node-postgres keeps the backend's pid from the connection handshake.
-                    const pid: unknown = Reflect.get(real, 'processID');
-                    if (typeof pid !== 'number') throw new Error('the held connection has no pid');
-                    hold.reached(pid);
-                    await hold.released;
-                  }
-                  return real.query(text, values);
-                };
-              },
-            });
-          };
-        },
-      }),
-    hold(matches) {
-      let reached: (pid: number) => void = () => undefined;
-      let release: () => void = () => undefined;
-      const atStatement = new Promise<number>((resolve) => {
-        reached = resolve;
-      });
-      const released = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      armed = { matches, reached, released };
-      return { reached: atStatement, release };
-    },
-  };
-}
 
 /**
  * Runs the e-mail alert check once at the app's clock, sending through `ctx.mail` unless given

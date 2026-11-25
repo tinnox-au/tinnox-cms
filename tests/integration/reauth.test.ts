@@ -11,7 +11,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { sessionRevokeMembership } from '@tinnox/db';
 import { withOrg } from '@tinnox/db/testing';
 import pg from 'pg';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { IdentityProvider } from '@tinnox/api/test-support';
 import {
   addMember,
@@ -173,6 +173,9 @@ describe('signing in again after the sessions were ended', () => {
     owner = await signIn(t, org);
     member = await addMember(org);
     idp.sub = member.oidcSub;
+  });
+  afterEach(() => {
+    holds.disarmAll();
   });
   afterAll(async () => {
     await t.close();

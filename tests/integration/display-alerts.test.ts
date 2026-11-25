@@ -9,22 +9,23 @@
 import { randomBytes } from 'node:crypto';
 import { localWallClock, type AlertRecipientDto } from '@tinnox/contracts';
 import { alertRecipientByTokenHash, poolAsTx, sha256 } from '@tinnox/db';
-import { stillWaiting } from '@tinnox/db/testing';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   addAlertAddress,
   addMember,
   appClient,
   asMigratorIn,
   auditEvents,
+  backendPid,
   checkAlerts,
   confirmAlertAddress,
   createDisplay,
   createOrg,
   expectError,
+  faultHarness,
+  faultyPool,
   heartbeatBody,
   lastConfirmationToken,
-  losingCommitAnswers,
   pairPlayer,
   PORTAL_ORIGIN,
   sendHeartbeat,
@@ -36,23 +37,29 @@ import {
   type StatementHold,
   type TestApp,
   type TestOrg,
+  waitForLockWaiters,
 } from './support.ts';
 
 const DELAY_MS = 31 * 60 * 1000;
 
 describe('e-mail alerts for screens', () => {
+  // Nothing is armed: the harness is here to end the run's lock connection (killBackend).
+  const faults = faultHarness();
   let t: TestApp;
   let org: TestOrg;
   let owner: Operator;
   let seq = 1;
 
   beforeAll(async () => {
-    t = await startTestApp();
+    t = await startTestApp({}, 1000, { wrapPool: faults.wrapPool });
     org = await createOrg('Alerts');
     owner = await signIn(t, org);
     await addConfirmed(t, owner, 'ops@example.com');
     // Waiting for confirmation: receives nothing.
     expect((await addAlertAddress(owner, 'waiting@example.com')).status).toBe(201);
+  });
+  afterEach(() => {
+    faults.disarmAll();
   });
   afterAll(async () => {
     await t.close();
@@ -330,7 +337,8 @@ describe('e-mail alerts for screens', () => {
     const screen = await reportingScreen('Alert unconfirmed');
     // Every claim of this app commits for real, and the answer to its COMMIT is lost.
     const lossy = await startTestApp({}, 1000, {
-      wrapPool: (pool) => losingCommitAnswers(pool, /INSERT INTO display_alert/),
+      wrapPool: (pool) =>
+        faultyPool(pool, { mode: 'lost-commit-answer', at: /INSERT INTO display_alert/ }),
     });
     try {
       lossy.advanceClock(DELAY_MS);
@@ -446,9 +454,9 @@ describe('e-mail alerts for screens', () => {
       send: async (message: (typeof t.sentMail)[number]) => {
         if (!terminated && made.some((m) => message.subject.endsWith(`: ${m.name}`))) {
           terminated = true;
-          const killer = await appClient('finds and ends the alert run’s lock connection');
+          const finder = await appClient('finds the alert run’s lock connection');
           try {
-            const { rows } = await killer.query<{ pid: number }>(
+            const { rows } = await finder.query<{ pid: number }>(
               `SELECT l.pid FROM pg_locks l,
                  LATERAL (SELECT hashtextextended('tinnox.display_alerts', 0) AS k) h
                WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 1
@@ -456,19 +464,12 @@ describe('e-mail alerts for screens', () => {
                  AND l.objid = (h.k & 4294967295)::oid`,
             );
             const pid = rows[0]?.pid;
-            expect(pid).toBeDefined();
-            await killer.query('SELECT pg_terminate_backend($1)', [pid]);
-            // Gives the client time to see the connection end.
-            for (let i = 0; i < 50; i += 1) {
-              const left = await killer.query('SELECT 1 FROM pg_stat_activity WHERE pid = $1', [
-                pid,
-              ]);
-              if (left.rowCount === 0) break;
-              await new Promise((resolve) => setTimeout(resolve, 20));
-            }
-            await new Promise((resolve) => setTimeout(resolve, 200));
+            if (pid === undefined) throw new Error('nothing holds the alert run’s session lock');
+            // Returns once the server no longer lists the backend and the client has seen its
+            // connection end, so the run's signal is aborted before this e-mail is sent.
+            expect(await faults.killBackend(pid)).toEqual({ pid, gone: true });
           } finally {
-            await killer.end();
+            await finder.end();
           }
         }
         t.sentMail.push(message);
@@ -559,7 +560,8 @@ describe('alert addresses', () => {
 
   it('sends no confirmation when the COMMIT that stores an address does not confirm, and adding it again answers 409 (SCX-03, D9)', async () => {
     const lossy = await startTestApp({}, 1000, {
-      wrapPool: (pool) => losingCommitAnswers(pool, /INSERT INTO alert_recipient/),
+      wrapPool: (pool) =>
+        faultyPool(pool, { mode: 'lost-commit-answer', at: /INSERT INTO alert_recipient/ }),
     });
     try {
       const operator = await signIn(lossy, await createOrg('Alert address unconfirmed'));
@@ -699,6 +701,9 @@ describe('alert addresses and the member who added them (D22)', () => {
     t = await startTestApp({}, 1000, { wrapPool: holds.wrapPool });
     org = await createOrg('Alert address adders');
     owner = await signIn(t, org);
+  });
+  afterEach(() => {
+    holds.disarmAll();
   });
   afterAll(async () => {
     await t.close();
@@ -889,10 +894,15 @@ describe('alert addresses and the member who added them (D22)', () => {
       await ending.query('SELECT sec.session_revoke_membership($1)', [pending.member.membershipId]);
       const confirming = answerTo(pending.token);
       // Without the lock the UPDATE would read the member row as it was and confirm at once.
-      const waited = await stillWaiting(confirming, 400);
+      await waitForLockWaiters(
+        t.testSql('reads which backends wait for the open member change (D22)'),
+        backendPid(ending),
+        1,
+        'the confirmation never waited for the cut-off that is committing',
+        { waiter: confirming },
+      );
       await ending.query('COMMIT');
       const answer = await confirming;
-      expect(waited).toBe(true);
       expect(answer.status).toBe(404);
     } finally {
       await ending.query('ROLLBACK').catch(() => undefined);
@@ -946,10 +956,22 @@ describe('alert addresses and the member who added them (D22)', () => {
     const held = holds.hold(isConfirmUpdate);
     const confirming = confirmAlertAddress(t, pending.token);
     await reached(held, confirming, 'its conditional UPDATE');
+    const confirmingPid = await held.reached;
     const signingOut = signOutEverywhere(pending.member);
-    const waited = await stillWaiting(signingOut, 400).finally(held.release);
+    const notSeenWaiting = await waitForLockWaiters(
+      t.testSql('reads which backends wait for the held confirmation (D22)'),
+      confirmingPid,
+      1,
+      'the sign out everywhere never waited for the confirmation',
+      { waiter: signingOut },
+    )
+      .then(
+        () => null,
+        (error: unknown) => (error instanceof Error ? error : new Error(String(error))),
+      )
+      .finally(held.release);
     const [confirmed, signedOut] = await Promise.all([confirming, signingOut]);
-    expect(waited).toBe(true);
+    if (notSeenWaiting !== null) throw notSeenWaiting;
     expect(confirmed.status).toBe(204);
     expect(signedOut.status).toBe(200);
     expect(await statusOf(pending.id)).toBe('confirmed');

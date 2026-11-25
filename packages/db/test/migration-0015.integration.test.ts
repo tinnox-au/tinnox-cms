@@ -36,9 +36,10 @@ import {
   inTx,
   PG,
   pgCode,
-  stillWaiting,
+  backendPid,
   testOrgId,
   twoTransactions,
+  waitForLockWaiters,
 } from './support.ts';
 
 const TARGET = '0015_session_revoke_locks_first.sql';
@@ -163,7 +164,13 @@ async function revokeWhileRowIsHeld(member: Member, signInDuringWait = false): P
     const revoking = revoker.query('SELECT sec.session_revoke_membership($1)', [member.id]);
     let signing: Promise<SignIn> | undefined;
     try {
-      expect(await stillWaiting(revoking)).toBe(true);
+      await waitForLockWaiters(
+        clients().pool,
+        backendPid(holder),
+        1,
+        'the revocation never waited for the held member row',
+        { waiter: revoking },
+      );
       await new Promise((resolve) => setTimeout(resolve, WAIT_MS));
       const clock = await holder.query<{ at: Date }>('SELECT clock_timestamp() AS at');
       duringWait = clock.rows[0]?.at;
@@ -171,7 +178,14 @@ async function revokeWhileRowIsHeld(member: Member, signInDuringWait = false): P
       if (signInDuringWait) {
         signing = signIn(member.oidcSub, wholeSecond(duringWait));
         // It needs the same row (sec.session_create, FOR NO KEY UPDATE), so it waits too.
-        expect(await stillWaiting(signing)).toBe(true);
+        // Behind the holder too, directly or queued behind the revocation: two waiters now.
+        await waitForLockWaiters(
+          clients().pool,
+          backendPid(holder),
+          2,
+          'the sign-in never waited for the member row',
+          { waiter: signing },
+        );
       }
       await holder.query('ROLLBACK');
       await revoking;

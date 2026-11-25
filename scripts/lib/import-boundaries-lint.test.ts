@@ -485,6 +485,9 @@ describe('test code (rule (h))', () => {
     ['packages/domain/src/fixture.ts', './fixtures.test-support.ts'],
     ['apps/portal/src/fixture.tsx', './testFrame.test-support.ts'],
     ['apps/api/src/fixture.ts', '../test/support.ts'],
+    // The fault harness and the race helpers (step 33) are test code like the harness itself.
+    ['apps/api/src/fixture.ts', '../test/support/faults.ts'],
+    ['apps/api/src/routes/fixture.ts', '../../test/support/race.ts'],
     ['apps/api/src/fixture.ts', './security.test.ts'],
     ['scripts/lib/fixture.ts', '../../tests/integration/support.ts'],
     // SEC-3: TypeScript resolves these spellings to the .ts test files too.

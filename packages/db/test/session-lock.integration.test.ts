@@ -8,7 +8,7 @@
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { withSessionLock, type Database } from '../src/index.ts';
-import { databaseOn, type Pool, type PoolClient } from '../src/testing.ts';
+import { databaseOn, killBackend, type Pool, type PoolClient } from '../src/testing.ts';
 import { appPool, migratorClient } from './support.ts';
 
 const KEY = 'tinnox.display_alerts';
@@ -158,11 +158,12 @@ describe('withSessionLock (EAX-06)', () => {
   it('EAX-06: aborts the signal when the lock connection is lost, and frees the lock', async () => {
     const outcome = await withSessionLock(db, 'display_alerts', async (signal) => {
       const pid = await holder();
-      expect(pid).toBeDefined();
-      // The runtime role may end a backend of its own role.
+      if (pid === undefined) throw new Error('nothing holds the session lock');
+      // The runtime role may end a backend of its own role. killBackend returns once the
+      // server no longer lists it (the fault harness's primitive, adoption plan step 33).
       const killer = appPool('ends the backend that holds the session lock', 1);
       try {
-        await killer.query('SELECT pg_terminate_backend($1)', [pid]);
+        expect(await killBackend(killer, pid)).toEqual({ pid, gone: true });
       } finally {
         await killer.end();
       }
