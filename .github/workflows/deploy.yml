@@ -1,0 +1,132 @@
+# Releases the commit at the tip of main to a deployed environment
+# (docs/deployment-plan-2026-11-24.md, section 3.5, item 6).
+#
+# It is started by hand (Actions, Deploy, Run workflow) and only from main. It never runs
+# for a pull request, so code from a fork cannot reach it. It holds no key: GitHub proves
+# to AWS which repository and which deployment environment the run belongs to, and AWS
+# hands out credentials for an hour (infra/aws/delivery.yml). The deployment environment
+# asks a reviewer to approve each run before the job starts.
+#
+# What the job may do in AWS: push images to the four repositories, and start the release
+# document of the environment with a commit id. What happens on the server is
+# infra/deploy/release.sh of the commit being released.
+#
+# Settings, as variables of the GitHub deployment environment (none of them is a secret):
+#   AWS_REGION            ap-southeast-2
+#   AWS_DEPLOY_ROLE_ARN   the DeployRoleArn output of the stack tinnox-cms-delivery
+#   API_PUBLIC_ORIGIN     the PortalOrigin output of the environment's stack; the player
+#                         build carries it, so the web image belongs to one environment
+name: Deploy
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: deploy-test
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, push and release to test
+    if: github.ref == 'refs/heads/main'
+    # The server is arm64, so the images are built on arm64, with no emulation.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    environment: test
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ENVIRONMENT: test
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+      API_PUBLIC_ORIGIN: ${{ vars.API_PUBLIC_ORIGIN }}
+    steps:
+      - name: Check the settings
+        run: |
+          missing=0
+          for name in AWS_REGION AWS_DEPLOY_ROLE_ARN API_PUBLIC_ORIGIN; do
+            if [ -z "${!name}" ]; then
+              echo "::error::the variable $name is not set in the deployment environment $ENVIRONMENT"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Take the deploy role
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: deploy-${{ github.run_id }}-${{ github.run_attempt }}
+          role-duration-seconds: 3600
+
+      - name: Sign in to the image registry
+        run: |
+          account=$(aws sts get-caller-identity --query Account --output text)
+          registry="$account.dkr.ecr.$AWS_REGION.amazonaws.com"
+          echo "REGISTRY=$registry" >>"$GITHUB_ENV"
+          aws ecr get-login-password | docker login --username AWS --password-stdin "$registry"
+
+      # One tag per commit, written once: the repositories refuse to move a tag. An image
+      # that is already there is left alone, so a run can be started again after a
+      # failure. The web image carries API_PUBLIC_ORIGIN: after changing that variable,
+      # release a new commit.
+      - name: Build and push the images
+        run: |
+          build() { # repository, then the arguments of docker build
+            local repository=$1
+            shift
+            local image="$REGISTRY/tinnox-cms/$repository:$GITHUB_SHA"
+            if aws ecr describe-images --repository-name "tinnox-cms/$repository" \
+              --image-ids "imageTag=$GITHUB_SHA" >/dev/null 2>&1; then
+              echo "tinnox-cms/$repository:$GITHUB_SHA is already in the registry"
+              return 0
+            fi
+            docker build --pull --tag "$image" "$@" .
+            docker push --quiet "$image"
+          }
+          build api --file apps/api/Dockerfile --target runtime
+          build release --file apps/api/Dockerfile --target release
+          build media-worker --file apps/media-worker/Dockerfile
+          build web --file infra/deploy/Dockerfile.web --build-arg "API_PUBLIC_ORIGIN=$API_PUBLIC_ORIGIN"
+
+      - name: Release on the server
+        run: |
+          command_id=$(aws ssm send-command \
+            --document-name "tinnox-cms-$ENVIRONMENT-release" \
+            --targets "Key=tag:project,Values=tinnox-cms" "Key=tag:environment,Values=$ENVIRONMENT" \
+            --parameters "Tag=$GITHUB_SHA" \
+            --comment "GitHub run $GITHUB_RUN_ID, commit $GITHUB_SHA" \
+            --timeout-seconds 120 \
+            --query Command.CommandId --output text)
+          echo "command $command_id"
+          status=Pending
+          servers=0
+          for poll in $(seq 1 180); do
+            sleep 10
+            listing=$(aws ssm list-command-invocations --command-id "$command_id" --details \
+              --query 'CommandInvocations[].[InstanceId, Status]' --output text)
+            servers=$(printf '%s' "$listing" | grep -c . || true)
+            status=$(printf '%s\n' "$listing" | cut -f2 | sort -u | paste -sd, -)
+            # No server at all after a minute: the tags matched nothing.
+            if [ "$servers" -eq 0 ] && [ "$poll" -ge 6 ]; then break; fi
+            case "$status" in '' | *Pending* | *InProgress* | *Delayed*) ;; *) break ;; esac
+          done
+          aws ssm list-command-invocations --command-id "$command_id" --details \
+            --query 'CommandInvocations[].CommandPlugins[].Output' --output text
+          if [ "$servers" -ne 1 ]; then
+            echo "::error::the release ran on $servers servers; exactly one carries the tags project=tinnox-cms and environment=$ENVIRONMENT"
+            exit 1
+          fi
+          if [ "$status" != Success ]; then
+            echo "::error::the release ended as ${status:-nothing}: see the output above and /var/log/tinnox-release.log on the server"
+            exit 1
+          fi
+          echo "released $GITHUB_SHA to $ENVIRONMENT"
