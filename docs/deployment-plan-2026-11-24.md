@@ -179,7 +179,8 @@ First month:
    (tested 25 Nov on the stage 0 instance; see `infra/aws/README.md`, section 5).
 5. Cognito: a Sydney user pool with TOTP required; confirm it sends `auth_time`, honours
    `prompt=login` and proves MFA through `acr` or `amr`; a Cognito reader for
-   `scripts/lib/idp.ts`; a replacement for `verify:oidc`.
+   `scripts/lib/idp.ts`; a replacement for `verify:oidc` (`infra/aws/verify-identity.sh`:
+   settings and endpoints, without a scripted sign-in).
 6. A deploy workflow in GitHub Actions: short-lived AWS credentials through OIDC (no stored
    keys), build and push images, then on the server stop the API, run migrations, start the
    API, check `/readyz`. Started by hand from `main` first; automatic on merge once trusted.

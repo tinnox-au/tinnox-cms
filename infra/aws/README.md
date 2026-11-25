@@ -276,9 +276,16 @@ an authenticator app at the first sign-in.
    `AdminGetUser` call (`scripts/lib/idp.ts`), and the username of a command is the
    person's e-mail address; the account is created first, in the Cognito console or with
    `aws cognito-idp admin-create-user`.
-5. **After the first sign-in.** The first Owner signed in on 25 November. Left from this
-   list: sign-out against Cognito (item 2), a forced re-authentication (`prompt=login`
-   and `auth_time`), and a check that replaces `verify:oidc` for this provider.
+5. **Checking the sign-in again.** `infra/aws/verify-identity.sh <environment>`, from
+   CloudShell, is the deployed counterpart of `npm run verify:oidc`. It changes nothing
+   and signs nobody in: it compares the pool, the app client and the API's settings with
+   what this directory sets up, and asks the API and the pool the questions that need no
+   account (what a sign-in starts with, that an unregistered return address is refused,
+   that sign-out returns to the portal). Run it after any change to `identity.yml`, to the
+   API's sign-in code or to the settings. It passed on 26 November, and a copy with two
+   expectations made wrong failed as it should. It does not read a real token: the
+   claims (`auth_time`, `amr`, `acr`) and a forced re-authentication (`prompt=login`)
+   need a signed-in person, and only the first sign-in by hand has shown them so far.
 
 ## 6. Running it
 
