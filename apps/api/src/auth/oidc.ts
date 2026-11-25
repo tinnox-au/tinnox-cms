@@ -95,6 +95,36 @@ export function mfaSatisfied(
  */
 export const SIGNED_OUT_STATE = 'signed_out';
 
+/**
+ * A Cognito user pool: https://cognito-idp.<region>.amazonaws.com/<pool id>. Its discovery
+ * document names an end_session_endpoint, but that endpoint (managed login's /logout) does not
+ * take the parameters of OpenID Connect RP-initiated logout: it answers "Invalid request" to
+ * post_logout_redirect_uri and id_token_hint. It takes `client_id` and `logout_uri`, and
+ * `logout_uri` must be, character for character, one of the app client's sign-out URLs.
+ */
+function isCognitoIssuer(issuer: string): boolean {
+  try {
+    return /^cognito-idp\.[a-z0-9-]+\.amazonaws\.com$/.test(new URL(issuer).hostname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Cognito's sign-out URL. Cognito returns to `logout_uri` exactly and passes no `state` on, so
+ * the marker the portal looks for is part of the address itself:
+ * `<post-logout URI>?state=signed_out`, which is registered as a sign-out URL of the app
+ * client (infra/aws/identity.yml). No ID token is sent; Cognito does not use one here.
+ */
+function cognitoEndSessionUrl(endpoint: string, config: AppConfig): string {
+  const back = new URL(config.oidc.postLogoutRedirectUri);
+  back.searchParams.set('state', SIGNED_OUT_STATE);
+  const url = new URL(endpoint);
+  url.searchParams.set('client_id', config.oidc.clientId);
+  url.searchParams.set('logout_uri', back.href);
+  return url.href;
+}
+
 export function createIdentityProvider(config: AppConfig): IdentityProvider {
   let cached: Promise<oidc.Configuration> | null = null;
 
@@ -182,7 +212,12 @@ export function createIdentityProvider(config: AppConfig): IdentityProvider {
       } catch {
         return null;
       }
-      if (cfg.serverMetadata().end_session_endpoint === undefined) return null;
+      const endpoint = cfg.serverMetadata().end_session_endpoint;
+      if (endpoint === undefined) return null;
+      if (isCognitoIssuer(config.oidc.issuer)) {
+        const cognito = cognitoEndSessionUrl(endpoint, config);
+        return cognito.length <= LOGOUT_REDIRECT_MAX_LENGTH ? cognito : null;
+      }
       const build = (hint: string | null): string =>
         oidc.buildEndSessionUrl(cfg, {
           post_logout_redirect_uri: config.oidc.postLogoutRedirectUri,

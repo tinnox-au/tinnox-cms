@@ -127,8 +127,12 @@ Resources:
       # config.ts accepts exactly this callback path, and a sign-out target on the portal.
       CallbackURLs:
         - !Sub '${PortalOrigin}/api/auth/callback'
+      # Cognito returns to a sign-out URL only when the request names it character for
+      # character, and passes no state on. The second one carries the marker the portal
+      # shows "You have signed out." for; the API asks for it (apps/api/src/auth/oidc.ts).
       LogoutURLs:
         - !Sub '${PortalOrigin}/'
+        - !Sub '${PortalOrigin}/?state=signed_out'
       # The API never signs users in through the Cognito API, only through the pages.
       ExplicitAuthFlows: [ALLOW_REFRESH_TOKEN_AUTH]
       PreventUserExistenceErrors: ENABLED
