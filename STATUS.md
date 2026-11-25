@@ -39,7 +39,6 @@ None.
 | CMS-34 | Poteto pyramid refactor, group F: prose (steps 45 to 48 of the adoption plan); Michael starts it | proposed | - | 24 Nov |
 | CMS-35 | Provider review for alert e-mail: name the reviewed SMTP host; production sends no alert e-mail until then (poteto D23) | proposed | - | 24 Nov |
 | CMS-36 | Decide two unaudited writes: an alert episode closed without an e-mail, and the expiry mark on a pairing session; audit or exempt them in D3 (poteto step 16) | proposed | - | 24 Nov |
-| CMS-37 | Deploy the CMS to production: agree the deployment plan first (data stays in Australia, stability, scalability, security), then the first production release | proposed | - | 24 Nov |
 | CMS-38 | Player push channel for instant commands (reload, restart, screenshot): the player only polls today; add when a customer needs faster than the 15 s poll | proposed | - | 24 Nov |
 | CMS-39 | Compiled API image before stage 1 (first customer): add a build step and a CI job that tests the compiled build; stage 0 runs the API through tsx | proposed | - | 25 Nov |
 
@@ -53,6 +52,7 @@ None.
 |---|---|---|---|---|
 | CMS-4 | Real-hardware check on Raspberry Pi 5 (8GB) under Linux: the browser player in Chromium kiosk mode on a monitor | Michael 23 Nov | - | 23 Nov |
 | CMS-32 | Poteto pyramid refactor, group D: verification (steps 29 to 37 of the adoption plan); Michael starts it | Michael 25 Nov | - | 25 Nov |
+| CMS-37 | Deploy the CMS to production: agree the deployment plan first (data stays in Australia, stability, scalability, security), then the first production release | Michael 25 Nov | - | 25 Nov |
 
 ## In review
 
