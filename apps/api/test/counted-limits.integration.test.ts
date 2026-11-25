@@ -10,7 +10,7 @@
 import { ABSOLUTE, MAX_ALERT_RECIPIENTS } from '@tinnox/contracts';
 import type { OrgTx } from '@tinnox/db';
 import { waitForLockWaiters, withOrg } from '@tinnox/db/testing';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   asMigratorIn,
   createOrg,
@@ -40,6 +40,9 @@ describe('two creates at a counted ceiling (SCX-05)', () => {
     t = await startTestApp({ LIMIT_MAX_ORG_STORAGE_BYTES: String(QUOTA) }, 1000, {
       wrapPool: holds.wrapPool,
     });
+  });
+  afterEach(() => {
+    holds.disarmAll();
   });
   afterAll(async () => {
     await t.close();

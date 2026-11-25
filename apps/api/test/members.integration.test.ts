@@ -17,13 +17,14 @@ import {
   type Role,
 } from '@tinnox/contracts';
 import { sessionCreate, sha256 } from '@tinnox/db';
-import { withOrg, withoutOrg, type Pool } from '@tinnox/db/testing';
+import { withOrg, withoutOrg } from '@tinnox/db/testing';
 import pg from 'pg';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, onTestFinished } from 'vitest';
 import {
   addMember,
   auditEvents,
   createOrg,
+  faultHarness,
   signIn,
   startTestApp,
   type AuditEntry,
@@ -502,53 +503,13 @@ describe('people routes', () => {
   it('answers a last-Owner refusal of the database with 409 last_owner and records it', async () => {
     // Under the lock order the API never reaches the trigger (the actor is an Owner too), so
     // the trigger's answer is injected on the UPDATE.
-    const bound = <T extends object>(target: T, key: string | symbol): unknown => {
-      const value: unknown = Reflect.get(target, key);
-      return typeof value === 'function'
-        ? (value as (...args: unknown[]) => unknown).bind(target)
-        : value;
-    };
-    let armed = false;
-    const injecting = (real: Pool): Pool =>
-      new Proxy(real, {
-        get(target, key) {
-          if (key !== 'connect') return bound(target, key);
-          return async () => {
-            const client = await target.connect();
-            return new Proxy(client, {
-              get(realClient, name) {
-                if (name !== 'query') return bound(realClient, name);
-                return async (text: unknown, values?: unknown[]) => {
-                  if (
-                    armed &&
-                    typeof text === 'string' &&
-                    /^UPDATE membership SET role\b/.test(text)
-                  ) {
-                    armed = false;
-                    // As the driver parses the server's refusal: classifyDbError reads only
-                    // pg's DatabaseError (step 26).
-                    throw Object.assign(
-                      new pg.DatabaseError(
-                        'an organisation keeps at least one active owner',
-                        0,
-                        'error',
-                      ),
-                      {
-                        code: '23001',
-                        constraint: 'membership_last_owner',
-                      },
-                    );
-                  }
-                  return realClient.query(text as string, values);
-                };
-              },
-            });
-          };
-        },
-      });
+    const faults = faultHarness();
+    onTestFinished(() => {
+      faults.disarmAll();
+    });
     // The throttle at its default (scale 1), and one refusal first: the last-Owner row is then
     // not the first of this app's window, so only `always` writes it.
-    const faulty = await startTestApp({}, 1, { wrapPool: injecting });
+    const faulty = await startTestApp({}, 1, { wrapPool: faults.wrapPool });
     try {
       const target = await member('owner');
       const operator = await signIn(faulty, org);
@@ -556,7 +517,16 @@ describe('people routes', () => {
         (await operator.fetch(`/api/members/${org.membershipId}`, patch({ displayName: 'Self' })))
           .status,
       ).toBe(403);
-      armed = true;
+      // As the driver parses the server's refusal: classifyDbError reads only pg's
+      // DatabaseError (step 26). The UPDATE itself is never sent.
+      const injected = faults.arm({
+        mode: 'never-sent',
+        at: /^UPDATE membership SET role\b/,
+        error: Object.assign(
+          new pg.DatabaseError('an organisation keeps at least one active owner', 0, 'error'),
+          { code: '23001', constraint: 'membership_last_owner' },
+        ),
+      });
       const body = await refused(
         () => operator.fetch(`/api/members/${target.membershipId}`, patch({ role: 'admin' })),
         {
@@ -566,7 +536,7 @@ describe('people routes', () => {
           object: { type: 'membership', id: target.membershipId },
         },
       );
-      expect(armed).toBe(false);
+      expect(await injected.delivered).toMatchObject({ mode: 'never-sent', sqlstate: '23001' });
       expect(body.error).toEqual({
         code: 'last_owner',
         message:

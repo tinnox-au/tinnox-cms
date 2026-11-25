@@ -19,7 +19,7 @@
  * held one, the wait is read from the server (`waitForLockWaiters`), not guessed.
  */
 import { waitForLockWaiters, withOrg } from '@tinnox/db/testing';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   auditEvents,
   createDisplay,
@@ -65,6 +65,9 @@ describe('the revocation window (D8)', () => {
     t = await startTestApp({}, 1000, { wrapPool: holds.wrapPool });
     org = await createOrg('Revocation window');
     operator = await signIn(t, org);
+  });
+  afterEach(() => {
+    holds.disarmAll();
   });
   afterAll(async () => {
     await t.close();

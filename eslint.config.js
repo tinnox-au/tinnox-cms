@@ -1206,12 +1206,12 @@ const noModuleMock = (instead) =>
     message: `Integration and e2e tests use real services (OTH-13, tests/README.md). ${instead}`,
   }));
 const NO_MODULE_MOCK = noModuleMock(
-  'Inject a fault through startTestApp(..., { wrapPool }) with losingCommitAnswers or statementHolds, or the mail option, in apps/api/test/support.ts, instead of replacing a module or a global.',
+  'Inject a fault through startTestApp(..., { wrapPool }) with faultHarness or faultyPool (apps/api/test/support/faults.ts, exported by apps/api/test/support.ts), or the mail option, instead of replacing a module or a global.',
 );
 // packages/db may not import the API's harness (the layer table), so its tests are pointed at
 // their own helpers.
 const NO_MODULE_MOCK_DB = noModuleMock(
-  'Wrap or replace the pool you pass to the function under test, or hold a lock with the helpers in packages/db/test/support.ts (stillWaiting, twoTransactions, asSuperuser), instead of replacing a module or a global.',
+  'Wrap or replace the pool you pass to the function under test, or hold a lock with the helpers in packages/db/test/support.ts (twoTransactions, waitForLockWaiters, killBackend, asSuperuser), instead of replacing a module or a global.',
 );
 
 /** Files that match a glob of `outer` and a glob of `inner` (an inner array means "all of"). */
