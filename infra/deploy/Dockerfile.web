@@ -1,0 +1,47 @@
+# syntax=docker/dockerfile:1
+# Edge image for a deployed environment: Caddy with the built portal and player.
+# Build context: the repository root.
+#   docker build -f infra/deploy/Dockerfile.web \
+#     --build-arg API_PUBLIC_ORIGIN=https://app.test.tinnox-one.com.au -t tinnox-cms-web .
+#
+# The player's build writes the API origin into its code and its Content-Security-Policy
+# (apps/player-web/build/shell-plugin.mjs), so this image belongs to one environment.
+# The portal's build is the same for every environment.
+
+FROM node:24.22.3-alpine3.24@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5 AS build
+WORKDIR /app
+# The lockfile decides every version. Install scripts are not run.
+COPY package.json package-lock.json ./
+COPY apps/api/package.json apps/api/
+COPY apps/media-worker/package.json apps/media-worker/
+COPY apps/portal/package.json apps/portal/
+COPY apps/player-web/package.json apps/player-web/
+COPY packages/app-render/package.json packages/app-render/
+COPY packages/contracts/package.json packages/contracts/
+COPY packages/db/package.json packages/db/
+COPY packages/delivery/package.json packages/delivery/
+COPY packages/domain/package.json packages/domain/
+COPY packages/storage/package.json packages/storage/
+COPY tests/package.json tests/
+RUN npm ci --ignore-scripts --no-audit --no-fund && rm -rf /root/.npm
+COPY tsconfig.base.json tsconfig.web.json ./
+COPY packages ./packages
+COPY apps/portal ./apps/portal
+COPY apps/player-web ./apps/player-web
+ARG API_PUBLIC_ORIGIN
+RUN test -n "$API_PUBLIC_ORIGIN" || { echo 'API_PUBLIC_ORIGIN build argument is required' >&2; exit 1; }
+RUN npm run build --workspace @tinnox/portal \
+ && VITE_API_BASE_URL="$API_PUBLIC_ORIGIN" npm run build --workspace @tinnox/player-web \
+ && find apps/portal/dist apps/player-web/dist -name '*.map' -delete
+
+# Caddy 2.11.9 on Alpine 3.24, pinned by tag and digest.
+FROM caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0 AS runtime
+RUN addgroup -S -g 10003 edge \
+ && adduser -S -D -H -u 10003 -G edge -s /sbin/nologin edge \
+ && mkdir -p /data /config \
+ && chown 10003:10003 /data /config
+COPY infra/deploy/Caddyfile /etc/caddy/Caddyfile
+COPY --from=build /app/apps/portal/dist /srv/portal
+COPY --from=build /app/apps/player-web/dist /srv/player
+USER 10003:10003
+EXPOSE 8080 8443
