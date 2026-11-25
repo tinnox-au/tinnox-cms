@@ -1712,8 +1712,39 @@ const outboundSyntax = (dir, allowed) => [
   ...NO_OUTBOUND_GLOBAL_DESTRUCTURING,
 ];
 
+// The no-restricted-syntax list of the test files that run against real services; the seeders'
+// block adds to it.
+const REAL_SERVICE_TEST_SYNTAX = [
+  ...NO_SKIPPED_TESTS,
+  ...NO_RANDOM_IN_TESTS,
+  ...NO_FC_REPLAY,
+  ...NO_RANGE_STATUS,
+  ...NO_RESPONSE_NOT_OK,
+  ...NO_BRAND_CAST,
+  ...NO_HTML_SINK_CALLS,
+];
+
+// D13, step 34: the seeders of the migrate-forward chain (packages/db/test/levels).
+const SEEDER_FILES = ['packages/db/test/levels/**'];
+const SEEDER_LOADER_MESSAGE =
+  'A seeder of the migrate-forward chain is plain SQL through the client it is given (D13): it reads no file and loads no module by a path lint cannot check. Write the rows with inOrg, asDefiner, id and bytes32 of ./sql.ts, and import earlier seeders (./seed-NNNN.ts) with a static import.';
+const SEEDER_BANNED_MODULES = [
+  'node:module',
+  'module',
+  'node:fs',
+  'node:fs/promises',
+  'fs',
+  'fs/promises',
+].map((name) => ({ name, message: SEEDER_LOADER_MESSAGE }));
+// A computed import() (a template with an expression, a variable, a URL, a concatenation) names a
+// module the import rules cannot read. Only the seeders refuse it: the rest of the tree loads a
+// computed path where it must (levels.ts loads each seeder so).
+const NO_COMPUTED_IMPORT = [
+  { selector: "ImportExpression[source.type!='Literal']", message: SEEDER_LOADER_MESSAGE },
+];
+
 // Extra patterns for a subset of the files: each facet adds its patterns (or the patterns it
-// gives for the workspace) to the workspace's own.
+// gives for the workspace) to the workspace's own, and its `paths`, if any.
 // `only` and `except` name the workspaces a facet can touch, and facets of one `group` match
 // disjoint files and are never combined. Facets of different groups are combined whether or not
 // their files can meet, so a few generated blocks match nothing (the route-file facet with a
@@ -1883,6 +1914,26 @@ const IMPORT_FACETS = [
     ],
   },
   {
+    // D13, step 34: a seeder of the migrate-forward chain is plain SQL valid at its own level. A
+    // helper of today (createOrg, a sec.* wrapper) writes today's columns, so an old level's
+    // fixture written with one breaks when the helper changes (it did once: the 0011 fixture of
+    // migration-0012.integration.test.ts had to pass { role: 'operator' } after 0013). The rule
+    // compares the specifier text: '..' anywhere, or an absolute path, leaves the folder. The
+    // loaders that take a specifier the rule cannot read are banned outright: node:module
+    // (createRequire), the file system (readFileSync of another file) here, and a computed
+    // import() by NO_COMPUTED_IMPORT.
+    only: ['packages/db'],
+    files: SEEDER_FILES,
+    paths: SEEDER_BANNED_MODULES,
+    patterns: [
+      {
+        regex: '^(@tinnox/|/|file:)|(^|/)\\.\\.(/|$)',
+        message:
+          "A seeder of the migrate-forward chain imports only from its own folder, packages/db/test/levels (D13): write the rows in plain SQL valid at the seeder's level through the client it is given, with inOrg, asDefiner, id and bytes32 of ./sql.ts, and take ids of earlier levels from their seeders (./seed-NNNN.ts). Helpers of @tinnox/* and of packages/db/test write today's columns, which an old level does not have.",
+      },
+    ],
+  },
+  {
     // Rule (i), D6: a route file imports no other route file. The rule compares the specifier
     // text and never resolves it, so it needs both halves: './media.ts' and '../routes/media.ts'.
     only: ['apps/api'],
@@ -1955,6 +2006,9 @@ function importBoundaryBlocks() {
         'no-restricted-imports': [
           'error',
           {
+            ...(set.some((facet) => facet.paths)
+              ? { paths: set.flatMap((facet) => facet.paths ?? []) }
+              : {}),
             patterns: [
               ...layerPatterns(dir),
               ...set.flatMap((facet) =>
@@ -2456,16 +2510,14 @@ export default tseslint.config(
     // The test files that send real requests also refuse a response's `ok` asserted false.
     files: REAL_SERVICE_TEST_FILES,
     rules: {
-      'no-restricted-syntax': [
-        'error',
-        ...NO_SKIPPED_TESTS,
-        ...NO_RANDOM_IN_TESTS,
-        ...NO_FC_REPLAY,
-        ...NO_RANGE_STATUS,
-        ...NO_RESPONSE_NOT_OK,
-        ...NO_BRAND_CAST,
-        ...NO_HTML_SINK_CALLS,
-      ],
+      'no-restricted-syntax': ['error', ...REAL_SERVICE_TEST_SYNTAX],
+    },
+  },
+  {
+    // D13, step 34: the seeders also refuse an import() whose specifier lint cannot read.
+    files: SEEDER_FILES,
+    rules: {
+      'no-restricted-syntax': ['error', ...REAL_SERVICE_TEST_SYNTAX, ...NO_COMPUTED_IMPORT],
     },
   },
   {

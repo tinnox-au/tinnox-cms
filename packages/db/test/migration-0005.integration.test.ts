@@ -27,6 +27,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { OrgId } from '../src/index.ts';
 import { withOrg, type Pool } from '../src/testing.ts';
 import { resetTestDatabase, runMigrations, type MigrationResult } from '../src/migrate.ts';
+import { schemaSnapshot, type SchemaSnapshot } from './levels.ts';
 import { appPool, migratorClient, migratorUrl, testOrgId } from './support.ts';
 
 const MIGRATIONS = join(
@@ -192,58 +193,8 @@ let a: LegacyOrg;
 let b: LegacyOrg;
 let upgrade: MigrationResult;
 
-/** What can be seen of the schema and the data without an organisation context. */
-interface SchemaSnapshot {
-  readonly migrations: string[];
-  readonly tables: { name: string; rowSecurity: boolean; forced: boolean }[];
-  readonly columns: string[];
-  readonly indexes: string[];
-  readonly triggers: { name: string; enabled: string }[];
-  readonly functions: string[];
-  readonly policies: string[];
-  readonly grants: string[];
-}
-
-async function schemaSnapshot(): Promise<SchemaSnapshot> {
-  const list = async <R extends pg.QueryResultRow>(sql: string): Promise<R[]> =>
-    (await migrator.query<R>(sql)).rows;
-  const names = async (sql: string): Promise<string[]> =>
-    (await list<{ name: string }>(sql)).map((row) => row.name);
-  return {
-    migrations: await names('SELECT name FROM public.schema_migrations ORDER BY name'),
-    tables: await list(
-      `SELECT c.relname AS name, c.relrowsecurity AS "rowSecurity", c.relforcerowsecurity AS forced
-       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-       WHERE n.nspname = 'public' AND c.relkind = 'r' ORDER BY 1`,
-    ),
-    columns: await names(
-      `SELECT table_name || '.' || column_name || ' ' || data_type AS name
-       FROM information_schema.columns WHERE table_schema = 'public' ORDER BY 1`,
-    ),
-    indexes: await names(
-      "SELECT indexdef AS name FROM pg_indexes WHERE schemaname = 'public' ORDER BY 1",
-    ),
-    triggers: await list(
-      `SELECT c.relname || '.' || g.tgname AS name, g.tgenabled::text AS enabled
-       FROM pg_trigger g JOIN pg_class c ON c.oid = g.tgrelid
-       JOIN pg_namespace n ON n.oid = c.relnamespace
-       WHERE n.nspname = 'public' AND NOT g.tgisinternal ORDER BY 1`,
-    ),
-    functions: await names(
-      `SELECT p.proname AS name FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-       WHERE n.nspname = 'public' ORDER BY 1`,
-    ),
-    policies: await names(
-      `SELECT tablename || '.' || policyname AS name FROM pg_policies
-       WHERE schemaname = 'public' ORDER BY 1`,
-    ),
-    grants: await names(
-      `SELECT grantee || ' ' || privilege_type || ' ' || table_name || '.' || column_name AS name
-       FROM information_schema.column_privileges
-       WHERE table_schema = 'public' AND grantee IN ('tinnox_app', 'tinnox_definer') ORDER BY 1`,
-    ),
-  };
-}
+/** The object a line of schemaSnapshot names: the text before its first space. */
+const firstWord = (line: string): string => line.split(' ')[0] ?? '';
 
 /** Rows of one organisation that the backfill and the audit column would touch. */
 async function dataSnapshot(org: LegacyOrg): Promise<unknown> {
@@ -295,7 +246,7 @@ async function attemptBrokenUpgrade(names: readonly string[]): Promise<FailedAtt
         () => `DO $$ BEGIN RAISE EXCEPTION '${PLANTED_FAILURE}'; END $$;\n${AFTER_BACKFILL}`,
       ),
     );
-    const schemaBefore = await schemaSnapshot();
+    const schemaBefore = await schemaSnapshot(migrator);
     const dataBefore = [await dataSnapshot(a), await dataSnapshot(b)];
     let error = 'the broken migration was applied';
     try {
@@ -306,7 +257,7 @@ async function attemptBrokenUpgrade(names: readonly string[]): Promise<FailedAtt
     return {
       error,
       schemaBefore,
-      schemaAfter: await schemaSnapshot(),
+      schemaAfter: await schemaSnapshot(migrator),
       dataBefore,
       dataAfter: [await dataSnapshot(a), await dataSnapshot(b)],
     };
@@ -368,7 +319,7 @@ describe('migration 0005 that fails in the middle of its backfill', () => {
     expect(failed.schemaAfter.migrations).toHaveLength(4);
     expect(failed.schemaAfter.migrations).not.toContain(TARGET);
     // Spot checks, so the comparison above cannot pass on two equally wrong snapshots.
-    const tables = failed.schemaAfter.tables.map((table) => table.name);
+    const tables = failed.schemaAfter.tables.map(firstWord);
     for (const created of ['folder', 'tag', 'media_tag', 'display_tag']) {
       expect(tables).not.toContain(created);
     }
@@ -377,28 +328,35 @@ describe('migration 0005 that fails in the middle of its backfill', () => {
       false,
     );
     expect(failed.schemaAfter.indexes.some((i) => i.includes('playlist_org_idx'))).toBe(true);
-    expect(failed.schemaAfter.functions).not.toContain('playlist_delete_guard');
+    expect(
+      failed.schemaAfter.functions.some((f) => f.startsWith('public.playlist_delete_guard(')),
+    ).toBe(false);
   });
 
   it('leaves forced row-level security on every table, the three it had lifted included', () => {
-    const tenantTables = failed.schemaAfter.tables.filter((t) => t.name !== 'schema_migrations');
+    // Each line reads '<table> rls=<bool> forced=<bool> owner=<role>' (schemaSnapshot, levels.ts).
+    const tenantTables = failed.schemaAfter.tables.filter(
+      (t) => firstWord(t) !== 'schema_migrations',
+    );
     expect(tenantTables.length).toBeGreaterThan(10);
     for (const table of tenantTables) {
-      expect(table.rowSecurity && table.forced, table.name).toBe(true);
+      expect(table, firstWord(table)).toContain(' rls=true forced=true ');
     }
     for (const lifted of ['display', 'display_delivery', 'publication']) {
-      expect(tenantTables.find((t) => t.name === lifted)?.forced, lifted).toBe(true);
+      expect(
+        tenantTables.find((t) => firstWord(t) === lifted),
+        lifted,
+      ).toContain(' forced=true ');
     }
   });
 
   it('leaves every trigger enabled, the one it had disabled included', () => {
     expect(failed.schemaAfter.triggers.length).toBeGreaterThan(5);
+    // Each line reads '<table>.<trigger> <tgenabled>'.
     for (const trigger of failed.schemaAfter.triggers) {
-      expect(trigger.enabled, trigger.name).toBe('O');
+      expect(trigger.split(' ')[1], firstWord(trigger)).toBe('O');
     }
-    expect(failed.schemaAfter.triggers.map((t) => t.name)).toContain(
-      'display.display_set_updated_at',
-    );
+    expect(failed.schemaAfter.triggers.map(firstWord)).toContain('display.display_set_updated_at');
   });
 
   it('leaves every row as it was: no display was assigned or rewritten, no audit row touched', () => {

@@ -2,42 +2,29 @@
  * Migration 0016: the two address shapes take the contract's own shape, and both ends of a media
  * window the years 1000 to 9999 (adoption plan step 31, D7).
  *
- * Rebuilds the test database at migration 0015 with addresses and windows on the boundaries the
- * new checks draw, plus one row of each that the old checks let in and the new ones refuse. The
- * first upgrade must stop, name those three rows by table and id (never the address), and change
- * nothing. Once a person has closed, removed and cleared them, the upgrade applies, keeps every
- * other row as it was, keeps row-level security, grants and ownership, and the runtime role can
- * store exactly what the contract takes.
+ * Builds a database at migration 0015 with the seeders of the migrate-forward chain (levels.ts,
+ * atLevel), which leave only rows 0016 accepts. In level 0013's first organisation, which already
+ * holds an invite and two alert addresses, the test adds in plain SQL addresses and windows on
+ * the boundaries the new checks draw, plus one row of each that the old checks let in and the new
+ * ones refuse. The first upgrade must stop, name those three rows by table and id (never the
+ * address), and change nothing. Once a person has closed, removed and cleared them, the upgrade
+ * applies, keeps every other row as it was, keeps row-level security, grants and ownership, and
+ * the runtime role can store exactly what the contract takes.
  *
- * It resets the shared integration-test database; `afterAll` always leaves it at the newest
- * migration.
+ * The database is atLevel's own, dropped in `afterAll`; the shared integration-test database is
+ * not touched.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
-import { copyFile, mkdtemp, readdir, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { readdir } from 'node:fs/promises';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { withOrg, type Pool } from '../src/testing.ts';
-import { resetTestDatabase, runMigrations, type MigrationResult } from '../src/migrate.ts';
-import {
-  appPool,
-  createOrg,
-  migratorClient,
-  migratorUrl,
-  pgViolation,
-  type TestOrg,
-} from './support.ts';
+import type { MigrationResult } from '../src/migrate.ts';
+import { MIGRATIONS, atLevel, type LevelDatabase } from './levels.ts';
+import { BEFORE_ALERTS_A } from './levels/seed-0013.ts';
+import { RECIPIENTS } from './levels/seed-0014.ts';
+import { appPool, pgViolation, testOrgId } from './support.ts';
 
-const MIGRATIONS = join(
-  dirname(fileURLToPath(import.meta.url)),
-  '..',
-  '..',
-  '..',
-  'db',
-  'migrations',
-);
 const TARGET = '0016_twin_guards.sql';
 const TABLES = ['member_invite', 'alert_recipient', 'media'] as const;
 
@@ -53,19 +40,23 @@ const KEPT_WINDOWS: readonly (readonly [string | null, string | null])[] = [
   [null, null],
 ];
 
-let scratch: string | undefined;
+let level: LevelDatabase | undefined;
 let migrator: pg.Client | undefined;
 let pool: Pool | undefined;
-let org: TestOrg;
 let refused: unknown;
 let afterRefusal: { applied: string[]; definitions: Record<string, string>; rows: unknown[] };
 let upgrade: MigrationResult;
 let rowsBefore: unknown[];
 const bad = { invite: '', alert: '', media: '' };
 
-function clients(): { migrator: pg.Client; pool: Pool } {
-  if (migrator === undefined || pool === undefined) throw new Error('beforeAll did not finish');
-  return { migrator, pool };
+/** Level 0013's first organisation: its Owner, a pending invite, and (0014) two alert addresses. */
+const org = { orgId: testOrgId(BEFORE_ALERTS_A.org), membershipId: BEFORE_ALERTS_A.owner };
+
+function clients(): { level: LevelDatabase; migrator: pg.Client; pool: Pool } {
+  if (level === undefined || migrator === undefined || pool === undefined) {
+    throw new Error('beforeAll did not finish');
+  }
+  return { level, migrator, pool };
 }
 
 /** Statements as the migrator inside the organisation, in one transaction, as TINNOX's scripts write. */
@@ -145,17 +136,16 @@ async function shapeDefinitions(): Promise<Record<string, string>> {
 
 beforeAll(async () => {
   const names = (await readdir(MIGRATIONS)).filter((n) => n.endsWith('.sql')).sort();
-  const earlier = names.filter((n) => n < TARGET);
   expect(names).toContain(TARGET);
-  expect(earlier).toHaveLength(15);
-  scratch = await mkdtemp(join(tmpdir(), 'tinnox-migration-0016-'));
-  for (const name of earlier) await copyFile(join(MIGRATIONS, name), join(scratch, name));
-  await resetTestDatabase(migratorUrl());
-  await runMigrations({ connectionString: migratorUrl(), directory: scratch });
+  expect(names.filter((n) => n < TARGET)).toHaveLength(15);
+  level = await atLevel('0015', { seed: true });
 
-  migrator = await migratorClient();
-  pool = appPool('tries the upgraded address and window checks as the runtime role', 2);
-  org = await createOrg(migrator, 'Before 0016');
+  migrator = await level.migrator();
+  pool = appPool(
+    'tries the upgraded address and window checks as the runtime role',
+    2,
+    level.appUrl,
+  );
 
   await asOrg(async (client) => {
     for (const email of KEPT_INVITES) await insertInvite(client, email);
@@ -168,6 +158,7 @@ beforeAll(async () => {
   rowsBefore = await everyRow();
 
   // What only SQL by hand could store at 0015: the old shapes and the bare timestamp took them.
+  // Planted here, not by a seeder: every seeder of the chain leaves rows 0016 accepts.
   await asOrg(async (client) => {
     bad.invite = await insertInvite(client, 'secret@nodot');
     bad.alert = await insertAlert(client, 'secret@one@two');
@@ -175,7 +166,7 @@ beforeAll(async () => {
   });
   const withBad = await everyRow();
   const definitionsBefore = await shapeDefinitions();
-  refused = await runMigrations({ connectionString: migratorUrl(), directory: MIGRATIONS }).then(
+  refused = await level.upgrade().then(
     () => 'applied',
     (error: unknown) => error,
   );
@@ -197,15 +188,13 @@ beforeAll(async () => {
   rowsBefore = (await everyRow()).filter(
     (row) => ![bad.invite, bad.media].includes((row as { id: string }).id),
   );
-  upgrade = await runMigrations({ connectionString: migratorUrl(), directory: MIGRATIONS });
+  upgrade = await level.upgrade();
 }, 60_000);
 
 afterAll(async () => {
   await pool?.end();
   await migrator?.end();
-  // Whatever happened above, leave the shared test database at the newest migration.
-  await runMigrations({ connectionString: migratorUrl(), directory: MIGRATIONS });
-  if (scratch !== undefined) await rm(scratch, { recursive: true, force: true });
+  await level?.drop();
 });
 
 describe('migration 0016 on a database with a row the new checks refuse', () => {
@@ -231,14 +220,19 @@ describe('migration 0016 once those rows are settled', () => {
     const later = (await readdir(MIGRATIONS)).filter((n) => n.endsWith('.sql') && n > TARGET);
     expect(upgrade.alreadyApplied).toHaveLength(15);
     expect(upgrade.applied).toEqual([TARGET, ...later.sort()]);
-    const again = await runMigrations({ connectionString: migratorUrl(), directory: MIGRATIONS });
+    const again = await clients().level.upgrade();
     expect(again.applied).toEqual([]);
   });
 
   it('keeps every row: boundary addresses, non-ASCII addresses, a closed invite and both year ends', async () => {
-    // The closed invite, and the media item of createOrg.
+    // The closed invite, and the seeded invite and alert addresses of levels 0013 and 0014.
     expect(rowsBefore.length).toBe(
-      KEPT_INVITES.length + 1 + KEPT_ALERTS.length + KEPT_WINDOWS.length + 1,
+      KEPT_INVITES.length +
+        1 +
+        1 +
+        KEPT_ALERTS.length +
+        Object.keys(RECIPIENTS).length +
+        KEPT_WINDOWS.length,
     );
     const after = (await everyRow()).filter(
       (row) => ![bad.invite, bad.media].includes((row as { id: string }).id),
