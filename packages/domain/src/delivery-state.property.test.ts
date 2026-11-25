@@ -198,10 +198,11 @@ describe('delivery-state generators: self-checks', () => {
   });
 });
 
-describe('offlineDue: properties (property 11, EAX-02, EAU-01)', () => {
+describe('offlineDue: properties (property 11, EAX-02, EAU-01)', { timeout: 30_000 }, () => {
   // The two oracle properties count up to 14 days minute by minute through Intl (about 20 000
-  // formatter calls a case, 20 to 40 ms): 50 and 25 runs keep each near a second, under the
-  // 5-second test timeout on a busy runner. The other properties run fast-check's default 100.
+  // formatter calls a case, 20 to 40 ms): 50 and 25 runs keep each near a second locally. CI
+  // runs the unit project about 2.6 times slower, so the describe allows 30 s rather than the
+  // 5-second default. The other properties run fast-check's default 100.
   it('comes due exactly when a minute-by-minute count of working minutes reaches the delay', () => {
     fc.assert(
       fc.property(

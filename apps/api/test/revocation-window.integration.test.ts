@@ -11,7 +11,8 @@
  *   only while its registration is still the active one.
  *
  * Beside them, a heartbeat that waits for another report's row lock past lock_timeout answers
- * 503 as an operator change does, and stores nothing.
+ * 503 as an operator change does, and stores nothing; so does a player's reset that waits for
+ * its registration row, which then revokes nothing.
  *
  * The held side is a real request of the application, stopped before one of its statements
  * (`statementHolds`); the other side is a real request too, and where it has to wait for the
@@ -388,6 +389,64 @@ describe('the revocation window (D8)', () => {
     expect(await logged(display.id)).toEqual([player.registrationId, player.registrationId]);
     // A heartbeat is telemetry (D3): neither wrote an audit row.
     expect(await auditOf(player.registrationId)).toEqual(['pairing.complete']);
+  });
+
+  // The same mapping in changeAsDevice answers the player's own reset. Every request of the
+  // application that locks a registration row also revokes it, so the holder here is a
+  // transaction of the test's own that only locks the row and then ends, changing nothing.
+  it('a player reset that waits for its registration row past lock_timeout answers 503 service_unavailable with retry-after 2 and revokes nothing; the next reset answers 204', async () => {
+    const { player } = await reportingScreen('Lock timeout reset');
+    const reset = (): Promise<Response> =>
+      fetch(`${t.url}/player/registration`, { method: 'DELETE', headers: player.headers });
+
+    let timedOut: Response | undefined;
+    let waitedMs = 0;
+    await withOrg(
+      t.testSql('locks a registration row as a concurrent change would, and changes nothing'),
+      org.orgId,
+      async (tx) => {
+        const { rows } = await tx.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+        const holder = rows[0]!.pid;
+        await tx.query(
+          'SELECT 1 FROM player_registration WHERE id = $1 AND org_id = app_org_id() FOR UPDATE',
+          [player.registrationId],
+        );
+        const started = Date.now();
+        const waiting = reset();
+        await waitForLockWaiters(
+          reading(),
+          holder,
+          1,
+          'the reset never waited for the registration row lock',
+        );
+        timedOut = await waiting;
+        waitedMs = Date.now() - started;
+      },
+    );
+    // tinnox_app's 5 s lock_timeout ran out.
+    expect(waitedMs).toBeGreaterThanOrEqual(4_500);
+    expect(timedOut?.status).toBe(503);
+    expect(timedOut?.headers.get('retry-after')).toBe('2');
+    const body = (await timedOut?.json()) as { error: Record<string, unknown> };
+    expect({ ...body.error, requestId: null }).toEqual({
+      code: 'service_unavailable',
+      message: 'Another change is being saved. Try again in a moment.',
+      requestId: null,
+    });
+
+    // The timed-out reset rolled back: the registration is active and nothing was audited.
+    const revokedAt = await withOrg(reading(), org.orgId, async (tx) => {
+      const { rows } = await tx.query<{ revoked_at: Date | null }>(
+        'SELECT revoked_at FROM player_registration WHERE id = $1 AND org_id = app_org_id()',
+        [player.registrationId],
+      );
+      return rows[0]?.revoked_at;
+    });
+    expect(revokedAt).toBeNull();
+    expect(await auditOf(player.registrationId)).toEqual(['pairing.complete']);
+
+    expect((await reset()).status).toBe(204);
+    expect(await auditOf(player.registrationId)).toEqual(['pairing.complete', 'player.revoke']);
   });
 
   // Found by this file, and kept as it is: no decision asks for a change. A screen's first

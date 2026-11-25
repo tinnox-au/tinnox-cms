@@ -96,7 +96,7 @@ Revocation stops **future** server access. It cannot erase a device that is offl
 
 ### `DELETE /player/registration`
 
-Player-initiated reset. `Authorization: Bearer <deviceToken>`. Response `204`. The registration is revoked with reason `player_reset`. The player should call this before deleting its local state when it is online; when offline it clears locally and the operator revokes from the portal. (This route is not in `ROUTES` of `packages/contracts`.)
+Player-initiated reset. `Authorization: Bearer <deviceToken>`. Response `204`. The registration is revoked with reason `player_reset`. A reset that waits longer than the server's lock timeout (5 s) for its registration's row, held by another change to that registration, is answered `503 service_unavailable` with `Retry-After: 2` and revokes nothing; retry it as any 5xx (section 10). The player should call this before deleting its local state when it is online; when offline it clears locally and the operator revokes from the portal. (This route is not in `ROUTES` of `packages/contracts`.)
 
 A player that is paired to a display of another organisation must first delete every cached asset and all state of the previous registration. Cache names must include the organisation id and registration id from the `claimed` response.
 
@@ -407,7 +407,7 @@ Rules:
 - **Publications.** Every publication id named anywhere in the report (downloaded, active, staging, errors) must be a publication of that display: otherwise `409 conflict`. This includes publications of another display of the same organisation.
 - **Shape.** Schema violations (unknown fields, `playing` without an active publication, `activePublicationId` and `activeItemIndex` not both set, `assetsDone > assetsTotal`, more than 10 errors, messages over 300 characters): `400 validation_failed`.
 - **Rejected reports change nothing** and are not stored.
-- **Lock wait.** A report that waits longer than the server's lock timeout (5 s) for the display's row, held by another report of the same display, is answered `503 service_unavailable` with `Retry-After: 2`, as an operator's change is, and changes nothing; retry it as any 5xx (section 10).
+- **Lock wait.** A report that waits longer than the server's lock timeout (5 s) for the display's row, held by another report or a publish to that display, is answered `503 service_unavailable` with `Retry-After: 2`, as an operator's change is, and changes nothing; retry it as any 5xx (section 10).
 - `errors` is the most recent problems, newest first, replaced as a whole by each accepted report. Messages must not contain URLs or tokens.
 - Send every `nextHeartbeatInMs` (default 15 s). The portal marks a display stale when the last **accepted** report is older than 60 s (`LIMIT_HEARTBEAT_STALE_AFTER_SECONDS`), measured on the server clock at the time the status is read. Nothing stores an "online" flag. Raw reports are kept as diagnostic history only when accepted, at most one per display per 10 s, for `LIMIT_HEARTBEAT_LOG_RETENTION_HOURS` (default 24); ignored reports (stale `seq`) are not stored.
 - Rate limit: 120 reports per minute per credential.

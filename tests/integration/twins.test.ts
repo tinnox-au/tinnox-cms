@@ -466,31 +466,36 @@ describe('twins generators: self-checks', () => {
 
 // ------------------------------------------------------------------------ properties
 
-describe('twins: the contract accepts exactly what the database stores', () => {
-  it('invite address: InviteEmailSchema and member_invite_email_shape and _length', async () => {
-    await assertTwins(invitePair, addressArb, 1000);
-  });
+// Hundreds of database round trips a property: past the integration project's 30 s default.
+describe(
+  'twins: the contract accepts exactly what the database stores',
+  { timeout: 120_000 },
+  () => {
+    it('invite address: InviteEmailSchema and member_invite_email_shape and _length', async () => {
+      await assertTwins(invitePair, addressArb, 1000);
+    });
 
-  it('alert address: AlertEmailSchema and alert_recipient_email_shape and _length', async () => {
-    await assertTwins(alertPair, addressArb, 1000);
-  });
+    it('alert address: AlertEmailSchema and alert_recipient_email_shape and _length', async () => {
+      await assertTwins(alertPair, addressArb, 1000);
+    });
 
-  it('media window: MediaPatchSchema and media_availability_order and _year', async () => {
-    await assertTwins(windowPair, windowArb, 500);
-  });
+    it('media window: MediaPatchSchema and media_availability_order and _year', async () => {
+      await assertTwins(windowPair, windowArb, 500);
+    });
 
-  it('schedule events: ScheduleInputSchema and the schedule_event CHECKs', async () => {
-    await assertTwins(schedulePair, eventsArb, 300);
-  });
+    it('schedule events: ScheduleInputSchema and the schedule_event CHECKs', async () => {
+      await assertTwins(schedulePair, eventsArb, 300);
+    });
 
-  it('layout zones: LayoutInputSchema and layout_zone_in_bounds and _position_range', async () => {
-    await assertTwins(layoutPair, zonesArb, 500);
-  });
+    it('layout zones: LayoutInputSchema and layout_zone_in_bounds and _position_range', async () => {
+      await assertTwins(layoutPair, zonesArb, 500);
+    });
 
-  it('offline delay: AlertOfflineMinutesSchema and display_alert_offline_minutes_range', async () => {
-    await assertTwins(offlinePair, offlineMinutesArb, 300);
-  });
-});
+    it('offline delay: AlertOfflineMinutesSchema and display_alert_offline_minutes_range', async () => {
+      await assertTwins(offlinePair, offlineMinutesArb, 300);
+    });
+  },
+);
 
 // -------------------------------------------------------------------------- examples
 

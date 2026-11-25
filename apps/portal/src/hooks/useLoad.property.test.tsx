@@ -33,7 +33,8 @@ describe('useLoad generators: self-checks', () => {
   });
 });
 
-describe('useLoad: properties (property 13, UTX-03)', () => {
+// 100 async React runs: past the component project's 5 s default on a busy runner.
+describe('useLoad: properties (property 13, UTX-03)', { timeout: 30_000 }, () => {
   it('for any sequence of read outcomes, a timer is pending whenever the function poll would answer non-null for the data shown', async () => {
     await fc.assert(
       fc.asyncProperty(readSequenceArb, async ({ first, steps }) => {
