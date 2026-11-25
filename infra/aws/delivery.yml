@@ -1,0 +1,155 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  TINNOX CMS, how images get from GitHub to AWS: the three image repositories and the
+  role that the deploy workflow of tinnox-au/tinnox-cms takes through OpenID Connect,
+  with no stored key. One stack for the account. See infra/aws/README.md.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: GitHub }
+        Parameters: [GitHubSubjectPrefix, GitHubEnvironment, ExistingGitHubProviderArn]
+      - Label: { default: Images }
+        Parameters: [ImagesKept]
+
+Parameters:
+  GitHubSubjectPrefix:
+    Type: String
+    Default: repo:tinnox-au@294503549/tinnox-cms@1444166513
+    AllowedPattern: '^repo:[A-Za-z0-9_.-]+@[0-9]+/[A-Za-z0-9_.-]+@[0-9]+$'
+    Description: >-
+      Start of the subject in the repository's tokens, with the organisation and
+      repository ids that never change. Read it with
+      gh api repos/tinnox-au/tinnox-cms/actions/oidc/customization/sub.
+  GitHubEnvironment:
+    Type: String
+    Default: test
+    AllowedPattern: '^[A-Za-z0-9_-]{1,64}$'
+    Description: >-
+      The GitHub deployment environment whose jobs may take the role. Create it first,
+      limited to the main branch and with required reviewers, in the repository's
+      settings.
+  ExistingGitHubProviderArn:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^arn:aws:iam::[0-9]{12}:oidc-provider/token\.actions\.githubusercontent\.com$'
+    Description: >-
+      An account can hold only one identity provider for GitHub Actions. If one exists,
+      give its ARN and none is created.
+  ImagesKept:
+    Type: Number
+    Default: 20
+    MinValue: 5
+    MaxValue: 200
+    Description: Newest images kept in each repository; older ones are removed.
+
+Rules:
+  AustraliaOnly:
+    Assertions:
+      - Assert: !Contains [[ap-southeast-2, ap-southeast-4], !Ref 'AWS::Region']
+        AssertDescription: >-
+          All data stays in Australia (DEC-13): this stack may only be created in
+          Sydney (ap-southeast-2) or Melbourne (ap-southeast-4).
+
+Conditions:
+  CreateProvider: !Equals [!Ref ExistingGitHubProviderArn, '']
+
+Resources:
+  # A tag is written once and never moved, so a deployed tag always means the same
+  # image; deployments name images by digest all the same.
+  ApiRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: tinnox-cms/api
+      ImageTagMutability: IMMUTABLE
+      EncryptionConfiguration: { EncryptionType: AES256 }
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub |
+          {"rules":[{"rulePriority":1,"description":"keep the newest images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":${ImagesKept}},"action":{"type":"expire"}}]}
+
+  WebRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: tinnox-cms/web
+      ImageTagMutability: IMMUTABLE
+      EncryptionConfiguration: { EncryptionType: AES256 }
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub |
+          {"rules":[{"rulePriority":1,"description":"keep the newest images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":${ImagesKept}},"action":{"type":"expire"}}]}
+
+  MediaWorkerRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: tinnox-cms/media-worker
+      ImageTagMutability: IMMUTABLE
+      EncryptionConfiguration: { EncryptionType: AES256 }
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub |
+          {"rules":[{"rulePriority":1,"description":"keep the newest images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":${ImagesKept}},"action":{"type":"expire"}}]}
+
+  GitHubProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+
+  # Only a job of this repository that names the deployment environment gets the role:
+  # the subject is compared whole, with no wildcard. The subject proves the repository
+  # and the environment, nothing else. Which branch and which people may use the
+  # environment is set in GitHub (main only, required reviewers), and that must be in
+  # place before this stack exists: GitHub creates a missing environment, unprotected,
+  # for the first job that names it. No workflow triggered by pull_request_target may
+  # name it.
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: !Sub 'TINNOX CMS - GitHub Actions deploy, environment ${GitHubEnvironment}'
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If [CreateProvider, !Ref GitHubProvider, !Ref ExistingGitHubProviderArn]
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub '${GitHubSubjectPrefix}:environment:${GitHubEnvironment}'
+      Policies:
+        - PolicyName: push-images
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: RegistrySignIn
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Sid: PushToTheThreeRepositories
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                  - ecr:BatchGetImage
+                Resource:
+                  - !GetAtt ApiRepository.Arn
+                  - !GetAtt WebRepository.Arn
+                  - !GetAtt MediaWorkerRepository.Arn
+
+Outputs:
+  DeployRoleArn:
+    Description: The role for aws-actions/configure-aws-credentials in the deploy workflow.
+    Value: !GetAtt DeployRole.Arn
+  ApiRepositoryUri:
+    Description: Where the API image is pushed and pulled.
+    Value: !GetAtt ApiRepository.RepositoryUri
+  WebRepositoryUri:
+    Description: Where the web image (Caddy with the portal and the player) is pushed and pulled.
+    Value: !GetAtt WebRepository.RepositoryUri
+  MediaWorkerRepositoryUri:
+    Description: Where the media worker image is pushed and pulled.
+    Value: !GetAtt MediaWorkerRepository.RepositoryUri

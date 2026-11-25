@@ -1,0 +1,9 @@
+# Used only for infra/deploy/Dockerfile.web. Local builds and state stay out of the image.
+**/node_modules
+**/dist
+**/test-fixtures
+.env*
+**/.env*
+.git
+data
+infra/.generated

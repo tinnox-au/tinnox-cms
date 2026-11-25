@@ -14,7 +14,7 @@ pricing calculator before committing.
 | --- | --- | --- |
 | Data location | Australia only | DEC-13, decided by the client |
 | Provider and region | AWS Sydney (`ap-southeast-2`); Melbourne (`ap-southeast-4`) for backup copies later | Proposed in DEC-13; taken as the working choice here |
-| AWS account | A new member account for the CMS under TINNOX's existing organisation | Recommended; the organisation exists (Michael, 24 Nov) |
+| AWS account | Stage 0 runs in the existing account "Tinnox Production", beside an unrelated server | Decided (Michael, 25 Nov), against the recommendation of a new member account; see section 3.4 |
 | Media delivery | Direct from Sydney, no CDN | Michael, 24 Nov |
 | Identity provider | Amazon Cognito in Sydney, after a short trial; Keycloak on the host if the trial fails | Michael accepted the recommendation, 24 Nov |
 | E-mail | Amazon SES Sydney, when alerts are switched on | Michael accepted the recommendation, 24 Nov |
@@ -81,7 +81,7 @@ Beside the instance:
 
 | Part | Stage 0 | Production (stage 2) | Same building block? |
 | --- | --- | --- | --- |
-| AWS account, network, region lock | Member account, Sydney only | The same | Yes |
+| AWS account, network, region lock | The existing account, shared with another server; Sydney only | An account of its own; Sydney only | Partly: the network and the lock are the same, the account is not |
 | Hostnames and TLS | Real hostnames, https | The same hostnames pattern | Yes; the certificate holder changes from Caddy to a load balancer |
 | Production mode | `NODE_ENV=production`, all start-up rules on | The same | Yes |
 | API | One copy, the production image | Two copies of the same image | Yes, but one copy |
@@ -141,10 +141,25 @@ do not apply. If 2 GB of memory proves tight, the server can be resized to a `t4
 Not in the table: a domain name (about A$20 a year). GitHub costs nothing while the
 repository is public (section 8).
 
-The CMS runs in its own member account under the existing organisation, not in the existing
-account itself. A separate account keeps the CMS apart from whatever else TINNOX runs, gives
-it its own bill, and is the only way the region lock works: an organisation policy does not
-bind the organisation's management account. A member account costs nothing.
+Stage 0 runs in the existing account "Tinnox Production" (Michael, 25 Nov), which also runs
+an unrelated server. The recommendation was a member account of its own: it keeps the CMS
+apart from whatever else TINNOX runs and gives it its own bill, and it costs nothing. That
+stays the recommendation for staging and production. In the shared account the CMS has its
+own network, roles and key, and its resources carry the tag `project` = `tinnox-cms`.
+
+The account was a _project_ of AWS's sign-up experience of September 2026: AWS managed the
+organisation and its policies. On 25 November Michael activated "advanced features", which
+cannot be undone. TINNOX now administers the organisation (management account, "Tinnox
+Production" and an identity administration account that AWS added), and the organisation's
+policies are TINNOX's to keep or change. As read that day:
+
+- The region policy is attached to the whole organisation and allows Sydney only, plus the
+  global services that answer from two US regions. Melbourne is refused until the policy
+  names it. An organisation policy does not bind the management account, so nothing is
+  built there.
+- Identity providers are no longer forbidden, so GitHub can take a role with no stored key
+  (item 6 below).
+- New accounts are created as member accounts in AWS Organizations.
 
 ### 3.5 Work to build it
 
@@ -153,15 +168,15 @@ of focused work for the first month's list, and about a week for the S3 adapter.
 
 First month:
 
-1. AWS account baseline: a new member account for the CMS, root MFA, single sign-on for
-   people, an organisation policy that denies every region outside Australia, a budget alert,
-   CloudTrail.
+1. AWS account baseline: the existing account "Tinnox Production" (section 3.4), a root
+   password and MFA on the management account, the organisation's region policy kept as it
+   is (Sydney only), a budget alert, CloudTrail.
 2. An image for the API, running the TypeScript source on Node itself, as the media worker's
    image does (section 8.3), on the worker's pinned Node 24 (CI uses 22).
 3. A compose file for the server, and the Caddy configuration.
 4. A database bootstrap for RDS: the three roles without the `tinnox_test` database and
-   without a superuser, passwords from Parameter Store. If RDS refuses the `BYPASSRLS` role,
-   PostgreSQL runs in a container on the server while that is resolved.
+   without a superuser, passwords from Parameter Store. RDS accepts the `BYPASSRLS` role
+   (tested 25 Nov on the stage 0 instance; see `infra/aws/README.md`, section 5).
 5. Cognito: a Sydney user pool with TOTP required; confirm it sends `auth_time`, honours
    `prompt=login` and proves MFA through `acr` or `amr`; a Cognito reader for
    `scripts/lib/idp.ts`; a replacement for `verify:oidc`.
