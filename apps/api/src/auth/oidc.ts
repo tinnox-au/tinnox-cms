@@ -10,7 +10,7 @@
  */
 import { LOGOUT_REDIRECT_MAX_LENGTH } from '@tinnox/contracts';
 import * as oidc from 'openid-client';
-import type { AppConfig } from '../config.ts';
+import { isCognitoIssuer, type AppConfig } from '../config.ts';
 
 export interface VerifiedIdentity {
   readonly sub: string;
@@ -94,6 +94,22 @@ export function mfaSatisfied(
  * The portal looks for this exact value; keep the two in step.
  */
 export const SIGNED_OUT_STATE = 'signed_out';
+
+/**
+ * Cognito's sign-out URL. Cognito returns to `logout_uri` exactly and passes no `state` on, so
+ * the marker the portal looks for is part of the address itself:
+ * `<post-logout URI>?state=signed_out`, which is registered as a sign-out URL of the app
+ * client (infra/aws/identity.yml). No ID token is sent; Cognito does not use one here.
+ * loadConfig refuses a post-logout URI that would build an address the client does not have.
+ */
+function cognitoEndSessionUrl(endpoint: string, config: AppConfig): string {
+  const back = new URL(config.oidc.postLogoutRedirectUri);
+  back.searchParams.set('state', SIGNED_OUT_STATE);
+  const url = new URL(endpoint);
+  url.searchParams.set('client_id', config.oidc.clientId);
+  url.searchParams.set('logout_uri', back.href);
+  return url.href;
+}
 
 export function createIdentityProvider(config: AppConfig): IdentityProvider {
   let cached: Promise<oidc.Configuration> | null = null;
@@ -182,7 +198,12 @@ export function createIdentityProvider(config: AppConfig): IdentityProvider {
       } catch {
         return null;
       }
-      if (cfg.serverMetadata().end_session_endpoint === undefined) return null;
+      const endpoint = cfg.serverMetadata().end_session_endpoint;
+      if (endpoint === undefined) return null;
+      if (isCognitoIssuer(config.oidc.issuer)) {
+        const cognito = cognitoEndSessionUrl(endpoint, config);
+        return cognito.length <= LOGOUT_REDIRECT_MAX_LENGTH ? cognito : null;
+      }
       const build = (hint: string | null): string =>
         oidc.buildEndSessionUrl(cfg, {
           post_logout_redirect_uri: config.oidc.postLogoutRedirectUri,

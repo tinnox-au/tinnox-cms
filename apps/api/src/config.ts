@@ -92,6 +92,22 @@ const csv = z
       .filter((part) => part !== ''),
   );
 
+/**
+ * A Cognito user pool: https://cognito-idp.<region>.amazonaws.com/<pool id>. Its discovery
+ * document names an end_session_endpoint, but that endpoint (managed login's /logout) does not
+ * take the parameters of OpenID Connect RP-initiated logout: it answers "Invalid request" to
+ * post_logout_redirect_uri and id_token_hint. It takes `client_id` and `logout_uri`, and
+ * `logout_uri` must be, character for character, one of the app client's sign-out URLs
+ * (apps/api/src/auth/oidc.ts). Any other host, a look-alike included, is not one.
+ */
+export function isCognitoIssuer(issuer: string): boolean {
+  try {
+    return /^cognito-idp\.[a-z0-9-]+\.amazonaws\.com$/.test(new URL(issuer).hostname);
+  } catch {
+    return false;
+  }
+}
+
 const EnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
@@ -425,8 +441,20 @@ export function loadConfig(
       `OIDC_REDIRECT_URI must be ${ROUTES.authCallback} on PORTAL_ORIGIN or API_PUBLIC_ORIGIN`,
     );
   }
-  if (new URL(e.OIDC_POST_LOGOUT_REDIRECT_URI).origin !== e.PORTAL_ORIGIN) {
+  const postLogout = new URL(e.OIDC_POST_LOGOUT_REDIRECT_URI);
+  if (postLogout.origin !== e.PORTAL_ORIGIN) {
     problems.push('OIDC_POST_LOGOUT_REDIRECT_URI must be on PORTAL_ORIGIN');
+  } else if (
+    isCognitoIssuer(e.OIDC_ISSUER) &&
+    (postLogout.pathname !== '/' || postLogout.search !== '' || postLogout.hash !== '')
+  ) {
+    // Cognito returns only to a sign-out URL registered character for character, and the
+    // one registered for the signed-out notice is "<PORTAL_ORIGIN>/?state=signed_out"
+    // (infra/aws/identity.yml). Any other path, a query or a fragment would send every
+    // sign-out to Cognito's error page, and nothing would say so.
+    problems.push(
+      'OIDC_POST_LOGOUT_REDIRECT_URI must be PORTAL_ORIGIN followed by "/" and nothing else when OIDC_ISSUER is a Cognito user pool',
+    );
   }
 
   let databasePassword = '';

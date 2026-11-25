@@ -239,13 +239,17 @@ an authenticator app at the first sign-in.
    `GRANT tinnox_migrator TO CURRENT_USER WITH SET TRUE` has run. The test used throwaway
    roles and dropped them; the real roles and databases are not created yet. Still: do
    not grant `rds_superuser` to anything.
-2. **Sign-out.** The pool's discovery document does publish an `end_session_endpoint`
-   (`…/logout` on the sign-in pages; read 25 November), so the API will build its
-   standard sign-out address (`post_logout_redirect_uri` with `id_token_hint` or
-   `client_id`). Whether Cognito accepts those parameters, or only its own
-   `client_id` and `logout_uri`, has not been tried. If it refuses, the CMS session
-   ends but Cognito's own lasts up to an hour, so the same browser can sign in again
-   without a password, and `apps/api/src/auth/oidc.ts` needs a change.
+2. **Sign-out.** The pool's discovery document names an `end_session_endpoint`, but
+   Cognito's `/logout` does not take the standard parameters: the first sign-out (25
+   November) ended on Cognito's "Invalid request" page, although the CMS session had
+   ended. It takes `client_id` and `logout_uri`, and returns only to a sign-out URL
+   registered with the app client, passing no `state` on. The API now sends those for a
+   Cognito issuer (`apps/api/src/auth/oidc.ts`), and the app client has a second sign-out
+   URL that carries the portal's "signed out" marker. Asked directly, `/logout` redirects
+   to the registered URL. The identity stack is updated before the API release that
+   needs it: the new API with the old app client would fail every sign-out the same
+   way. The API refuses to start with a post-logout URI other than `<portal>/` against a
+   Cognito pool. Not yet seen in a browser with the new release.
 3. **Proof of the second factor: settled for `amr`.** The API runs with
    `OIDC_MFA_AMR_VALUES=mfa` and refuses every sign-in whose token lacks it. The first
    sign-in through Cognito's managed login, with a password and an authenticator code,
