@@ -156,8 +156,8 @@ First month:
 1. AWS account baseline: a new member account for the CMS, root MFA, single sign-on for
    people, an organisation policy that denies every region outside Australia, a budget alert,
    CloudTrail.
-2. An image for the API, running through `tsx` as the tests do today (section 8), with one
-   pinned Node version (CI uses 22, the worker image 24).
+2. An image for the API, running the TypeScript source on Node itself, as the media worker's
+   image does (section 8.3), on the worker's pinned Node 24 (CI uses 22).
 3. A compose file for the server, and the Caddy configuration.
 4. A database bootstrap for RDS: the three roles without the `tinnox_test` database and
    without a superuser, passwords from Parameter Store. If RDS refuses the `BYPASSRLS` role,
@@ -319,8 +319,13 @@ There are two ways:
   production dependencies. The image is smaller, starts faster and has less in it to attack.
   It needs a build set up for the monorepo's shared packages, which does not exist yet.
 
-Recommendation: `tsx` for stage 0, because it is exactly what the tests exercise and needs no
-new work; a compiled build before stage 1.
+Decided (Michael, 25 Nov): no compiled build for stage 0; a compiled build before stage 1.
+
+As built (25 Nov): the stage 0 image needs neither. Node 24 runs the TypeScript source
+directly by removing the types as it loads each file, which the repository's settings allow
+and the media worker's image already does. So the image holds production dependencies only
+and no development tool. What remains for stage 1: CI tests the API through `tsx` on Node 22,
+so either CI tests the image as it is built, or the compiled build replaces it.
 
 ### 8.4 Settled
 
