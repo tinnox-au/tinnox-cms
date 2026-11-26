@@ -344,3 +344,6 @@ urgent: Michael 26 Nov
 
 ### CMS-42
 from: CMS-4
+
+**Notes**
+- 26 Nov: Plan: docs/implementation-backlog.md Epic F (F1-F7). Evidence, CMS-4 round 1, 26 Nov: on the Pi 5 the browser player's storage is not persistent (Chromium refused), so cached media can be evicted.
