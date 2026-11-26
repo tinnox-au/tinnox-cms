@@ -1,6 +1,7 @@
 # Edge for a deployed environment (docs/deployment-plan-2026-11-24.md, section 3.2).
-# Two public origins: the portal, which also carries the API under /api so the session
-# cookie is same-origin, and the player (prototype-m0.md D7, D17).
+# Two public origins: the portal, which also carries the API (under /api, so the session
+# cookie is same-origin, and under /player for the players), and the player
+# (prototype-m0.md D7, D17).
 # Caddy obtains and renews the certificates itself. For a name ending in .localhost it
 # signs them with its own local authority, which is how this file is tried on a laptop.
 {
@@ -55,8 +56,13 @@
 
 {$PORTAL_HOST} {
 	import every_answer
-	# Only /api reaches the API. /healthz and /readyz stay inside the server.
-	handle /api/* {
+	# The API has two public prefixes (packages/contracts/src/routes.ts): /api for the
+	# portal, and /player, which the player calls from its own origin with a device token
+	# (the player is built with this host as its API origin; the API allows exactly the
+	# player origin there, D7). Nothing else reaches the API: /healthz and /readyz stay
+	# inside the server. The portal has no page under either prefix.
+	@api path /api/* /player/*
+	handle @api {
 		reverse_proxy api:4000
 	}
 	handle {

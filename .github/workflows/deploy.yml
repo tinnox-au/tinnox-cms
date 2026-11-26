@@ -130,3 +130,26 @@ jobs:
             exit 1
           fi
           echo "released $GITHUB_SHA to $ENVIRONMENT"
+
+      # The release checks the API from inside the server. This asks from outside, through
+      # the edge, with two requests that need no account and change nothing: each must be
+      # answered by the API (JSON), not by the portal's page, which is what a path the edge
+      # does not forward gets. A player with no device token is refused with 401.
+      - name: Check both API prefixes from outside
+        run: |
+          failed=0
+          probe() { # path, expected status
+            local answer
+            answer=$(curl --silent --max-time 20 --output /dev/null \
+              --write-out '%{http_code} %{content_type}' "$API_PUBLIC_ORIGIN$1" || true)
+            case "$answer" in
+              "$2 application/json"*) echo "ok    $1: $answer" ;;
+              *)
+                echo "::error::$1 answered \"$answer\"; expected $2 with JSON from the API"
+                failed=1
+                ;;
+            esac
+          }
+          probe /api/session 200
+          probe /player/manifest 401
+          exit "$failed"
