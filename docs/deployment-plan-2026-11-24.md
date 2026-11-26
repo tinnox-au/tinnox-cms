@@ -64,7 +64,7 @@ server in place of an SSH tunnel to a laptop.
 One EC2 instance in Sydney, running three containers:
 
 - Caddy: TLS with free Let's Encrypt certificates; serves the portal and player bundles on two
-  hostnames; forwards `/api` on the portal hostname to the API; sends the security headers
+  hostnames; forwards `/api` and `/player` on the portal hostname to the API; sends the security headers
   listed in `apps/portal/README.md`.
 - The API (a new image).
 - The media worker (the existing image, still with no network).
