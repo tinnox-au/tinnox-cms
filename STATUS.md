@@ -319,12 +319,11 @@ from: CMS-30
 
 **Notes**
 - 24 Nov: Michael, 24 Nov: media is served direct from Sydney storage, no CDN, if possible. Michael is the incident owner for now. Native players: Linux only for now, Windows 11 set aside.
-- 25 Nov: Michael, 25 Nov: the product domain is tinnox-one.com.au, bought. Stage 0 keeps the API on tsx (compiled image is CMS-39).
-- 25 Nov: Michael, 25 Nov: hostnames are app. and player. under tinnox-one.com.au (app.test. and player.test. for stage 0); the bare domain carries no application and redirects to tinnox.com.au for now.
+- 25 Nov: Michael, 25 Nov: the product domain is tinnox-one.com.au, bought; hostnames are app. and player. under it (app.test. and player.test. for stage 0). Stage 0 keeps the API on tsx (compiled image is CMS-39).
 - 25 Nov: Michael, 25 Nov: stage 0 goes in the existing AWS account Tinnox Production, not a new account.
-- 25 Nov: Michael activated AWS advanced features (cannot be undone). TINNOX now administers the organisation and its policies. The region policy still allows Sydney only; identity providers are allowed, so keyless GitHub deploys are possible.
-- 25 Nov: four stacks created in Sydney (server, RDS PostgreSQL 17, Cognito, image delivery); RDS accepts the BYPASSRLS role. Billing has started. Michael set the root password and MFA.
-- 25 Nov: first release to test succeeded. Provisioning reads Cognito (pull request 49); TINNOX Internal created; sign-in and sign-out work. CloudTrail and a US$250 budget warning set. Next: the Pi.
+- 25 Nov: Michael activated AWS advanced features (cannot be undone). TINNOX now administers the organisation and its policies. The region policy still allows Sydney only.
+- 25 Nov: stacks created in Sydney (server, RDS PostgreSQL 17, Cognito, image delivery); billing has started. First release to test succeeded; TINNOX Internal created; sign-in and sign-out work. CloudTrail and a US$250 budget warning set.
+- 26 Nov: the edge did not forward /player to the API, so a player got no pairing code. Fixed and released (pull request 53); each release now checks both API prefixes from outside. Next: pair the Pi.
 
 ### CMS-38
 from: CMS-37
