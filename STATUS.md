@@ -3,7 +3,7 @@ contract: status/v2
 repo: tinnox-au/tinnox-cms
 initiative: TINNOX CMS
 key: CMS
-next_id: 42
+next_id: 43
 phase: Not written yet: one sentence on what this project is and where it stands
 gate: -
 seeded: 17 Nov 2026 by status init
@@ -43,6 +43,7 @@ None.
 | CMS-39 | Compiled API image before stage 1 (first customer): add a build step and a CI job that tests the compiled build; stage 0 runs the API through tsx | proposed | - | 25 Nov |
 | CMS-40 | Sign-in that fails on a server error shows a raw JSON 500; redirect to the sign-in page with an error instead | proposed | - | 25 Nov |
 | CMS-41 | Delete a screen from the Screens list (today a created screen can only be renamed or have its player revoked; Yodeck allows delete) | proposed | - | 26 Nov |
+| CMS-42 | Native Linux player (Epic F): media on disk outside browser storage, boot start, crash recovery, read-only root, remote update, offline wipe on revoke | proposed | - | 26 Nov |
 
 ## To do
 
@@ -340,3 +341,6 @@ from: CMS-32
 
 ### CMS-41
 urgent: Michael 26 Nov
+
+### CMS-42
+from: CMS-4
