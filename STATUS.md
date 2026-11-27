@@ -55,11 +55,12 @@ None.
 | CMS-4 | Real-hardware check on Raspberry Pi 5 (8GB) under Linux: the browser player in Chromium kiosk mode on a monitor | Michael 23 Nov | - | 23 Nov |
 | CMS-32 | Poteto pyramid refactor, group D: verification (steps 29 to 37 of the adoption plan); Michael starts it | Michael 25 Nov | - | 25 Nov |
 | CMS-37 | Deploy the CMS to production: agree the deployment plan first (data stays in Australia, stability, scalability, security), then the first production release | Michael 25 Nov | - | 25 Nov |
-| CMS-41 | Delete a screen from the Screens list (today a created screen can only be renamed or have its player revoked; Yodeck allows delete) | Michael 27 Nov | - | 27 Nov |
 
 ## In review
 
-None.
+| Id | Card | Agreed | PR | Since |
+|---|---|---|---|---|
+| CMS-41 | Delete a screen from the Screens list (today a created screen can only be renamed or have its player revoked; Yodeck allows delete) | Michael 27 Nov | #54 | 27 Nov |
 
 ## Done, last 14 days
 
