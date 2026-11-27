@@ -349,3 +349,4 @@ from: CMS-4
 - 26 Nov: Plan: docs/implementation-backlog.md Epic F (F1-F7). Evidence, CMS-4 round 1, 26 Nov: on the Pi 5 the browser player's storage is not persistent (Chromium refused), so cached media can be evicted.
 - 26 Nov: Offline removal: a revoked or stolen offline device keeps its last content until it reconnects; consider encryption at rest and an optional max-days-offline rule.
 - 26 Nov: A player plan revision (DEC-36, PROPOSED 21 Nov) sits uncommitted in the main checkout on branch docs/player-runtime-plan.
+- 27 Nov: 27 Nov, CMS-4 R6: a power cut wiped the browser player's IndexedDB (pairing) and media cache; Chromium recreated an empty store, so the screen needed re-pairing. 2 of 5 cuts needed a site visit.
