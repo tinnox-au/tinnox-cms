@@ -42,7 +42,6 @@ None.
 | CMS-38 | Player push channel for instant commands (reload, restart, screenshot): the player only polls today; add when a customer needs faster than the 15 s poll | proposed | - | 24 Nov |
 | CMS-39 | Compiled API image before stage 1 (first customer): add a build step and a CI job that tests the compiled build; stage 0 runs the API through tsx | proposed | - | 25 Nov |
 | CMS-40 | Sign-in that fails on a server error shows a raw JSON 500; redirect to the sign-in page with an error instead | proposed | - | 25 Nov |
-| CMS-41 | Delete a screen from the Screens list (today a created screen can only be renamed or have its player revoked; Yodeck allows delete) | proposed | - | 26 Nov |
 | CMS-42 | Native Linux player (Epic F): media on disk outside browser storage, boot start, crash recovery, read-only root, remote update, offline wipe on revoke | proposed | - | 26 Nov |
 
 ## To do
@@ -56,6 +55,7 @@ None.
 | CMS-4 | Real-hardware check on Raspberry Pi 5 (8GB) under Linux: the browser player in Chromium kiosk mode on a monitor | Michael 23 Nov | - | 23 Nov |
 | CMS-32 | Poteto pyramid refactor, group D: verification (steps 29 to 37 of the adoption plan); Michael starts it | Michael 25 Nov | - | 25 Nov |
 | CMS-37 | Deploy the CMS to production: agree the deployment plan first (data stays in Australia, stability, scalability, security), then the first production release | Michael 25 Nov | - | 25 Nov |
+| CMS-41 | Delete a screen from the Screens list (today a created screen can only be renamed or have its player revoked; Yodeck allows delete) | Michael 27 Nov | - | 27 Nov |
 
 ## In review
 
