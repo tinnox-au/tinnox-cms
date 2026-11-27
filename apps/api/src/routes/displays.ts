@@ -104,7 +104,7 @@ const DISPLAY_SELECT = `
   LEFT JOIN layout lay ON lay.id = d.assigned_layout_id AND lay.org_id = d.org_id
   LEFT JOIN layout_zone lz ON lz.layout_id = lay.id AND lz.org_id = lay.org_id AND lz.position = 0
   LEFT JOIN playlist lmp ON lmp.id = lz.playlist_id AND lmp.org_id = lz.org_id
-  WHERE d.org_id = app_org_id()`;
+  WHERE d.org_id = app_org_id() AND d.deleted_at IS NULL`;
 
 function toDisplayDto(row: DisplayRow): DisplayDto {
   return {
@@ -338,7 +338,8 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
                   d.default_fit, d.assigned_playlist_id, d.assigned_schedule_id,
                   d.assigned_layout_id, d.rotation, d.working_hours,
                   d.alert_offline_minutes, d.alert_back_online
-           FROM display d WHERE d.id = $1 AND d.org_id = app_org_id() FOR UPDATE`,
+           FROM display d
+           WHERE d.id = $1 AND d.org_id = app_org_id() AND d.deleted_at IS NULL FOR UPDATE`,
           [id],
         );
         const current = found(locked.rows[0], 'The screen');
@@ -456,6 +457,63 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
     );
   });
 
+  /**
+   * Deletes a screen (CMS-41). The row is kept with `deleted_at` (its publications are
+   * immutable and refer to it) and every later request for it answers 404. In the order of
+   * revoke-player: claims cancelled before the row is locked (SCX-01), then the active
+   * registration revoked, so the player answers to `device_revoked`; its tags and assignments
+   * are taken off, so tag counts and playlist, schedule and layout deletes no longer see it.
+   * Its open alert episode, if any, is closed by the next alert check (alerts.ts).
+   */
+  app.delete(ROUTES.displayPattern, async (request, reply) => {
+    const session = operatorOf(request);
+    const { id } = parseInput(IdParamSchema, request.params, 'address');
+    await changeAsOperator(ctx, request, async (tx) => {
+      const cancelledPairingIds = await pairingCancelClaims(tx, id);
+      const display = await tx.query(
+        `SELECT 1 FROM display
+         WHERE id = $1 AND org_id = app_org_id() AND deleted_at IS NULL FOR UPDATE`,
+        [id],
+      );
+      if (display.rowCount !== 1) throw notFound('The screen');
+      const revoked = await tx.query<{ id: string }>(
+        `UPDATE player_registration
+         SET revoked_at = now(), revoked_reason = 'operator'
+         WHERE display_id = $1 AND org_id = app_org_id() AND revoked_at IS NULL
+         RETURNING id`,
+        [id],
+      );
+      const tags = await tx.query(
+        'DELETE FROM display_tag WHERE display_id = $1 AND org_id = app_org_id()',
+        [id],
+      );
+      await tx.query(
+        `UPDATE display
+         SET deleted_at = now(), assigned_playlist_id = NULL, assigned_schedule_id = NULL,
+             assigned_layout_id = NULL
+         WHERE id = $1 AND org_id = app_org_id()`,
+        [id],
+      );
+      return {
+        value: undefined,
+        audit: {
+          actorType: 'operator',
+          actorId: session.membershipId,
+          action: 'display.delete',
+          objectType: 'display',
+          objectId: id,
+          result: 'success',
+          detail: {
+            revokedRegistrationId: revoked.rows[0]?.id ?? null,
+            cancelledPairingIds,
+            tagCount: tags.rowCount ?? 0,
+          },
+        },
+      };
+    });
+    return reply.code(204).send();
+  });
+
   // D9: the operator claims a pairing code for one of the organisation's displays.
   app.post(
     ROUTES.displayClaimPattern,
@@ -562,7 +620,8 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
       // unknown or foreign id changes nothing and is answered with 404 below.
       const cancelledPairingIds = await pairingCancelClaims(tx, id);
       const display = await tx.query(
-        'SELECT 1 FROM display WHERE id = $1 AND org_id = app_org_id() FOR UPDATE',
+        `SELECT 1 FROM display
+         WHERE id = $1 AND org_id = app_org_id() AND deleted_at IS NULL FOR UPDATE`,
         [id],
       );
       if (display.rowCount !== 1) throw notFound('The screen');

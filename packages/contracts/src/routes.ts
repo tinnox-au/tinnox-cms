@@ -20,6 +20,7 @@ export const ROUTES = Object.freeze({
   sites: '/api/sites',
 
   displays: '/api/displays',
+  /** GET, PATCH, DELETE (204; the screen is kept as deleted, its player revoked, and every later request for it answers 404). */
   displayPattern: '/api/displays/:id',
   display: (id: string) => `/api/displays/${enc(id)}`,
   displayClaimPattern: '/api/displays/:id/claim',

@@ -59,7 +59,8 @@ export function DisplayDetailPage() {
                 </ButtonLink>
               }
             >
-              It is not one of this organisation&rsquo;s screens. The address may be wrong.
+              It is not one of this organisation&rsquo;s screens. It may have been deleted, or the
+              address may be wrong.
             </EmptyState>
             {refusal !== null && (
               <p className="tx-screen-detail-missing__answer">

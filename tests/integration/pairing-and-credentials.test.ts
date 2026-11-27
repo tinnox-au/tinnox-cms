@@ -318,6 +318,45 @@ describe('pairing codes and device credentials', () => {
     expect(revocation?.detail?.['cancelledPairingIds']).toEqual([dormant.pairingId]);
   });
 
+  it('cuts off the player of a deleted screen and cancels a claim no player collected (CMS-41)', async () => {
+    type AuditItem = { action: string; objectId: string | null; detail: unknown };
+    const deletion = async (displayId: string): Promise<unknown> =>
+      (
+        (await (await alice.fetch('/api/audit?limit=200')).json()) as { items: AuditItem[] }
+      ).items.find((item) => item.action === 'display.delete' && item.objectId === displayId)
+        ?.detail;
+
+    // A paired screen that is playing: its player answers to device_revoked, as after a revocation.
+    const setup = await playing(alice, orgA);
+    expect(
+      (await fetch(`${t.url}/player/manifest`, { headers: setup.player.headers })).status,
+    ).toBe(200);
+    const removed = await alice.fetch(`/api/displays/${setup.displayId}`, { method: 'DELETE' });
+    expect(removed.status).toBe(204);
+    await expectNoAccess(setup);
+    expect(await deletion(setup.displayId)).toEqual({
+      revokedRegistrationId: setup.player.registrationId,
+      cancelledPairingIds: [],
+      tagCount: 0,
+    });
+
+    // A code claimed for a screen and not yet collected: the player is told to start again.
+    const display = await createDisplay(alice, orgA, 'Claimed then deleted');
+    const dormant = await newPairing(t);
+    expect((await claim(alice, display.id, dormant.code)).status).toBe(200);
+    expect((await alice.fetch(`/api/displays/${display.id}`, { method: 'DELETE' })).status).toBe(
+      204,
+    );
+    const late = await pollPairing(t, dormant);
+    expect(late.status).toBe(200);
+    expect(await late.json()).toEqual({ status: 'expired' });
+    expect(await deletion(display.id)).toEqual({
+      revokedRegistrationId: null,
+      cancelledPairingIds: [dormant.pairingId],
+      tagCount: 0,
+    });
+  });
+
   it('a claim that replaces an active player writes pairing.claim and player.revoke (replaced) in its own transaction', async () => {
     const display = await createDisplay(alice, orgA, 'Replaced screen');
     const first = await pairPlayer(t, alice, display.id);

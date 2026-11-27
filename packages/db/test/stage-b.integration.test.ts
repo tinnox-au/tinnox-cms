@@ -167,6 +167,8 @@ describe('display rotation and working hours', () => {
         // 0014
         'alert_offline_minutes',
         'alert_back_online',
+        // 0017
+        'deleted_at',
       ].sort(),
     );
   });

@@ -49,6 +49,7 @@ import {
 } from './levels/seed-0011.ts';
 import { BEFORE_ALERTS_A, BEFORE_ALERTS_B, INVITE_EMAIL } from './levels/seed-0013.ts';
 import { RECIPIENTS } from './levels/seed-0014.ts';
+import { DELETED_DISPLAY } from './levels/seed-0017.ts';
 import { appPool } from './support.ts';
 
 /**
@@ -174,7 +175,7 @@ describe('the chain from 0004 to the newest migration', () => {
       alert_recipient: 2,
       app: 1,
       audit_event: 8,
-      display: 9,
+      display: 10,
       display_alert: 1,
       display_delivery: 3,
       display_tag: 1,
@@ -518,7 +519,10 @@ describe('what each migration did to the seeded rows', () => {
       id: string;
       alert_offline_minutes: number | null;
       alert_back_online: boolean;
-    }>('SELECT id, alert_offline_minutes, alert_back_online FROM display ORDER BY id');
+    }>(
+      'SELECT id, alert_offline_minutes, alert_back_online FROM display WHERE id <> $1 ORDER BY id',
+      [DELETED_DISPLAY],
+    );
     expect(displays).toHaveLength(9);
     for (const display of displays) {
       expect(display, display.id).toEqual({
@@ -537,6 +541,12 @@ describe('what each migration did to the seeded rows', () => {
     ]);
     expect(await rows('SELECT display_id, org_id FROM display_alert')).toEqual([
       { display_id: A4.published, org_id: A4.org },
+    ]);
+  });
+
+  it('0017 deletes no display from before it, and keeps the one seed-0017 deleted', async () => {
+    expect(await rows('SELECT id FROM display WHERE deleted_at IS NOT NULL')).toEqual([
+      { id: DELETED_DISPLAY },
     ]);
   });
 });

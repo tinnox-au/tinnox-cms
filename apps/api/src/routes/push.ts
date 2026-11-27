@@ -179,7 +179,8 @@ export function registerPushRoutes(app: FastifyInstance, ctx: AppContext): void 
       // Another organisation's display is invisible here, so it answers like an unknown id.
       const known = await readOrg(db, session.orgId, async (tx) => {
         const { rows } = await tx.query<{ id: string }>(
-          'SELECT id FROM display WHERE org_id = app_org_id() AND id = ANY($1::uuid[])',
+          `SELECT id FROM display
+           WHERE org_id = app_org_id() AND deleted_at IS NULL AND id = ANY($1::uuid[])`,
           [displayIds],
         );
         return rows.length;
@@ -189,9 +190,10 @@ export function registerPushRoutes(app: FastifyInstance, ctx: AppContext): void 
       // One display after another: each is its own transaction on one connection, so a
       // large push cannot take the whole pool, and a rejection does not undo the others.
       // shortcut: a push refused part-way (the role was lowered, or the member's sessions were
-      // ended, during this loop) answers 403 or 401 without the results so far: screens
-      // already pushed stay pushed and their publication.create rows record it. Return
-      // per-screen results with a 'refused' outcome if people ask what happened.
+      // ended, during this loop) answers 403 or 401 without the results so far, and one whose
+      // screen was deleted during it answers 404 the same way: screens already pushed stay
+      // pushed and their publication.create rows record it. Return per-screen results with a
+      // 'refused' or 'gone' outcome if people ask what happened.
       const results: PushResult[] = [];
       for (const displayId of displayIds) {
         results.push(await pushDisplay(request, session, displayId, key));

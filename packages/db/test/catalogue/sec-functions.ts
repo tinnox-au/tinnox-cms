@@ -83,7 +83,7 @@ export const SEC_FUNCTIONS: Readonly<Record<string, SecFunction>> = {
     returns:
       'TABLE(outcome text, pairing_id uuid, replaced_registration_id uuid, cancelled_pairing_ids uuid[])',
     crossOrg: false,
-    why: 'Refuses to run without an organisation context; the member and the display must belong to it. A sec function because a pending code belongs to no organisation yet and tinnox_app has no rights on pairing_session or pairing_claim_failure.',
+    why: 'Refuses to run without an organisation context; the member and the display must belong to it, and the display must not be deleted. A sec function because a pending code belongs to no organisation yet and tinnox_app has no rights on pairing_session or pairing_claim_failure.',
   },
   'sec.pairing_complete(uuid,bytea,bytea)': {
     returns: 'TABLE(outcome text, registration_id uuid, org_id uuid, display_id uuid)',

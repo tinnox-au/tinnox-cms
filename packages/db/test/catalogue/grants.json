@@ -117,6 +117,7 @@
           "UPDATE (content_x)",
           "UPDATE (content_y)",
           "UPDATE (default_fit)",
+          "UPDATE (deleted_at)",
           "UPDATE (description)",
           "UPDATE (name)",
           "UPDATE (rotation)",

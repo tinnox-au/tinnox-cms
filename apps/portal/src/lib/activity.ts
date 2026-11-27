@@ -88,6 +88,7 @@ const WORDING: { readonly [K in AuditAction]: Wording } = {
   'auth.logout': { done: 'Person signed out', attempt: 'Sign-out', icon: 'account' },
   'display.create': { done: 'Screen added', attempt: 'Adding a screen', icon: 'screen' },
   'display.update': { done: 'Screen updated', attempt: 'Screen update', icon: 'screen' },
+  'display.delete': { done: 'Screen deleted', attempt: 'Screen deletion', icon: 'screen' },
   // The recorded transition, not delivery: the row is written before any e-mail goes out (DEC-33).
   'display.offline_alert': {
     done: 'Not-reporting alert recorded for screen',
@@ -209,6 +210,7 @@ const WORDING: { readonly [K in AuditAction]: Wording } = {
 
 /** The actions whose subject is gone once the event has happened. */
 const REMOVALS: ReadonlySet<string> = new Set<AuditAction>([
+  'display.delete',
   'media.delete',
   'tag.delete',
   'folder.delete',
@@ -490,6 +492,7 @@ export function describeActivity(event: AuditEventDto): ActivityDescription {
     case 'auth.login':
     case 'auth.logout':
     case 'display.create':
+    case 'display.delete':
     case 'folder.create':
     case 'folder.delete':
     case 'folder.update':

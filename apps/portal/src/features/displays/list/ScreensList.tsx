@@ -41,7 +41,7 @@ import {
   type ScreenStatusFilter,
 } from '../../../lib/screensList.ts';
 import { revokeOutcomeText } from '../../../lib/screenDetail.ts';
-import { pruneSelection, selectedRows, toggleOne } from '../../../lib/selection.ts';
+import { pruneSelection, selectedRows, setMany, toggleOne } from '../../../lib/selection.ts';
 import { matchesTagFilter } from '../../../lib/tagColours.ts';
 import {
   LayoutGrid,
@@ -53,6 +53,7 @@ import {
   SearchX,
   Send,
   Tags,
+  Trash,
 } from '../../../ui/icons.ts';
 import {
   Banner,
@@ -81,14 +82,18 @@ import { useCan } from '../../../session/AuthenticatedSession.tsx';
 import { Page } from '../../../shell/Page.tsx';
 import { usePush } from '../../push/PushContext.tsx';
 import {
+  elementByTestId,
   PlaylistPickerDialog,
   PushStatePill,
+  rowByTestId,
   ScreenStatusPill,
   TagChips,
   TagFilter,
   TagsDialog,
   useTags,
 } from '../../shared/index.ts';
+import { DeleteScreenDialog, type ScreenToDelete } from '../DeleteScreenDialog.tsx';
+import { DeleteScreensDialog } from './DeleteScreensDialog.tsx';
 import { ScreenFrame } from './ScreenFrame.tsx';
 import { AssignFailureNotice, PartialNotice, type AssignFailure } from './ScreenNotices.tsx';
 import { ScreenRowMenu } from './ScreenRowMenu.tsx';
@@ -131,6 +136,11 @@ function rowId(row: ScreenRow): string {
   return row.display.id;
 }
 
+/** What the delete dialogs need of a row; `paired` also counts the latest status. */
+function toDelete(row: ScreenRow): ScreenToDelete {
+  return { id: row.display.id, name: row.display.name, paired: row.paired };
+}
+
 /**
  * The screens list (docs/portal-v2/stage-a.md, 3.6): search, status and tag filters, a table
  * or a grid of canvas-shaped tiles, and the actions on one screen or on the ticked ones.
@@ -149,9 +159,11 @@ export function ScreensList() {
   const canPush = useCan('push.publish');
   const canDetails = useCan('screen.details');
   const canPair = useCan('screen.pair');
+  // Deleting a screen is the setup key's, like adding one (stage-c-roles-decision.md).
+  const canDelete = canSetup;
   // Selection is offered while one bulk action is left; the row menu while one row action is.
-  const canSelect = canAssign || canDetails || canPush;
-  const hasRowMenu = canSelect || canPair;
+  const canSelect = canAssign || canDetails || canPush || canDelete;
+  const hasRowMenu = canSelect || canPair || canDelete;
 
   const [params, setParams] = useSearchParams();
   const statusParam = params.get('status');
@@ -176,6 +188,10 @@ export function ScreensList() {
   const [tagsDialog, setTagsDialog] = useState<TagsState>({ open: false, targets: [] });
   const [revoke, setRevoke] = useState<RevokeState>({ open: false, target: null, busy: false });
   const [revokeOutcome, setRevokeOutcome] = useState<RevokeOutcome | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ScreenToDelete | null>(null);
+  const [bulkDeleteTargets, setBulkDeleteTargets] = useState<readonly ScreenToDelete[] | null>(
+    null,
+  );
   const [revokeError, setRevokeError] = useState<{
     readonly name: string;
     readonly error: unknown;
@@ -487,6 +503,59 @@ export function ScreensList() {
           : undefined
       }
       onRevoke={canPair ? askRevoke : undefined}
+      onDelete={
+        canDelete
+          ? () => {
+              setDeleteTarget(toDelete(row));
+            }
+          : undefined
+      }
+    />
+  );
+
+  // In the same place in the empty state, so deleting the last screen keeps it mounted.
+  const deleteDialog = (
+    <DeleteScreenDialog
+      screen={deleteTarget}
+      onClose={() => {
+        setDeleteTarget(null);
+      }}
+      onDeleted={(display, alreadyGone) => {
+        // Statuses with the list: a stale status naming the screen would reload the list again.
+        reloadDisplays();
+        reloadStatuses();
+        refreshPush();
+        if (alreadyGone) toast.info(`${display.name} was already deleted`);
+        else toast.success(`${display.name} deleted`);
+      }}
+      rowFocus={{
+        mode: 'row',
+        order: list.rows.map(rowId),
+        row: rowByTestId('screens-row-', 'screens-tile-'),
+        primary: elementByTestId('screens-add'),
+      }}
+    />
+  );
+
+  // The selection bar's delete; mounted beside the row delete, empty state included.
+  const bulkDeleteDialog = (
+    <DeleteScreensDialog
+      targets={bulkDeleteTargets}
+      onClose={() => {
+        setBulkDeleteTargets(null);
+      }}
+      onDeleted={(ids) => {
+        setSelected((current) => setMany(current, ids, false));
+        reloadDisplays();
+        reloadStatuses();
+        refreshPush();
+      }}
+      rowFocus={{
+        mode: 'bulk',
+        order: list.rows.map(rowId),
+        row: rowByTestId('screens-row-', 'screens-tile-'),
+        primary: elementByTestId('screens-add'),
+      }}
     />
   );
 
@@ -584,6 +653,8 @@ export function ScreensList() {
               : 'An editor adds screens.'}
           </EmptyState>
         </div>
+        {deleteDialog}
+        {bulkDeleteDialog}
       </Page>
     );
   }
@@ -945,6 +1016,19 @@ export function ScreensList() {
                 Push
               </Button>
             )}
+            {canDelete && (
+              <Button
+                variant="danger"
+                size="sm"
+                icon={Trash}
+                data-testid="screens-bulk-delete"
+                onClick={() => {
+                  setBulkDeleteTargets(selectedRows(list.matched, selected, rowId).map(toDelete));
+                }}
+              >
+                Delete
+              </Button>
+            )}
           </SelectionBar>
         )}
 
@@ -1016,6 +1100,8 @@ export function ScreensList() {
           </p>
         </ConfirmDialog>
       </div>
+      {deleteDialog}
+      {bulkDeleteDialog}
     </Page>
   );
 }

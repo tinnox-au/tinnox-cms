@@ -16,7 +16,7 @@ import {
   type RouteRule,
 } from './permissions.ts';
 
-/** The 59 rows of docs/portal-v2/stage-c.md section 6.1 and the 3 of stage-c-alerts.md section 4, written out. */
+/** The 60 rows of docs/portal-v2/stage-c.md section 6.1 and the 3 of stage-c-alerts.md section 4, written out. */
 const EXPECTED_ROUTES = [
   'GET /api/sites',
   'GET /api/displays',
@@ -24,6 +24,7 @@ const EXPECTED_ROUTES = [
   'GET /api/displays/status',
   'GET /api/displays/:id',
   'PATCH /api/displays/:id',
+  'DELETE /api/displays/:id',
   'POST /api/displays/:id/claim',
   'POST /api/displays/:id/revoke-player',
   'GET /api/displays/:id/status',
@@ -83,8 +84,8 @@ const EXPECTED_ROUTES = [
 ];
 
 describe('ROUTE_PERMISSIONS', () => {
-  it('has exactly the 62 routes of the build specs, each pattern a ROUTES value', () => {
-    expect(EXPECTED_ROUTES).toHaveLength(62);
+  it('has exactly the 63 routes of the build specs, each pattern a ROUTES value', () => {
+    expect(EXPECTED_ROUTES).toHaveLength(63);
     expect(Object.keys(ROUTE_PERMISSIONS).sort()).toEqual([...EXPECTED_ROUTES].sort());
     const patterns = new Set<string>(Object.values(ROUTES).filter((v) => typeof v === 'string'));
     for (const key of Object.keys(ROUTE_PERMISSIONS)) {
@@ -202,7 +203,7 @@ describe('checkRouteTable', () => {
   });
 
   it('reports every entry when nothing was registered', () => {
-    expect(checkRouteTable(new Set())).toHaveLength(62);
+    expect(checkRouteTable(new Set())).toHaveLength(63);
   });
 });
 

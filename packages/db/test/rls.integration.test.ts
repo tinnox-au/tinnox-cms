@@ -644,6 +644,7 @@ describe('with organisation A as context', () => {
         ["UPDATE folder SET name = 'hijacked' WHERE id = $1", b.folderId],
         ["UPDATE display SET description = 'hijacked' WHERE id = $1", b.displayId],
         ['UPDATE display SET assigned_playlist_id = NULL WHERE id = $1', b.displayId],
+        ['UPDATE display SET deleted_at = now() WHERE id = $1', b.displayId],
         ['UPDATE media SET folder_id = NULL WHERE id = $1', b.mediaId],
         ['UPDATE playlist SET deleted_at = now() WHERE id = $1', b.playlistId],
         ['DELETE FROM media_tag WHERE media_id = $1', b.mediaId],
@@ -695,7 +696,7 @@ describe('with organisation A as context', () => {
                 (SELECT count(*) FROM display_tag) AS display_tags,
                 (SELECT count(*) FROM media WHERE folder_id IS NOT NULL) AS foldered,
                 (SELECT count(*) FROM display WHERE assigned_playlist_id IS NOT NULL
-                   AND description IS NULL) AS assigned`,
+                   AND description IS NULL AND deleted_at IS NULL) AS assigned`,
       );
       expect(rows[0]).toEqual({
         tags: '2',

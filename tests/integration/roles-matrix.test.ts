@@ -120,8 +120,8 @@ describe('the role-by-route matrix', () => {
     return found;
   };
 
-  it('checks all 62 routes', () => {
-    expect(OPERATOR_ROUTE_PATTERNS).toHaveLength(62);
+  it('checks all 63 routes', () => {
+    expect(OPERATOR_ROUTE_PATTERNS).toHaveLength(63);
   });
 
   it.each(ROLES)('answers every route as the oracle says for an %s', async (role) => {

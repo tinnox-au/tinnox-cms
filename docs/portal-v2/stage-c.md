@@ -41,7 +41,7 @@ Active keys (`PERMISSION_KEYS`, in this order):
 | `push.publish` | `POST /api/push` |
 | `screen.details` | A screen's `name`, `description`, `tagIds` |
 | `screen.hours` | A screen's `workingHours` |
-| `screen.setup` | Add a screen; `canvas`, `contentRect`, `defaultFit`, `rotation`; create, rename, recolour and delete screen tags. Renaming, recolouring and deleting a tag of either scope need it with the content key, since 2026-11-25 (step 28 of the poteto adoption plan, D20) |
+| `screen.setup` | Add a screen; `canvas`, `contentRect`, `defaultFit`, `rotation`; create, rename, recolour and delete screen tags; delete a screen, since 2026-11-27 (CMS-41, row 60 of 6.1). Renaming, recolouring and deleting a tag of either scope need it with the content key, since 2026-11-25 (step 28 of the poteto adoption plan, D20) |
 | `screen.pair` | Claim a pairing code, revoke a player, cancel a pending pairing |
 | `member.read` | `GET /api/members`, `GET /api/invites`; the Users page |
 | `member.manage` | Invite, cancel an invite, change a role, correct a name, remove, sign out everywhere; always followed by the rank rule (1.4) |
@@ -915,7 +915,7 @@ Every operator route stays inside the operator plugin (session, CSRF, exact Orig
 
 ### 6.1 Route-to-key table (`ROUTE_PERMISSIONS`, `apps/api/src/auth/permissions.ts`)
 
-Keyed by `` `${METHOD} ${ROUTES.<name>}` `` (the contract constants, so a renamed path breaks the build). An entry is `{ all: [...] }` or `{ any: [...], refine: RefineName }`. 59 entries: the 51 of `tests/integration/session-csrf.test.ts:43-94` plus 8 people routes. 26 GET, 33 writes.
+Keyed by `` `${METHOD} ${ROUTES.<name>}` `` (the contract constants, so a renamed path breaks the build). An entry is `{ all: [...] }` or `{ any: [...], refine: RefineName }`. 59 entries: the 51 of `tests/integration/session-csrf.test.ts:43-94` plus 8 people routes. 26 GET, 33 writes. Row 60 was added on 2026-11-27 (CMS-41); the alert routes of CMS-15 are in `stage-c-alerts.md`.
 
 | # | Method | Path (`ROUTES.`) | Rule | Handler |
 |---|---|---|---|---|
@@ -978,8 +978,9 @@ Keyed by `` `${METHOD} ${ROUTES.<name>}` `` (the contract constants, so a rename
 | 57 | GET | `/api/invites` (`invites`) | all `member.read` | members.ts |
 | 58 | POST | `/api/invites` (`invites`) | all `member.manage` (then `grantableRoles`) | members.ts |
 | 59 | POST | `/api/invites/:id/cancel` (`inviteCancelPattern`) | all `member.manage` (then the rank rule) | members.ts |
+| 60 | DELETE | `/api/displays/:id` (`displayPattern`) | all `screen.setup` (since 2026-11-27, CMS-41) | displays.ts |
 
-Totals: `org.read` 22, `activity.read` 2, `member.read` 2, `content.write` 13, `content.delete` 5, `media.delete` 1, `screen.setup` 1, `screen.pair` 2, `push.publish` 1, publish all-of 1, any-with-refine 4, `member.manage` 5. Since 2026-11-25 (step 28 of the poteto adoption plan, D20), rows 35 and 36 are all-of two keys, so any-with-refine is 2 (rows 6 and 34). `screen.details`, `screen.hours` and `screen.assign` are reached only through row 6 (and `screen.assign` through row 47).
+Totals: `org.read` 22, `activity.read` 2, `member.read` 2, `content.write` 13, `content.delete` 5, `media.delete` 1, `screen.setup` 1, `screen.pair` 2, `push.publish` 1, publish all-of 1, any-with-refine 4, `member.manage` 5. Since 2026-11-25 (step 28 of the poteto adoption plan, D20), rows 35 and 36 are all-of two keys, so any-with-refine is 2 (rows 6 and 34). `screen.details`, `screen.hours` and `screen.assign` are reached only through row 6 (and `screen.assign` through row 47). Since 2026-11-27 (CMS-41), row 60 makes `screen.setup` 2.
 
 Refine functions (`REFINES`), all pure and unit-tested with a hypothetical key set (`meetsKeys`, 6.2), because under 1.3 no real role holds one candidate key without the other:
 
@@ -1336,8 +1337,8 @@ Every control below is in a WP5 file. "Hidden" also means: a row menu left with 
 | Layouts row menu Delete | `LayoutsPage.tsx:162-170` | content.delete | Hidden |
 | Screens "Add screen" | `features/displays/list/ScreensList.tsx:620-631` | screen.setup | Hidden |
 | Screens empty state | `ScreensList.tsx:536-560` | screen.setup | No button; text "An editor adds screens." |
-| Screen row menu | `features/displays/list/ScreenRowMenu.tsx:20-80` | Assign content `:38-45` screen.assign; Push now `:46-55` push.publish; Edit tags `:56-63` screen.details; Revoke player `:64-77` screen.pair | Items hidden; Open only → no menu |
-| Screens selection and bulk bar | `ScreensList.tsx:808-813`, `:845-852`, `:866-906` | Assign `:873-883` screen.assign; Add tags `:884-894` screen.details; Push `:895-905` push.publish | Items hidden; selection off |
+| Screen row menu | `features/displays/list/ScreenRowMenu.tsx:20-80` | Assign content `:38-45` screen.assign; Push now `:46-55` push.publish; Edit tags `:56-63` screen.details; Revoke player `:64-77` screen.pair; Delete screen.setup (since 2026-11-27, CMS-41) | Items hidden; Open only → no menu |
+| Screens selection and bulk bar | `ScreensList.tsx:808-813`, `:845-852`, `:866-906` | Assign `:873-883` screen.assign; Add tags `:884-894` screen.details; Push `:895-905` push.publish; Delete screen.setup (since 2026-11-27, CMS-41) | Items hidden; selection off |
 | Screens tags dialog | `ScreensList.tsx:946-955` | create: screen.setup | `allowCreate={useCan('screen.setup')}` |
 | Settings tag pages | `features/settings/TagsPage.tsx` | media: New tag `:125-135` (used `:265`, `:288`), Rename `:202-209`, Change colour `:210-217` content.write; Delete `:224-232` content.delete. display: all screen.setup. "Show files" `:218-222` stays. Since 2026-11-25 (step 28 of the poteto adoption plan, D20), Rename, Change colour and Delete need the content key and screen.setup together in both scopes; New tag stays per scope | Hidden per scope; empty text "An editor adds tags." |
 
@@ -1366,6 +1367,7 @@ Screen page (`features/displays/detail/`; tabs Overview, Canvas, Pairing, Tags, 
 |---|---|---|---|
 | "Push to this screen" | `SummaryCard.tsx:70-72` | push.publish | Hidden |
 | More menu: Pair, Revoke | `SummaryCard.tsx:88-90`, `:92-99` | screen.pair | Hidden; "Refresh status" (`:85-87`) stays |
+| More menu: Delete screen (since 2026-11-27, CMS-41) | `SummaryCard.tsx` | screen.setup | Hidden |
 | Details card | `DetailsCard.tsx:102-171` (form `:103-106`, inputs `:120-131`, `:140-150`, Save `:156-164`) | screen.details | Inputs readOnly, actions hidden, note "Editors change the screen's name and description." Enter in the name submits nothing |
 | Content card | `ContentCard.tsx:219-302` (Change `:221-268`, buttons `:270-301`) | screen.assign | Hidden; "Open {kind}" (`:304-313`) stays; the card description (`:187`, "…until you push.", shown on every screen) is omitted; with nothing assigned, "Nothing assigned" (`:214`) stays and the note (`:215-217`) reads "An editor assigns content." |
 | Canvas tab | `CanvasTab.tsx` (form `:185-188`, inputs `:174`, size preset buttons `:244-263`, checkbox `:268-277`, selects `:292-308`, `:317-332`, Save `:343-354`) | screen.setup | Locked, preset buttons and save row hidden, note "Editors change the canvas." `submit` (`:119-150`) has no dirty check, so its `if (readOnly \|\| saving) return;` is the only thing that stops Enter in a read-only field from sending `patchDisplay` |
