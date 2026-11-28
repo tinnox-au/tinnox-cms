@@ -28,7 +28,8 @@ import {
   type WorkingHours,
 } from '@tinnox/contracts';
 import {
-  pairingCancelClaims,
+  revokeDisplayPlayer,
+  softDeleteDisplay,
   pairingClaim,
   readOrg,
   type AuditInput,
@@ -469,31 +470,8 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     await changeAsOperator(ctx, request, async (tx) => {
-      const cancelledPairingIds = await pairingCancelClaims(tx, id);
-      const display = await tx.query(
-        `SELECT 1 FROM display
-         WHERE id = $1 AND org_id = app_org_id() AND deleted_at IS NULL FOR UPDATE`,
-        [id],
-      );
-      if (display.rowCount !== 1) throw notFound('The screen');
-      const revoked = await tx.query<{ id: string }>(
-        `UPDATE player_registration
-         SET revoked_at = now(), revoked_reason = 'operator'
-         WHERE display_id = $1 AND org_id = app_org_id() AND revoked_at IS NULL
-         RETURNING id`,
-        [id],
-      );
-      const tags = await tx.query(
-        'DELETE FROM display_tag WHERE display_id = $1 AND org_id = app_org_id()',
-        [id],
-      );
-      await tx.query(
-        `UPDATE display
-         SET deleted_at = now(), assigned_playlist_id = NULL, assigned_schedule_id = NULL,
-             assigned_layout_id = NULL
-         WHERE id = $1 AND org_id = app_org_id()`,
-        [id],
-      );
+      const deleted = await softDeleteDisplay(tx, id);
+      if (deleted === null) throw notFound('The screen');
       return {
         value: undefined,
         audit: {
@@ -504,9 +482,9 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
           objectId: id,
           result: 'success',
           detail: {
-            revokedRegistrationId: revoked.rows[0]?.id ?? null,
-            cancelledPairingIds,
-            tagCount: tags.rowCount ?? 0,
+            revokedRegistrationId: deleted.revokedRegistrationId,
+            cancelledPairingIds: deleted.cancelledPairingIds,
+            tagCount: deleted.tagCount,
           },
         },
       };
@@ -614,25 +592,12 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     return changeAsOperator(ctx, request, async (tx) => {
-      // After the role check, the claims are cancelled first, before the display row is locked:
-      // claims of this screen that no player has collected yet can then not bring a player
-      // back after the revocation (round 3, SCX-01). Only this organisation's rows are touched, so an
-      // unknown or foreign id changes nothing and is answered with 404 below.
-      const cancelledPairingIds = await pairingCancelClaims(tx, id);
-      const display = await tx.query(
-        `SELECT 1 FROM display
-         WHERE id = $1 AND org_id = app_org_id() AND deleted_at IS NULL FOR UPDATE`,
-        [id],
-      );
-      if (display.rowCount !== 1) throw notFound('The screen');
-      const revoked = await tx.query<{ id: string }>(
-        `UPDATE player_registration
-         SET revoked_at = now(), revoked_reason = 'operator'
-         WHERE display_id = $1 AND org_id = app_org_id() AND revoked_at IS NULL
-         RETURNING id`,
-        [id],
-      );
-      const registrationId = revoked.rows[0]?.id ?? null;
+      // After the role check: the claims first, then the row, then the registration
+      // (revokeDisplayPlayer, SCX-01). An unknown, foreign or deleted id changes nothing: 404.
+      const revoked = await revokeDisplayPlayer(tx, id);
+      if (revoked === null) throw notFound('The screen');
+      const { cancelledPairingIds } = revoked;
+      const registrationId = revoked.revokedRegistrationId;
       return {
         value: {
           revokedRegistrationId: registrationId,

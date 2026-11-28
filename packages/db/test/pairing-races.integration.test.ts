@@ -17,12 +17,16 @@ import {
   deviceByTokenHash,
   pairingClaim,
   pairingComplete,
+  pairingCancelClaims,
   pairingCreate,
   poolAsTx,
+  revokeDisplayPlayer,
   type Autocommit,
+  type OrgTx,
 } from '../src/index.ts';
 import {
   databaseOn,
+  heldTransactions,
   twoTransactions,
   waitForLockWaiters,
   withOrg,
@@ -126,13 +130,10 @@ async function claimed(displayId: string, membershipId = org.membershipId): Prom
 const CLAIM =
   'SELECT outcome, replaced_registration_id, cancelled_pairing_ids FROM sec.pairing_claim($1, $2, $3, 5, 600)';
 const COMPLETE = 'SELECT outcome, registration_id FROM sec.pairing_complete($1, $2, $3)';
-const CANCEL_CLAIMS = 'SELECT sec.pairing_cancel_claims($1) AS ids';
-const REVOKE = `UPDATE player_registration SET revoked_at = now(), revoked_reason = 'operator'
-                WHERE display_id = $1 AND org_id = app_org_id() AND revoked_at IS NULL RETURNING id`;
 const REMOVE = 'UPDATE membership SET removed_at = now(), removed_by = $2 WHERE id = $1';
 const END_SESSIONS = 'SELECT sec.session_revoke_membership($1)';
 
-const collect = (client: PoolClient, p: Claimed) =>
+const collect = (client: Pick<OrgTx, 'query'>, p: Claimed) =>
   client.query<{ outcome: string; registration_id: string | null }>(COMPLETE, [
     p.pairingId,
     p.pollingTokenHash,
@@ -247,20 +248,33 @@ describe('claim against collection', () => {
   });
 });
 
+/** The two sides of a race in which one runs revokeDisplayPlayer, which takes an OrgTx (SDC-07). */
+const heldSides = (work: Parameters<typeof heldTransactions>[2]) =>
+  heldTransactions(pool, org.orgId, work);
+
 describe('revocation against collection', () => {
   it('a revocation that commits while the collection waits for it: the claim is cancelled and no player is made', async () => {
     const display = await newDisplay();
     const pairing = await claimed(display);
-    await sides(async (revoking, collecting) => {
-      // As POST /api/displays/:id/revoke-player: the claims, then the registration.
-      const cancelled = await revoking.client.query<{ ids: string[] }>(CANCEL_CLAIMS, [display]);
-      expect(cancelled.rows[0]?.ids).toEqual([pairing.pairingId]);
-      expect((await revoking.client.query(REVOKE, [display])).rowCount).toBe(0);
-      const late = collect(collecting.client, pairing);
-      await waitsFor(revoking, 'the collection never waited for the revocation');
-      await revoking.client.query('COMMIT');
+    await heldSides(async (revoking, collecting) => {
+      // As POST /api/displays/:id/revoke-player: the claims, then the row, then the registration.
+      expect(await revokeDisplayPlayer(revoking.tx, display)).toEqual({
+        cancelledPairingIds: [pairing.pairingId],
+        revokedRegistrationId: null,
+      });
+      const late = collect(collecting.tx, pairing);
+      await waitForLockWaiters(
+        pool,
+        revoking.pid,
+        1,
+        'the collection never waited for the revocation',
+        {
+          waiter: late,
+        },
+      );
+      await revoking.commit();
       expect((await late).rows[0]).toEqual({ outcome: 'not_claimable', registration_id: null });
-      await collecting.client.query('COMMIT');
+      await collecting.commit();
     });
     expect(await stateOf(display, [pairing])).toEqual({
       statuses: ['expired'],
@@ -272,23 +286,61 @@ describe('revocation against collection', () => {
   it('a collection that commits while the revocation waits for it: the revocation then ends the player it made', async () => {
     const display = await newDisplay();
     const pairing = await claimed(display);
-    await sides(async (collecting, revoking) => {
-      const collected = await collect(collecting.client, pairing);
+    await heldSides(async (collecting, revoking) => {
+      const collected = await collect(collecting.tx, pairing);
       expect(collected.rows[0]?.outcome).toBe('completed');
-      // The cancellation of the display's claims waits for the claim's row.
-      const cancelling = revoking.client.query<{ ids: string[] }>(CANCEL_CLAIMS, [display]);
-      await waitsFor(collecting, 'the revocation never waited for the collection');
-      await collecting.client.query('COMMIT');
-      expect((await cancelling).rows[0]?.ids).toEqual([]);
-      // A later statement, so it reads the registration the collection committed.
-      const revoked = await revoking.client.query<{ id: string }>(REVOKE, [display]);
-      expect(revoked.rows.map((r) => r.id)).toEqual([collected.rows[0]?.registration_id]);
-      await revoking.client.query('COMMIT');
+      // Its first step, the cancellation of the display's claims, waits for the claim's row.
+      const revocation = revokeDisplayPlayer(revoking.tx, display);
+      await waitForLockWaiters(
+        pool,
+        collecting.pid,
+        1,
+        'the revocation never waited for the collection',
+        {
+          waiter: revocation,
+        },
+      );
+      await collecting.commit();
+      // Its later statements read the registration the collection committed.
+      expect(await revocation).toEqual({
+        cancelledPairingIds: [],
+        revokedRegistrationId: collected.rows[0]?.registration_id,
+      });
+      await revoking.commit();
     });
     expect(await stateOf(display, [pairing])).toEqual({
       statuses: ['completed'],
       active: [],
       accepted: [false],
+    });
+  });
+});
+
+describe('the lock order of ending a player (SCX-01, SDC-07)', () => {
+  it("revokeDisplayPlayer waits for the display's pairing lock before it locks the display row", async () => {
+    const display = await newDisplay();
+    await heldSides(async (holding, revoking) => {
+      // The pairing lock, as a claim, a collection's cancellation or another revocation holds it.
+      expect(await pairingCancelClaims(holding.tx, display)).toEqual([]);
+      const revocation = revokeDisplayPlayer(revoking.tx, display);
+      await waitForLockWaiters(
+        pool,
+        holding.pid,
+        1,
+        'the revocation never waited for the pairing lock',
+        {
+          locktype: 'advisory',
+          waiter: revocation,
+        },
+      );
+      // Still waiting for that lock, it has not locked the row yet: the holder can, at once.
+      // Locking the row first would let a claim that holds the pairing lock deadlock with it.
+      const row = await holding.tx.query('SELECT 1 FROM display WHERE id = $1 FOR UPDATE NOWAIT', [
+        display,
+      ]);
+      expect(row.rowCount).toBe(1);
+      await holding.rollback();
+      expect(await revocation).toEqual({ cancelledPairingIds: [], revokedRegistrationId: null });
     });
   });
 });
@@ -359,23 +411,25 @@ describe('credential lookup against revocation (the window of D8)', () => {
     const pairing = await claimed(display);
     const done = await inTx(pool, (tx) => pairingComplete(tx, pairing));
     expect(done.outcome).toBe('completed');
-    await sides(async (revoking, other) => {
-      expect((await revoking.client.query(REVOKE, [display])).rowCount).toBe(1);
+    await heldSides(async (revoking, other) => {
+      expect((await revokeDisplayPlayer(revoking.tx, display))?.revokedRegistrationId).toBe(
+        done.outcome === 'completed' ? done.registrationId : null,
+      );
       // Read on the pool, in no transaction, as the player routes read it: no lock is taken,
       // so this request is past its lookup while the revocation commits.
       expect(await deviceByTokenHash(db, pairing.deviceTokenHash)).toMatchObject({
         displayId: display,
       });
       // The same from inside another open transaction.
-      const inside = await other.client.query(
+      const inside = await other.tx.query(
         'SELECT registration_id FROM sec.device_by_token_hash($1)',
         [pairing.deviceTokenHash],
       );
       expect(inside.rowCount).toBe(1);
-      await revoking.client.query('COMMIT');
+      await revoking.commit();
       expect(await deviceByTokenHash(db, pairing.deviceTokenHash)).toBeNull();
       // READ COMMITTED: the open transaction's next lookup reads the revocation too.
-      const after = await other.client.query(
+      const after = await other.tx.query(
         'SELECT registration_id FROM sec.device_by_token_hash($1)',
         [pairing.deviceTokenHash],
       );

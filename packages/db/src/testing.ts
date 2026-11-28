@@ -6,7 +6,14 @@ import type { MigratorPool } from './migrate.ts';
 import { mintOrgId } from './org-id.ts';
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from './pool.ts';
 import { statementsOf } from './pre-org.ts';
-import { withoutOrg, type Autocommit, type OrgId, type PreOrgTx } from './tx.ts';
+import {
+  withOrg,
+  withoutOrg,
+  type Autocommit,
+  type OrgId,
+  type OrgTx,
+  type PreOrgTx,
+} from './tx.ts';
 
 // The audit-debt guard of the integration test database (adoption plan section 2.1 C, D3).
 export {
@@ -188,6 +195,83 @@ export async function twoTransactions(
       await client.query('ROLLBACK').catch(() => undefined);
       client.release();
     }
+  }
+}
+
+/** A transaction of `heldOrgTx`, open until the test ends it. */
+export interface HeldOrgTx {
+  /** The transaction: a real `OrgTx`, for code of this package that takes one. */
+  readonly tx: OrgTx;
+  /** The pid of its backend, for `waitForLockWaiters`. */
+  readonly pid: number;
+  /** Commits it; rejects as the commit does. */
+  readonly commit: () => Promise<void>;
+  /** Rolls it back. Does nothing once it has ended. */
+  readonly rollback: () => Promise<void>;
+}
+
+/** Thrown inside `heldOrgTx`'s transaction to roll it back; never reaches the test. */
+class RolledBack extends Error {}
+
+/**
+ * Opens a `withOrg` transaction for `orgId` and keeps it open until the test commits or rolls
+ * it back: the side of a race test that runs this package's own code (it takes an `OrgTx`, which
+ * a client of `twoTransactions` is not) and has to hold its locks while the other side waits
+ * (SDC-07). End it in a `finally`, or the connection stays out of the pool.
+ */
+export async function heldOrgTx(pool: Pool, orgId: OrgId): Promise<HeldOrgTx> {
+  let end: (commit: boolean) => void = () => undefined;
+  const ending = new Promise<boolean>((resolve) => {
+    end = resolve;
+  });
+  let opened: (held: { tx: OrgTx; pid: number }) => void = () => undefined;
+  const open = new Promise<{ tx: OrgTx; pid: number }>((resolve) => {
+    opened = resolve;
+  });
+  const done = withOrg(pool, orgId, async (tx) => {
+    const { rows } = await tx.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+    opened({ tx, pid: rows[0]?.pid ?? 0 });
+    if (!(await ending)) throw new RolledBack('rolled back by the test');
+  }).catch((error: unknown) => {
+    if (!(error instanceof RolledBack)) throw error;
+  });
+  // A transaction that fails to open rejects here instead of leaving the test waiting.
+  const { tx, pid } = await Promise.race([
+    open,
+    done.then(() => Promise.reject(new Error('the transaction ended before it opened'))),
+  ]);
+  return {
+    tx,
+    pid,
+    commit: async () => {
+      end(true);
+      await done;
+    },
+    rollback: async () => {
+      end(false);
+      await done.catch(() => undefined);
+    },
+  };
+}
+
+/**
+ * Two `heldOrgTx` transactions for `orgId`: the two sides of a race in which one runs this
+ * package's own code. The second opens inside the first's cleanup, and whatever `work` has not
+ * ended is rolled back afterwards, both sides at once, so a side still waiting for the other's
+ * lock is not left waiting behind it.
+ */
+export async function heldTransactions(
+  pool: Pool,
+  orgId: OrgId,
+  work: (first: HeldOrgTx, second: HeldOrgTx) => Promise<void>,
+): Promise<void> {
+  const first = await heldOrgTx(pool, orgId);
+  let second: HeldOrgTx | undefined;
+  try {
+    second = await heldOrgTx(pool, orgId);
+    await work(first, second);
+  } finally {
+    await Promise.allSettled([first.rollback(), second?.rollback()]);
   }
 }
 

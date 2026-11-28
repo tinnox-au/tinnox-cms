@@ -1,14 +1,14 @@
 /**
- * Migration 0017: a screen can be deleted (CMS-41). display gets deleted_at, a partial index of
- * live displays, tinnox_app's UPDATE on the column, a guard that makes a deleted display final,
- * and sec.pairing_claim refuses a deleted display, again after the display's pairing lock.
+ * Migration 0017: a screen can be deleted (CMS-41). display gets deleted_at, tinnox_app's
+ * UPDATE on the column, a guard that makes a deleted display final, and sec.pairing_claim
+ * refuses a deleted display, again after the display's pairing lock.
  *
  * Builds a database at migration 0016 with the seeders of the migrate-forward chain (levels.ts,
  * atLevel), whose level 0013 leaves two organisations with an Owner and a display each
  * (levels/seed-0013.ts). Then it applies 0017 with the real migration runner and checks that
- * no display changed, the column, index, grant and guard, and, as the runtime role, the delete
- * as DELETE /api/displays/:id sends it (routes/displays.ts) against the guard and against a
- * claim on another connection.
+ * no display changed, the column, that display_org_idx is unchanged, the grant and the guard,
+ * and, as the runtime role, the delete DELETE /api/displays/:id runs (softDeleteDisplay of
+ * ../src/display-player.ts) against the guard and against a claim on another connection.
  *
  * The database is atLevel's own, dropped in `afterAll`; the shared integration-test database is
  * not touched.
@@ -17,8 +17,8 @@ import { randomUUID } from 'node:crypto';
 import { readdir } from 'node:fs/promises';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { pairingClaim, pairingComplete, pairingCreate } from '../src/index.ts';
-import { withOrg, type Pool } from '../src/testing.ts';
+import { pairingClaim, pairingComplete, pairingCreate, softDeleteDisplay } from '../src/index.ts';
+import { heldTransactions, withOrg, type Pool } from '../src/testing.ts';
 import type { MigrationResult } from '../src/migrate.ts';
 import { MIGRATIONS, atLevel, type LevelDatabase } from './levels.ts';
 import { BEFORE_ALERTS_A } from './levels/seed-0013.ts';
@@ -26,13 +26,11 @@ import {
   PG,
   appPool,
   asDefiner,
-  backendPid,
   hash,
   inTx,
   pairingCode,
   pgViolation,
   testOrgId,
-  twoTransactions,
   waitForLockWaiters,
 } from './support.ts';
 
@@ -50,22 +48,6 @@ const org = { orgId: testOrgId(BEFORE_ALERTS_A.org), membershipId: BEFORE_ALERTS
 
 const DISPLAYS = 'SELECT id, name, assigned_playlist_id, updated_at FROM display ORDER BY id';
 
-// The delete, statement by statement, as DELETE /api/displays/:id sends it: the claims under
-// the display's pairing lock, the row, the registration, the tags, then the row itself.
-const CANCEL_CLAIMS = 'SELECT sec.pairing_cancel_claims($1) AS ids';
-const LOCK_LIVE = `SELECT 1 FROM display
-   WHERE id = $1 AND org_id = app_org_id() AND deleted_at IS NULL FOR UPDATE`;
-const DELETE: readonly string[] = [
-  CANCEL_CLAIMS,
-  LOCK_LIVE,
-  `UPDATE player_registration SET revoked_at = now(), revoked_reason = 'operator'
-   WHERE display_id = $1 AND org_id = app_org_id() AND revoked_at IS NULL`,
-  'DELETE FROM display_tag WHERE display_id = $1 AND org_id = app_org_id()',
-  `UPDATE display
-   SET deleted_at = now(), assigned_playlist_id = NULL, assigned_schedule_id = NULL,
-       assigned_layout_id = NULL
-   WHERE id = $1 AND org_id = app_org_id()`,
-];
 const CLAIM =
   'SELECT outcome, pairing_id, replaced_registration_id, cancelled_pairing_ids FROM sec.pairing_claim($1, $2, $3, 5, 600)';
 
@@ -117,15 +99,9 @@ async function newDisplay(): Promise<string> {
   return id;
 }
 
-async function deleteOn(
-  client: { query(text: string, values: unknown[]): Promise<unknown> },
-  displayId: string,
-): Promise<void> {
-  for (const sql of DELETE) await client.query(sql, [displayId]);
-}
-
+/** Deletes a display with the code DELETE /api/displays/:id runs, in a transaction of its own. */
 const deleteDisplay = (displayId: string) =>
-  withOrg(clients().pool, org.orgId, (tx) => deleteOn(tx, displayId));
+  withOrg(clients().pool, org.orgId, (tx) => softDeleteDisplay(tx, displayId));
 
 async function newCode() {
   const code = pairingCode();
@@ -281,11 +257,7 @@ describe('a deleted display is final', () => {
   it('a second delete finds no live row and changes nothing', async () => {
     const display = await newDisplay();
     await deleteDisplay(display);
-    const locked = await withOrg(clients().pool, org.orgId, async (tx) => {
-      await tx.query(CANCEL_CLAIMS, [display]);
-      return (await tx.query(LOCK_LIVE, [display])).rowCount;
-    });
-    expect(locked).toBe(0);
+    expect(await deleteDisplay(display)).toBeNull();
   });
 });
 
@@ -301,18 +273,18 @@ describe('pairing a deleted display', () => {
   it('a claim that passed the display check while the delete was open waits for its pairing lock, then is refused', async () => {
     const display = await newDisplay();
     const pairing = await newCode();
-    await twoTransactions(clients().pool, org.orgId, async (deleting, claiming) => {
-      await deleteOn(deleting, display);
+    await heldTransactions(clients().pool, org.orgId, async (deleting, claiming) => {
+      expect(await softDeleteDisplay(deleting.tx, display)).not.toBeNull();
       // The delete has not committed, so the claim's first check finds the display live.
-      const late = claiming.query(CLAIM, [pairing.code, display, org.membershipId]);
+      const late = claiming.tx.query(CLAIM, [pairing.code, display, org.membershipId]);
       await waitForLockWaiters(
         clients().pool,
-        backendPid(deleting),
+        deleting.pid,
         1,
         "the claim never waited for the delete's pairing lock",
         { locktype: 'advisory', waiter: late },
       );
-      await deleting.query('COMMIT');
+      await deleting.commit();
       expect((await late).rows).toEqual([
         {
           outcome: 'display_not_found',
@@ -321,7 +293,7 @@ describe('pairing a deleted display', () => {
           cancelled_pairing_ids: null,
         },
       ]);
-      await claiming.query('COMMIT');
+      await claiming.commit();
     });
     expect(await statusOf(pairing.pairingId)).toBe('pending');
   });
@@ -330,12 +302,7 @@ describe('pairing a deleted display', () => {
     const display = await newDisplay();
     const pairing = await newCode();
     expect(await claim(pairing.code, display)).toMatchObject({ outcome: 'claimed' });
-    const cancelled = await withOrg(clients().pool, org.orgId, async (tx) => {
-      const { rows } = await tx.query<{ ids: string[] }>(CANCEL_CLAIMS, [display]);
-      for (const sql of DELETE.slice(1)) await tx.query(sql, [display]);
-      return rows[0]?.ids;
-    });
-    expect(cancelled).toEqual([pairing.pairingId]);
+    expect((await deleteDisplay(display))?.cancelledPairingIds).toEqual([pairing.pairingId]);
     expect(await inTx(clients().pool, (tx) => pairingComplete(tx, pairing))).toEqual({
       outcome: 'not_claimable',
     });
