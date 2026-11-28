@@ -55,11 +55,12 @@ None.
 | CMS-4 | Real-hardware check on Raspberry Pi 5 (8GB) under Linux: the browser player in Chromium kiosk mode on a monitor | Michael 23 Nov | - | 23 Nov |
 | CMS-32 | Poteto pyramid refactor, group D: verification (steps 29 to 37 of the adoption plan); Michael starts it | Michael 25 Nov | - | 25 Nov |
 | CMS-37 | Deploy the CMS to production: agree the deployment plan first (data stays in Australia, stability, scalability, security), then the first production release | Michael 25 Nov | - | 25 Nov |
-| CMS-43 | Yodeck gap analysis: read-only walkthrough of the Unlimited trial vs TINNOX CMS, gaps by area and proposed work packages | Michael 28 Nov | - | 28 Nov |
 
 ## In review
 
-None.
+| Id | Card | Agreed | PR | Since |
+|---|---|---|---|---|
+| CMS-43 | Yodeck gap analysis: read-only walkthrough of the Unlimited trial vs TINNOX CMS, gaps by area and proposed work packages | Michael 28 Nov | #55 | 28 Nov |
 
 ## Done, last 14 days
 
