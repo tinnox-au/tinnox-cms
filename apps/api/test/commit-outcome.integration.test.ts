@@ -34,10 +34,15 @@
  * D9: `commit_outcome_unknown` is the answer in the lost-COMMIT mode only, and only where the
  * transaction is not READ ONLY and the method changes state; the third test holds the table to
  * that. A row whose behaviour is pinned as found, not as decided, says so in a comment.
+ *
+ * The last describe, the desired-pointer cases (P2-05, D10), sends the request of every row once
+ * more with no fault, and every player route, and holds every display's pointer to D10's
+ * invariant across it.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { PLAYER_PREFIX } from '@tinnox/contracts';
 import { sha256 } from '@tinnox/db';
 import { whileUnauditedAllowed, type Pool, type PoolClient } from '@tinnox/db/testing';
 import pg from 'pg';
@@ -71,6 +76,7 @@ import {
   reachedBefore,
   readyImage,
   registeredRoutes,
+  signedMediaUrl,
   signIn,
   startTestApp,
   uploadBytes,
@@ -1589,4 +1595,351 @@ describe('the pairing poll answers a lock timeout in its read as it does in its 
       'pairing.complete:success',
     ]);
   });
+});
+
+/**
+ * The desired pointer (P2-05, D10; adoption plan step 33). "Manifest version" is the publication
+ * id, and publications never change (trigger and grant), so the one thing that can move what a
+ * screen is told to play is its `display_delivery.desired_publication_id`. D10's invariant: it
+ * changes only in a transaction that inserts a publication for that display, and then equals a
+ * publication inserted in it. Every route of the table above, and every player route, is sent
+ * once with no fault, and every display's pointer (a missing delivery row counts as null) and
+ * the set of publications are read before and after it, in every organisation. A request is
+ * one transaction for the routes that move the pointer (publish and push), so "inserted by this
+ * request" stands for "inserted in this transaction".
+ *
+ * A deleted screen keeps its row (migration 0017 sets deleted_at; tinnox_app has no DELETE on
+ * display), so its delivery row and its pointer stay too: deleting a screen is not a change of
+ * what it was given, and a display that disappears fails here. There is no database constraint
+ * behind the invariant: one writer (scripts/lib/pointer-writer-check.ts holds it) and this test.
+ */
+describe('the desired pointer moves only to a publication the request inserted for that display (P2-05, D10)', () => {
+  const PLACE = 'the desired-pointer cases in apps/api/test/commit-outcome.integration.test.ts';
+
+  // The rows of TABLE arrange with fixed names, which are unique in an organisation, and the
+  // fault cases above have used them already: these cases run in an organisation of their own.
+  beforeAll(async () => {
+    org = await createOrg('Desired pointers', { displayName: 'Dee Pointer' });
+    owner = await signIn(t, org);
+  });
+  /** How a route answers success: by its method, but where it says otherwise here. */
+  const SUCCESS: Readonly<Record<string, number>> = {
+    'POST /api/displays/:id/claim': 200,
+    'POST /api/displays/:id/revoke-player': 200,
+    'POST /api/push': 200,
+    'POST /api/members/:id/remove': 200,
+    'POST /api/members/:id/sign-out': 200,
+    'POST /api/invites/:id/cancel': 204,
+    'GET /api/auth/login': 303,
+    'GET /api/auth/callback': 303,
+    'POST /api/auth/logout': 200,
+    'POST /api/alert-recipients/confirm': 204,
+    'POST /player/media-urls': 200,
+    'POST /player/heartbeat': 200,
+  };
+  const BY_METHOD: Readonly<Record<string, number>> = {
+    GET: 200,
+    POST: 201,
+    PUT: 200,
+    PATCH: 200,
+    DELETE: 204,
+  };
+  const successOf = (route: string): number | undefined =>
+    Object.hasOwn(SUCCESS, route) ? SUCCESS[route] : BY_METHOD[methodOf(route)];
+  /** The routes that insert a publication, and so move a pointer when they succeed. */
+  const MOVES = new Set(['POST /api/playlists/:id/publish', 'POST /api/push']);
+
+  interface Snapshot {
+    /** Every display, deleted ones included, and its pointer (null without a delivery row). */
+    readonly pointers: ReadonlyMap<string, string | null>;
+    /** Every publication, and the display it was built for. */
+    readonly publications: ReadonlyMap<string, string>;
+  }
+
+  async function snapshot(): Promise<Snapshot> {
+    const displays = await administrator<{ id: string; desired: string | null }>(
+      `SELECT d.id, dd.desired_publication_id AS desired
+         FROM public.display d
+         LEFT JOIN public.display_delivery dd ON dd.display_id = d.id AND dd.org_id = d.org_id`,
+    );
+    const publications = await administrator<{ id: string; display_id: string }>(
+      'SELECT id, display_id FROM public.publication',
+    );
+    return {
+      pointers: new Map(displays.map((row) => [row.id, row.desired])),
+      publications: new Map(publications.map((row) => [row.id, row.display_id])),
+    };
+  }
+
+  /** What broke D10 between the two snapshots, and the displays whose pointer moved. */
+  function compare(
+    route: string,
+    before: Snapshot,
+    after: Snapshot,
+  ): { problems: string[]; moved: string[] } {
+    const problems: string[] = [];
+    const moved: string[] = [];
+    for (const id of before.pointers.keys()) {
+      if (!after.pointers.has(id)) {
+        problems.push(
+          `${route}: display ${id} disappeared. A screen delete keeps the row (deleted_at, migration 0017) and so its pointer; if displays are ever removed for real, decide what D10 says for them and change ${PLACE}`,
+        );
+      }
+    }
+    for (const id of before.publications.keys()) {
+      if (!after.publications.has(id)) {
+        problems.push(`${route}: publication ${id} disappeared, but publications never change`);
+      }
+    }
+    for (const [id, now] of after.pointers) {
+      const was = before.pointers.get(id) ?? null;
+      if (now === was) continue;
+      const inserted = now !== null && !before.publications.has(now);
+      if (inserted && after.publications.get(now) === id) {
+        moved.push(id);
+        continue;
+      }
+      problems.push(
+        `${route}: the pointer of display ${id} moved from ${String(was)} to ${String(now)}, which is not a publication this request inserted for that display. Only createPublication in apps/api/src/publishing.ts moves it, to the publication it inserts in the same transaction (D10, P2-05)`,
+      );
+    }
+    return { problems, moved };
+  }
+
+  /**
+   * A display of the organisation with a paired player and a published image, its pointer set:
+   * only a pointer that is there shows a write that clears or moves it.
+   */
+  async function publishedDisplay(name: string) {
+    const display = await pairedDisplay(name);
+    const image = await readyImage(t, owner);
+    const published = await publishImages(owner, display.id, [image.id]);
+    expect((await snapshot()).pointers.get(display.id)).toBe(published.publicationId);
+    return { ...display, imageId: image.id, ...published };
+  }
+
+  /**
+   * A request, and whether it is sent to a published screen (`published`): the routes that act
+   * on one screen are each sent to one, so a write that clears or moves its pointer shows.
+   */
+  type Case = readonly [
+    string,
+    string,
+    () => Promise<() => Promise<Response>>,
+    ('published' | undefined)?,
+  ];
+  /** The rows of TABLE whose arrange already publishes to the screen they act on. */
+  const PUBLISHED_IN_TABLE = new Set(['POST /player/media-urls']);
+  /**
+   * The routes that act on one screen: those of a display, and every player route but the one
+   * that starts a pairing, which has no display yet.
+   */
+  const actsOnOneScreen = (route: string): boolean =>
+    route.includes(' /api/displays/:id') ||
+    (route.includes(` ${PLAYER_PREFIX}/`) && route !== `POST ${PLAYER_PREFIX}/pairing`);
+
+  /** A published screen that a new pairing has been claimed for, and that pairing. */
+  async function publishedAndClaimed(name: string) {
+    const display = await publishedDisplay(name);
+    const pairing = await newPairing();
+    const claim = await send(owner, 'POST', `/api/displays/${display.id}/claim`, {
+      code: pairing.code,
+    });
+    if (claim.status !== 200) throw new Error(`claim failed: ${String(claim.status)}`);
+    return { display, pairing };
+  }
+
+  /**
+   * The routes the table above does not send, each with a request: the player routes that only
+   * read, and edits of what a published screen shows, which must not reach it before a push
+   * (P2-05). Then the routes of the table that act on one screen, sent once more to a published
+   * one: the table's own rows arrange screens that were never published, whose pointer is null
+   * and stays null whatever a write does to it.
+   */
+  const MORE: readonly Case[] = [
+    [
+      'GET /player/manifest',
+      'the player reads its manifest',
+      async () => {
+        const display = await publishedDisplay('Manifest screen');
+        return () => asPlayer(display.player, 'GET', '/player/manifest');
+      },
+      'published',
+    ],
+    [
+      `GET /player/media/:assetId`,
+      'the player downloads a published image',
+      async () => {
+        const display = await publishedDisplay('Downloading screen');
+        return () =>
+          fetch(
+            signedMediaUrl(t, {
+              registrationId: display.player.registrationId,
+              publicationId: display.publicationId,
+              assetId: display.imageId,
+            }),
+          );
+      },
+      'published',
+    ],
+    [
+      'PATCH /api/displays/:id',
+      'another playlist assigned to a published screen (P2-05)',
+      async () => {
+        const display = await publishedDisplay('Reassigned screen');
+        const next = await createPlaylist(owner, 'Next loop', [
+          imageItem((await readyImage(t, owner)).id),
+        ]);
+        return () =>
+          send(owner, 'PATCH', `/api/displays/${display.id}`, { assignedPlaylistId: next });
+      },
+      'published',
+    ],
+    [
+      'PUT /api/playlists/:id',
+      'the playlist a published screen shows, edited (P2-05)',
+      async () => {
+        const display = await publishedDisplay('Edited screen');
+        const image = await readyImage(t, owner);
+        return () =>
+          send(owner, 'PUT', `/api/playlists/${display.playlistId}`, {
+            name: 'Edited loop',
+            items: [imageItem(display.imageId), imageItem(image.id)],
+          });
+      },
+      'published',
+    ],
+    [
+      'DELETE /api/displays/:id',
+      'a published screen deleted: its pointer stays with its row',
+      async () => {
+        const display = await publishedDisplay('Deleted published screen');
+        return () => send(owner, 'DELETE', `/api/displays/${display.id}`);
+      },
+      'published',
+    ],
+    [
+      'POST /api/displays/:id/claim',
+      'a new player claimed for a published screen, which revokes the old one',
+      async () => {
+        const display = await publishedDisplay('Reclaimed screen');
+        const pairing = await newPairing();
+        return () =>
+          send(owner, 'POST', `/api/displays/${display.id}/claim`, { code: pairing.code });
+      },
+      'published',
+    ],
+    [
+      'POST /api/displays/:id/revoke-player',
+      'the player of a published screen revoked',
+      async () => {
+        const display = await publishedDisplay('Revoked published screen');
+        return () => send(owner, 'POST', `/api/displays/${display.id}/revoke-player`);
+      },
+      'published',
+    ],
+    [
+      'GET /player/pairing/:id',
+      'a new player of a published screen collects its credential',
+      async () => {
+        const { pairing } = await publishedAndClaimed('Re-paired screen');
+        return () =>
+          fetch(`${t.url}/player/pairing/${pairing.pairingId}`, {
+            headers: { authorization: `Bearer ${pairing.pollingToken}` },
+          });
+      },
+      'published',
+    ],
+    [
+      'DELETE /player/registration',
+      'the player of a published screen gives up its credential',
+      async () => {
+        const display = await publishedDisplay('Reset published screen');
+        return () => asPlayer(display.player, 'DELETE', '/player/registration');
+      },
+      'published',
+    ],
+    [
+      'POST /player/heartbeat',
+      'a published screen reports that it plays its publication',
+      async () => {
+        const display = await publishedDisplay('Playing screen');
+        return () =>
+          asPlayer(display.player, 'POST', '/player/heartbeat', {
+            schemaVersion: 1,
+            seq: 1,
+            sentAt: new Date().toISOString(),
+            displayId: display.id,
+            downloadedPublicationId: display.publicationId,
+            activePublicationId: display.publicationId,
+            activeItemIndex: 0,
+            playerState: 'playing',
+            staging: null,
+            errors: [],
+            player: { version: 'integration-test', storagePersisted: null, online: true },
+          });
+      },
+      'published',
+    ],
+  ];
+
+  it('sends every route that changes state and every player route', () => {
+    const routes = registeredRoutes(t.app);
+    const sent = new Set([...Object.keys(TABLE), ...MORE.map(([route]) => route)]);
+    const gaps = routes
+      .filter((route) => !sent.has(route))
+      .filter((route) => changesState(route) || route.includes(` ${PLAYER_PREFIX}/`))
+      .map(
+        (route) =>
+          `${route} is sent by no desired-pointer case: give it a row in TABLE if it changes state, or a request in MORE of ${PLACE}. A route that only reads says so in its audit statement (read(...) or noAudit('read_only')), and runs on a READ ONLY transaction, which cannot move the pointer`,
+      );
+    expect(gaps).toEqual([]);
+  });
+
+  it('sends every route that acts on one screen to a published one, whose pointer a write could clear', () => {
+    const published = new Set([
+      ...PUBLISHED_IN_TABLE,
+      ...MORE.filter(([, , , on]) => on === 'published').map(([route]) => route),
+    ]);
+    const gaps = registeredRoutes(t.app)
+      .filter((route) => actsOnOneScreen(route) && !published.has(route))
+      .filter((route) => changesState(route) || route.includes(` ${PLAYER_PREFIX}/`))
+      .map(
+        (route) =>
+          `${route} acts on one screen but is never sent to a published one, so a write that clears or moves its pointer would not show: add a request in MORE of ${PLACE} that sends it to a publishedDisplay(...), marked 'published'`,
+      );
+    expect(gaps).toEqual([]);
+  });
+
+  const cases: readonly Case[] = [
+    ...Object.entries(TABLE).map(([route, entry]): Case => [
+      route,
+      'the request of its commit-outcome row',
+      async () => {
+        if (!isRow(entry)) return entry.send;
+        const scenario = await entry.arrange();
+        await scenario.prepare?.();
+        return () => scenario.send();
+      },
+    ]),
+    ...MORE,
+  ];
+  for (const [route, what, arrange] of cases) {
+    it(`${route}: ${what}`, async () => {
+      const request = await arrange();
+      const before = await snapshot();
+      const response = await request();
+      const after = await snapshot();
+      // A request that succeeded: one that changed nothing would prove nothing.
+      expect(response.status, `${route} must succeed here`).toBe(successOf(route));
+      const { problems, moved } = compare(route, before, after);
+      expect(problems).toEqual([]);
+      expect(
+        moved.length > 0,
+        MOVES.has(route)
+          ? `${route} inserts a publication, so it moves the pointer of the display it targets`
+          : `${route} moved a pointer, which only publish and push do today: if it now inserts a publication on purpose, add it to MOVES in ${PLACE}`,
+      ).toBe(MOVES.has(route));
+    });
+  }
 });

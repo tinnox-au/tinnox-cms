@@ -1,16 +1,17 @@
 /**
- * The /api routes the application serves, and which role may use each, written out for the
- * boundary tests (session-csrf.test.ts, roles-matrix.test.ts, cross-org.test.ts). Not read from the API's own tables, so a route
- * the API adds or drops shows up here as a test failure.
+ * The /api routes of the operator API, and which role may use each, written out by hand as the
+ * oracle of the role tests (roles-matrix.test.ts, cross-org.test.ts). Not read from the API's
+ * own tables on purpose: session-csrf.test.ts compares this list with the routes the
+ * application registers, so a route the API adds or drops shows up there as a test failure.
  */
-import { ROUTES, type Role } from '@tinnox/contracts';
+import type { Role } from '@tinnox/contracts';
 
 /**
  * Every route of the operator API, as registered (`:id` is a UUID): the 51 of portal v2, the
  * 8 people routes of stage C (CMS-13), the 3 alert address routes (CMS-15) and the screen
- * delete (CMS-41). session-csrf.test.ts fails when the application serves
- * an operator route that is not listed here, so a new route cannot skip the session, CSRF,
- * Origin and role checks unnoticed.
+ * delete (CMS-41). session-csrf.test.ts fails when the application serves an operator route
+ * that is not listed here, so a new route cannot skip the role checks unnoticed; it probes the
+ * session, CSRF and Origin checks of every route from the application's own inventory.
  */
 export const OPERATOR_ROUTE_PATTERNS: readonly (readonly [string, string])[] = [
   ['GET', '/api/sites'],
@@ -77,23 +78,6 @@ export const OPERATOR_ROUTE_PATTERNS: readonly (readonly [string, string])[] = [
   ['POST', '/api/alert-recipients'],
   ['DELETE', '/api/alert-recipients/:id'],
 ];
-
-/** Routes under /api that deliberately work without an operator session. */
-export const PUBLIC_API_ROUTES: readonly (readonly [string, string])[] = [
-  ['GET', ROUTES.authLogin],
-  ['GET', ROUTES.authCallback],
-  ['GET', ROUTES.session],
-  // The confirmation link of an alert address, opened by its owner (CMS-15).
-  ['POST', ROUTES.alertRecipientConfirm],
-];
-
-/** Signing out needs the session, the token and the Origin, but is not in the operator plugin. */
-export const LOGOUT: readonly [string, string] = ['POST', ROUTES.authLogout];
-
-/** The operator routes with `:id` replaced by `id`. */
-export function operatorRoutes(id: string): [string, string][] {
-  return OPERATOR_ROUTE_PATTERNS.map(([method, pattern]) => [method, pattern.replace(':id', id)]);
-}
 
 /** The people, invite and alert address routes an Editor may not use. */
 const MEMBER_MANAGEMENT = new Set([
