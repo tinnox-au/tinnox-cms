@@ -573,7 +573,8 @@ describe('whom the guard judges', () => {
         return sessionRevokeUnaudited(databaseOn(judged), idHash);
       },
     );
-    expect(ended).toBe(true);
+    // It ended a live session (not null), which held no ID token.
+    expect(ended).toEqual({ idToken: null });
     await refusalOf(sessionRevokeUnaudited(databaseOn(judged), await newSession()));
     await expect(
       whileUnauditedAllowed(migratorUrl(), 'session', 'because', () => Promise.resolve()),

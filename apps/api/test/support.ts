@@ -56,7 +56,7 @@ import {
 } from '@tinnox/db/testing';
 import { createDeliveryRegistry } from '@tinnox/delivery';
 import { LocalObjectStorage } from '@tinnox/storage';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyBaseLogger, FastifyInstance } from 'fastify';
 import pg from 'pg';
 import sharp from 'sharp';
 import { expect } from 'vitest';
@@ -66,6 +66,7 @@ import { IdentityProviderError, type IdentityProvider } from '../src/auth/oidc.t
 import { ROUTE_PERMISSIONS } from '../src/auth/permissions.ts';
 import { loadConfig, RUNTIME_ENV_NAMES, type AppConfig } from '../src/config.ts';
 import type { AppContext } from '../src/context.ts';
+import { createLogger } from '../src/logger.ts';
 import type { MailMessage, Mailer } from '../src/mail.ts';
 import { MediaPipeline } from '../src/media/pipeline.ts';
 import { buildMediaUrl } from '../src/security.ts';
@@ -297,6 +298,36 @@ export interface TestAppOptions {
   readonly mail?: Mailer | null;
   /** Replaces the identity provider, which otherwise refuses every sign-in and has no sign-out address. */
   readonly identityProvider?: IdentityProvider;
+  /**
+   * The application's logger, for a test that asserts a log line (`capturedLogs`); the
+   * application logs nowhere otherwise.
+   */
+  readonly logger?: FastifyBaseLogger;
+}
+
+/** One line the application logged: its level as pino numbers it (40 warn, 50 error) and its message. */
+export interface LoggedLine {
+  readonly level: number;
+  readonly msg: string;
+  readonly [field: string]: unknown;
+}
+
+/**
+ * The production logger (createLogger of src/logger.ts, with its redaction and serializers)
+ * writing into `lines` instead of stdout: pass `logger` as `startTestApp(…, { logger })` and
+ * read what a request logged from `lines`.
+ */
+export function capturedLogs(): {
+  readonly logger: FastifyBaseLogger;
+  readonly lines: LoggedLine[];
+} {
+  const lines: LoggedLine[] = [];
+  const logger = createLogger('info', false, {
+    write(line: string) {
+      lines.push(JSON.parse(line) as LoggedLine);
+    },
+  });
+  return { logger, lines };
 }
 
 export async function startTestApp(
@@ -383,7 +414,7 @@ export async function startTestApp(
     now,
     rateLimitScale,
   };
-  const app = await buildApp(ctx, { logger: false });
+  const app = await buildApp(ctx, { logger: options.logger ?? false });
   // Every answer of every test is parsed with the schema its client parses it with (UTX-01).
   installResponseContractCheck(app, registeredRoutes(app));
   await app.listen({ host: '127.0.0.1', port: 0 });
@@ -509,12 +540,13 @@ export interface Operator {
  * Creates a session for the member through sec.session_create and returns a client that uses it.
  * `authTime` defaults to a minute from now, after any cut-off a test has set (even within the
  * same second, or with the database clock a little ahead; nothing checks an upper bound). Tests
- * of the cut-off pass their own.
+ * of the cut-off pass their own. `idToken` is what the provider would have issued; none unless
+ * given.
  */
 export async function signIn(
   t: TestApp,
   org: TestOrg,
-  options: { readonly authTime?: Date | null } = {},
+  options: { readonly authTime?: Date | null; readonly idToken?: string } = {},
 ): Promise<Operator> {
   const sessionId = randomBytes(32).toString('base64url');
   const csrfToken = randomBytes(32).toString('base64url');
@@ -529,7 +561,7 @@ export async function signIn(
         oidcSub: org.oidcSub,
         csrfToken,
         ttlSeconds: 3600,
-        idToken: null,
+        idToken: options.idToken ?? null,
         authTime: options.authTime === undefined ? new Date(Date.now() + 60_000) : options.authTime,
       }),
   );

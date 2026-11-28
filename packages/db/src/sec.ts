@@ -227,15 +227,20 @@ export async function sessionRevoke(
  * to "a revocation commits with its audit row" (CX-01 residual): the sign-out fallback, when
  * the audited transaction failed and ending the session is still the safe direction. Every
  * other revocation uses `sessionRevoke` on the transaction that also writes the audit row. Returns
- * true when a live session was ended.
+ * null when no live session was left to end; otherwise the ID token the session held, which
+ * sec.session_revoke gives up once, so the sign-out can still hand it to the identity provider.
  */
-export async function sessionRevokeUnaudited(db: Database, idHash: Buffer): Promise<boolean> {
+export async function sessionRevokeUnaudited(
+  db: Database,
+  idHash: Buffer,
+): Promise<{ idToken: string | null } | null> {
   const { rows } = await poolAsTx(db, {
     opener: 'sessionRevokeUnaudited',
     instead:
       'End the session on the outer tx with sessionRevoke(tx, idHash), and write its audit row on the same tx.',
-  }).query('SELECT 1 FROM sec.session_revoke($1)', [idHash]);
-  return rows.length > 0;
+  }).query<{ id_token: string | null }>('SELECT id_token FROM sec.session_revoke($1)', [idHash]);
+  const r = only(rows);
+  return r === null ? null : { idToken: r.id_token };
 }
 
 /**

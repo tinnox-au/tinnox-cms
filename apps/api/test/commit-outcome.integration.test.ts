@@ -38,6 +38,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { sha256 } from '@tinnox/db';
 import { whileUnauditedAllowed, type Pool, type PoolClient } from '@tinnox/db/testing';
 import pg from 'pg';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -47,6 +48,8 @@ import { declaredRouteAudit } from '../src/route-audit.ts';
 import {
   addMember,
   assignPlaylist,
+  backendPid,
+  capturedLogs,
   CLOCK,
   createApp,
   createDisplay,
@@ -65,11 +68,13 @@ import {
   PORTAL_ORIGIN,
   publishImages,
   push,
+  reachedBefore,
   readyImage,
   registeredRoutes,
   signIn,
   startTestApp,
   uploadBytes,
+  waitForLockWaiters,
   type AnsweredErrorCode,
   type Fault,
   type IdentityProvider,
@@ -99,12 +104,13 @@ const CALLBACK_MODES = ['deadlock', 'serialization-failure', 'database-error'] a
 type Mode = (typeof MODES)[number] | (typeof CALLBACK_MODES)[number];
 const LOST = 'lost-commit-answer' satisfies Mode;
 
-/** What a request answers: an error of the envelope, or a redirect to the portal. */
+/** What a request answers: an error of the envelope, a redirect to the portal, or its 200. */
 type Answer =
   | { readonly error: AnsweredErrorCode; readonly retryAfter?: string }
-  | { readonly redirect: string };
+  | { readonly redirect: string }
+  | { readonly ok: unknown };
 const error = (code: AnsweredErrorCode): Answer => ({ error: code });
-/** A wait past lock_timeout as every operator and device write answers it. */
+/** A wait past lock_timeout as every write answers it. */
 const BUSY: Answer = { error: 'service_unavailable', retryAfter: '2' };
 
 /** How the route opens the transaction the faults strike: it decides the default answers. */
@@ -124,10 +130,11 @@ const DEFAULT_ANSWERS: Record<Through, Record<(typeof MODES)[number], Answer>> =
     'backend-killed': FAILED,
     'lost-commit-answer': error('commit_outcome_unknown'),
   },
-  // No mapping of a lock timeout unless the route adds one (the alert confirmation does).
+  // Each route on changePreOrg maps a lock timeout itself, with lockTimeoutAsUnavailable, as
+  // changeAsOperator and changeAsDevice do for theirs (Michael, 25 Nov 2026).
   changePreOrg: {
     'statement-timeout': FAILED,
-    'lock-timeout': FAILED,
+    'lock-timeout': BUSY,
     'backend-killed': FAILED,
     'lost-commit-answer': error('commit_outcome_unknown'),
   },
@@ -204,12 +211,19 @@ const AT_AUDIT: StatementMatcher = (text) =>
   /^\s*INSERT INTO audit_event \(org_id/.test(text) || text.includes('sec.audit_unscoped(');
 
 const faults = faultHarness();
+/** What the application logged, for the sign-out catch-all's log lines. */
+const logs = capturedLogs();
 let t: TestApp;
 let org: TestOrg;
 let owner: Operator;
 /** The test's own statements, never wrapped. */
 let sql: Pool;
 let admin: pg.Client;
+
+/** Where the stand-in identity provider ends its own session. */
+const PROVIDER_SIGN_OUT = 'http://localhost:8080/sign-out';
+/** What the provider issued at sign-in; not a real token. */
+const ID_TOKEN = 'header.payload.signature';
 
 /** The subject the stand-in identity provider answers a sign-in with, and its last state. */
 let signingIn = '';
@@ -226,7 +240,9 @@ const provider: IdentityProvider = {
   },
   completeLogin: () =>
     Promise.resolve({ sub: signingIn, acr: null, amr: [], idToken: null, authTime: null }),
-  endSessionUrl: () => Promise.resolve(null),
+  // Shows the ID token it was given, so a test can tell which sign-out handed one over.
+  endSessionUrl: (idToken) =>
+    Promise.resolve(idToken === null ? null : `${PROVIDER_SIGN_OUT}?id_token_hint=${idToken}`),
   check: () => Promise.resolve(true),
 };
 
@@ -845,17 +861,19 @@ const TABLE: Readonly<Record<string, Row | NoTransaction>> = {
       'backend-killed': ['auth.login:failure:server_error unscoped'],
     },
   },
-  // PINNED PENDING MICHAEL'S DECISION (adoption plan section 7, "Still needs Michael", item 11).
-  // Not a decided behaviour: this row records what the sign-out catch-all does today, in every
-  // mode. After any failure of its change the route runs sessionRevokeUnaudited, so:
-  //  - a known rollback (all three modes) answers 500 internal_error, the session is ended all
-  //    the same, in a statement of its own, and no auth.logout row exists: the accepted CX-01
-  //    residual (the audit-debt guard is given leave for it, as in audit-failure.test.ts). A
-  //    lock timeout answers 500 here, not the 503 of the other writes;
+  // The sign-out catch-all, as decided (Michael, 25 Nov 2026; adoption plan section 7, item 11):
+  // after any failure of its change the route runs sessionRevokeUnaudited, so the session is
+  // ended all the same, in a statement of its own. In this row the fallback always ends it:
+  //  - a statement timeout or a killed backend answers 500 internal_error, and no auth.logout
+  //    row exists: the accepted CX-01 residual (the audit-debt guard is given leave for it, as
+  //    in audit-failure.test.ts);
+  //  - a lock timeout rolled back too, and the fallback then ended the session, so the sign-out
+  //    happened and answers as one, with no audit row (the same residual). "Try again" (503)
+  //    would be untrue: there is nothing left to end. The cases where the fallback finds
+  //    nothing, or fails too, are in the describe "the sign-out catch-all says what happened"
+  //    below (the answers kept by Michael, 29 Nov 2026);
   //  - a lost COMMIT answer answers 500 commit_outcome_unknown; the first transaction did end
-  //    the session and write its auth.logout row, and the catch-all's second revoke then finds
-  //    nothing to end. Session ended, one audit row. The route's log line says the sign-out "was
-  //    not audited", which is not so in this mode.
+  //    the session and write its auth.logout row, and the fallback finds nothing to end.
   // The browser's cookie is cleared in every mode.
   'POST /api/auth/logout': {
     through: 'changePreOrg',
@@ -883,6 +901,7 @@ const TABLE: Readonly<Record<string, Row | NoTransaction>> = {
         },
       };
     },
+    answers: { 'lock-timeout': { ok: { redirectTo: null } } },
     rollbackLeaves: (before, after) => {
       expect([before, after]).toEqual([1, 0]);
     },
@@ -896,9 +915,8 @@ const TABLE: Readonly<Record<string, Row | NoTransaction>> = {
             work,
           ),
   },
-  // Public: the link's owner posts the token. A wait past the lock timeout answers 503 here
-  // (lockTimeoutAsUnavailable), unlike the other routes on changePreOrg. A lost answer uses the
-  // link up: the address is confirmed, and a repeat answers the 404 of a link that is not valid.
+  // Public: the link's owner posts the token. A lost answer uses the link up: the address is
+  // confirmed, and a repeat answers the 404 of a link that is not valid.
   'POST /api/alert-recipients/confirm': {
     through: 'changePreOrg',
     arrange: async () => {
@@ -923,7 +941,6 @@ const TABLE: Readonly<Record<string, Row | NoTransaction>> = {
         },
       };
     },
-    answers: { 'lock-timeout': BUSY },
     audits: ['alert_recipient.confirm:success'],
   },
 
@@ -1089,7 +1106,11 @@ function faultOf(mode: Mode, at: StatementMatcher, rival: PoolClient | undefined
 }
 
 beforeAll(async () => {
-  t = await startTestApp({}, 1000, { wrapPool: faults.wrapPool, identityProvider: provider });
+  t = await startTestApp({}, 1000, {
+    wrapPool: faults.wrapPool,
+    identityProvider: provider,
+    logger: logs.logger,
+  });
   org = await createOrg('Commit outcomes', { displayName: 'Olive Owner' });
   owner = await signIn(t, org);
   sql = t.testSql('the rival of a race the commit-outcome table loses on purpose');
@@ -1184,7 +1205,11 @@ for (const [route, entry] of Object.entries(TABLE)) {
     for (const mode of [...(row.more ?? []), ...MODES]) {
       const expected = answerOf(route, row, mode);
       const title =
-        'error' in expected ? `answers ${expected.error}` : `redirects to ${expected.redirect}`;
+        'error' in expected
+          ? `answers ${expected.error}`
+          : 'redirect' in expected
+            ? `redirects to ${expected.redirect}`
+            : `answers 200 ${JSON.stringify(expected.ok)}`;
       it(`${mode}: ${title}`, async () => {
         arranged ??= row.arrange();
         const scenario = await arranged;
@@ -1214,6 +1239,9 @@ for (const [route, entry] of Object.entries(TABLE)) {
         if ('redirect' in expected) {
           expect(response.status).toBe(303);
           expect(response.headers.get('location')).toBe(expected.redirect);
+        } else if ('ok' in expected) {
+          expect(response.status).toBe(200);
+          expect(await response.json()).toEqual(expected.ok);
         } else {
           expect(response.headers.get('retry-after')).toBe(expected.retryAfter ?? null);
           const { message } = await expectError(response, expected.error);
@@ -1249,3 +1277,316 @@ for (const [route, entry] of Object.entries(TABLE)) {
     }
   });
 }
+
+/**
+ * The sign-out catch-all (adoption plan section 7, item 11; Michael, 25 Nov 2026): the route
+ * ends the session with sessionRevokeUnaudited after any failure of its audited transaction.
+ * The behaviour is kept; what is held here is that the answer and the log line are true in each
+ * case. The log is read through `capturedLogs`, the production logger writing into an array.
+ */
+describe('the sign-out catch-all says what happened, in its answer and its log line', () => {
+  const NOT_AUDITED = 'sign-out was not audited; the session was ended anyway';
+  const COMMITTED_OR_ENDED_ELSEWHERE =
+    'sign-out did not confirm its COMMIT and no live session was left to end: it committed, with its audit row, or another request ended the session; nothing was ended without an audit row';
+  const ENDED_ELSEWHERE =
+    'sign-out failed and no live session was left to end: another request ended the session; nothing was ended without an audit row';
+  const STILL_ACTIVE = 'sign-out failed and the session may still be active';
+  const RESIDUAL =
+    'the accepted CX-01 residual: a sign-out whose change rolled back still ends the session, through sessionRevokeUnaudited (adoption plan section 2.1 A)';
+
+  /** A member with one live session, and what the test reads of it afterwards. */
+  async function signedIn(name: string, options: { readonly idToken?: string } = {}) {
+    const member = await addMember(org, 'viewer', name);
+    const session = await signIn(t, member, options);
+    const live = async (): Promise<number | undefined> =>
+      (
+        await administrator<{ n: number }>(
+          'SELECT count(*)::int AS n FROM public.session WHERE membership_id = $1 AND revoked_at IS NULL',
+          [member.membershipId],
+        )
+      )[0]?.n;
+    return {
+      session,
+      live,
+      idHash: sha256(session.cookie.slice(session.cookie.indexOf('=') + 1)),
+      signOut: () => send(session, 'POST', '/api/auth/logout'),
+    };
+  }
+
+  /** The sign-out lines logged since line `from`, with the level of each. */
+  const signOutLines = (from: number): string[] =>
+    logs.lines
+      .slice(from)
+      .filter((line) => line.msg.startsWith('sign-out'))
+      .map((line) => `${String(line.level)} ${line.msg}`);
+
+  /**
+   * Holds the session row as a transaction that has ended the session and not committed, so
+   * the sign-out waits for it: what a concurrent revocation of the same session is.
+   */
+  async function whileSessionRowIsHeld(
+    idHash: Buffer,
+    work: (holder: PoolClient) => Promise<void>,
+  ): Promise<void> {
+    const holder = await sql.connect();
+    try {
+      await holder.query('BEGIN');
+      await holder.query('SELECT 1 FROM sec.session_revoke($1)', [idHash]);
+      await work(holder);
+    } finally {
+      await holder.query('ROLLBACK').catch(() => undefined);
+      holder.release();
+    }
+  }
+
+  /**
+   * Waits until the fallback's own statement waits for a lock of backend `holder`. The pool may
+   * give the fallback the connection the audited transaction just used, so the wait is told
+   * from the first one by its statement, read from the server, not by its backend.
+   */
+  async function fallbackWaitsBehind(holder: number, signingOut: Promise<unknown>): Promise<void> {
+    let ended = false;
+    const mark = (): void => {
+      ended = true;
+    };
+    signingOut.then(mark, mark);
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      const endedBefore = ended;
+      const { rowCount } = await sql.query(
+        `SELECT 1 FROM pg_stat_activity a
+          WHERE a.datname = current_database() AND a.wait_event_type = 'Lock'
+            AND a.query LIKE 'SELECT id_token FROM sec.session_revoke(%'
+            AND $1 = ANY (pg_blocking_pids(a.pid))`,
+        [holder],
+      );
+      if (rowCount !== null && rowCount > 0) return;
+      if (endedBefore) throw new Error('the sign-out ended before its fallback waited for a lock');
+      if (Date.now() > deadline) {
+        throw new Error('the sign-out fallback did not wait for the session row within 15 s');
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+
+  it('a lost COMMIT answer: 500 commit_outcome_unknown; the session is ended with its one auth.logout row, and the log line does not say "not audited"', async () => {
+    const leaving = await signedIn('Una Unknown');
+    const mark = await newestAuditRow();
+    const from = logs.lines.length;
+    const fault = faults.arm({ mode: 'lost-commit-answer', at: AT_AUDIT });
+    const response = await leaving.signOut();
+    expect((await fault.delivered).commitTag).toBe('COMMIT');
+    await expectError(response, 'commit_outcome_unknown');
+    expect(setCookie(response, t.config.sessionCookieName)).toBe('');
+    expect(await leaving.live()).toBe(0);
+    expect(await auditRowsAfter(mark)).toEqual(['auth.logout:success']);
+    expect(signOutLines(from)).toEqual([`50 ${COMMITTED_OR_ENDED_ELSEWHERE}`]);
+  });
+
+  it('a known rollback: 500 internal_error; the fallback ends the session with no audit row, and the log line says so', async () => {
+    const leaving = await signedIn('Rollo Rolled-Back');
+    const mark = await newestAuditRow();
+    const from = logs.lines.length;
+    const fault = faults.arm({ mode: 'statement-timeout', at: AT_AUDIT });
+    const response = await whileUnauditedAllowed(migratorUrl(), 'session', RESIDUAL, () =>
+      leaving.signOut(),
+    );
+    await fault.delivered;
+    await expectError(response, 'internal_error');
+    expect(setCookie(response, t.config.sessionCookieName)).toBe('');
+    expect(await leaving.live()).toBe(0);
+    expect(await auditRowsAfter(mark)).toEqual([]);
+    expect(signOutLines(from)).toEqual([`50 ${NOT_AUDITED}`]);
+  });
+
+  it('a lock timeout, and the fallback ends the session: the sign-out answers 200 with the cookie cleared, not 503, with the provider URL of any sign-out, and the log line says it was not audited', async () => {
+    const leaving = await signedIn('Lottie Locked', { idToken: ID_TOKEN });
+    const mark = await newestAuditRow();
+    const from = logs.lines.length;
+    const fault = faults.arm({ mode: 'lock-timeout', at: AT_AUDIT });
+    const response = await whileUnauditedAllowed(migratorUrl(), 'session', RESIDUAL, () =>
+      leaving.signOut(),
+    );
+    expect((await fault.delivered).sqlstate).toBe('55P03');
+    expect(response.status).toBe(200);
+    // The fallback hands on the ID token it got back from sec.session_revoke, so the provider
+    // ends its own session as after any sign-out, without asking the user to confirm.
+    expect(await response.json()).toEqual({
+      redirectTo: `${PROVIDER_SIGN_OUT}?id_token_hint=${ID_TOKEN}`,
+    });
+    // Given up once: the session row keeps no copy.
+    expect(
+      await administrator(
+        'SELECT revoked_at IS NOT NULL AS ended, id_token FROM public.session WHERE id_hash = $1',
+        [leaving.idHash],
+      ),
+    ).toEqual([{ ended: true, id_token: null }]);
+    expect(response.headers.get('retry-after')).toBeNull();
+    expect(setCookie(response, t.config.sessionCookieName)).toBe('');
+    expect(await leaving.live()).toBe(0);
+    expect(await auditRowsAfter(mark)).toEqual([]);
+    expect(signOutLines(from)).toEqual([`50 ${NOT_AUDITED}`]);
+    // The session is gone for the browser too.
+    await expectError(await leaving.session.fetch('/api/displays'), 'unauthenticated');
+  });
+
+  // The two cases below take the session row for real. The guard's own session lookup records
+  // activity on that row, so the row is taken once the request is past it: the sign-out is held
+  // before its sec.session_revoke, the other revocation takes the row, and the hold is released.
+  const AT_REVOKE = (text: string): boolean => text.includes('sec.session_revoke(');
+
+  it('a lock timeout behind a revocation that then commits: the fallback waits for it too and finds nothing to end, so the answer is the 401 of a session that is not live, and no row is missing', async () => {
+    const leaving = await signedIn('Elsa Elsewhere');
+    const mark = await newestAuditRow();
+    const from = logs.lines.length;
+    const held = faults.hold(AT_REVOKE);
+    const signingOut = leaving.signOut();
+    const route = await held.reached;
+    await whileSessionRowIsHeld(leaving.idHash, async (holder) => {
+      held.release();
+      // The audited transaction waits for the session row, for all of lock_timeout (5 s).
+      expect(
+        await waitForLockWaiters(
+          sql,
+          backendPid(holder),
+          1,
+          'the sign-out never waited for the session row',
+          { waiter: signingOut },
+        ),
+      ).toEqual([route]);
+      // It timed out, and the fallback now waits for the same row on another connection.
+      await fallbackWaitsBehind(backendPid(holder), signingOut);
+      await holder.query('COMMIT');
+    });
+    const response = await signingOut;
+    expect(response.headers.get('retry-after')).toBeNull();
+    await expectError(response, 'unauthenticated');
+    expect(setCookie(response, t.config.sessionCookieName)).toBe('');
+    expect(await leaving.live()).toBe(0);
+    // The sign-out wrote nothing: the other revocation ended the session (the test's own SQL).
+    expect(await auditRowsAfter(mark)).toEqual([]);
+    expect(signOutLines(from)).toEqual([`50 ${ENDED_ELSEWHERE}`]);
+  });
+
+  it('a lock timeout, and the fallback times out too: 503 service_unavailable with retry-after 2, as every other write answers a lock timeout; the session is still live and the log line says it may be', async () => {
+    const leaving = await signedIn('Stella Still-Active');
+    const mark = await newestAuditRow();
+    const from = logs.lines.length;
+    const held = faults.hold(AT_REVOKE);
+    const signingOut = leaving.signOut();
+    await held.reached;
+    let response: Response | undefined;
+    await whileSessionRowIsHeld(leaving.idHash, async () => {
+      held.release();
+      // The row is not let go while the route runs: both of its statements wait out lock_timeout.
+      response = await signingOut;
+    });
+    if (response === undefined) throw new Error('no answer');
+    expect(response.headers.get('retry-after')).toBe('2');
+    await expectError(response, 'service_unavailable');
+    expect(await leaving.live()).toBe(1);
+    expect(await auditRowsAfter(mark)).toEqual([]);
+    expect(signOutLines(from)).toEqual([
+      '50 sign-out could not end the session either',
+      `50 ${STILL_ACTIVE}`,
+    ]);
+    // PINNED, a finding (Low): the browser's cookie is cleared before the transaction, in every
+    // case, so this browser cannot "try again", although the session is still live on the
+    // server until it expires or is ended some other way.
+    expect(setCookie(response, t.config.sessionCookieName)).toBe('');
+    const still = (await (await leaving.session.fetch('/api/session')).json()) as {
+      authenticated: boolean;
+    };
+    expect(still.authenticated).toBe(true);
+  });
+
+  // PINNED, a finding (Low), not decided: the guard's session lookup records activity on the
+  // session row (sec.session_by_id_hash), outside any transaction of the route. When another
+  // transaction holds that row past lock_timeout (a slow member change that ends the member's
+  // sessions, the incident script), the request answers 500 internal_error, not the 503 of a
+  // lock timeout inside a write, and the route never runs: a sign-out then ends nothing.
+  it('pins: a request whose session row is held past lock_timeout at the session lookup answers 500 internal_error, before the route runs', async () => {
+    const leaving = await signedIn('Gus Guarded');
+    const mark = await newestAuditRow();
+    const from = logs.lines.length;
+    let response: Response | undefined;
+    await whileSessionRowIsHeld(leaving.idHash, async (holder) => {
+      const signingOut = leaving.signOut();
+      await waitForLockWaiters(sql, backendPid(holder), 1, 'the session lookup never waited', {
+        waiter: signingOut,
+      });
+      response = await signingOut;
+    });
+    if (response === undefined) throw new Error('no answer');
+    expect(response.headers.get('retry-after')).toBeNull();
+    await expectError(response, 'internal_error');
+    // The route did not run: no cookie was cleared, nothing was logged by it, nothing changed.
+    expect(setCookie(response, t.config.sessionCookieName)).toBeNull();
+    expect(signOutLines(from)).toEqual([]);
+    expect(await leaving.live()).toBe(1);
+    expect(await auditRowsAfter(mark)).toEqual([]);
+  });
+});
+
+/**
+ * The pairing poll runs two transactions: the read of the session (sec.pairing_poll, which locks
+ * the session row) and, for a claimed session, the collection. The table above strikes the
+ * collection, at its audit row. This holds the read to the same answer (Michael, 25 Nov 2026):
+ * the session row is really held, by a claim that has not committed, for all of lock_timeout.
+ */
+describe('the pairing poll answers a lock timeout in its read as it does in its collection', () => {
+  it('a poll that waits past lock_timeout for the session row a claim holds answers 503 service_unavailable with retry-after 2 and stores nothing; the next poll collects', async () => {
+    const display = await createDisplay(owner, org, 'Slowly claimed screen');
+    const pairing = await newPairing();
+    const poll = (): Promise<Response> =>
+      fetch(`${t.url}/player/pairing/${pairing.pairingId}`, {
+        headers: { authorization: `Bearer ${pairing.pollingToken}` },
+      });
+    const mark = await newestAuditRow();
+
+    // The operator's claim, stopped before its audit row: sec.pairing_claim has written the
+    // session row and holds it until the claim commits.
+    const held = faults.hold((text) => /^\s*INSERT INTO audit_event \(org_id/.test(text));
+    const claiming = send(owner, 'POST', `/api/displays/${display.id}/claim`, {
+      code: pairing.code,
+    });
+    const claimer = await reachedBefore(held, claiming, 'the claim');
+    let timedOut: Response;
+    try {
+      const polling = poll();
+      await waitForLockWaiters(
+        sql,
+        claimer,
+        1,
+        'the poll never waited for the pairing session row the claim holds',
+        { waiter: polling },
+      );
+      // The claim is not let go: the poll waits out tinnox_app's 5 s lock_timeout.
+      timedOut = await polling;
+    } finally {
+      held.release();
+    }
+    expect(timedOut.headers.get('retry-after')).toBe('2');
+    await expectError(timedOut, 'service_unavailable');
+    // PostgreSQL raised it, in the poll's read and nowhere else.
+    expect(
+      faults
+        .databaseErrors()
+        .map((seen) => [seen.sqlstate, /sec\.pairing_\w+/.exec(seen.statement)?.[0]]),
+    ).toEqual([['55P03', 'sec.pairing_poll']]);
+
+    // The poll stored nothing, and the claim it waited for committed.
+    expect((await claiming).status).toBe(200);
+    expect(await countOf('player_registration', 'display_id', display.id)).toBe(0);
+    expect(await auditRowsAfter(mark)).toEqual(['pairing.claim:success']);
+    // "Try again" was true: the next poll collects the credential.
+    const collected = await poll();
+    expect(collected.status).toBe(200);
+    expect(await collected.json()).toMatchObject({ status: 'claimed' });
+    expect(await countOf('player_registration', 'display_id', display.id)).toBe(1);
+    expect(await auditRowsAfter(mark)).toEqual([
+      'pairing.claim:success',
+      'pairing.complete:success',
+    ]);
+  });
+});

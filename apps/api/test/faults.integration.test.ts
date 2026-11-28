@@ -22,10 +22,12 @@ import {
   FAULT_SQLSTATE,
   faultHarness,
   faultyPool,
+  reachedBefore,
   signIn,
   startTestApp,
   waitForLockWait,
   waitForLockWaiters,
+  withoutWaitingFor,
   type Delivered,
   type TestApp,
   type TestOrg,
@@ -494,6 +496,35 @@ describe('the fault harness (step 33)', () => {
     expect(await folders(free)).toHaveLength(1);
   });
 
+  it('databaseErrors keeps what the server raised on the wrapped connections, with the constraint it names, struck by a fault or not, and disarmAll forgets it', async () => {
+    const name = folderName();
+    await withOrg(faulty, org.orgId, (tx) => tx.query(INSERT_FOLDER, [randomUUID(), name]));
+    expect(faults.databaseErrors()).toEqual([]);
+    // No fault is armed: the server refuses the second folder of that name by itself.
+    const seen = await strikeAfterOneFolder(folderName(), (tx) =>
+      tx.query(INSERT_FOLDER, [randomUUID(), name]),
+    );
+    expect(fromServer(seen.thrown)).toMatchObject({ code: '23505' });
+    expect(faults.databaseErrors()).toEqual([
+      {
+        pid: seen.pid,
+        statement: INSERT_FOLDER,
+        sqlstate: '23505',
+        constraint: 'folder_org_name_key',
+      },
+      // The statement after it, on the aborted transaction.
+      { pid: seen.pid, statement: 'SELECT 1', sqlstate: IN_ABORTED_TRANSACTION, constraint: null },
+    ]);
+    // A lost connection is not an error of the database, and is not kept.
+    faults.disarmAll();
+    const killed = faults.arm({ mode: 'never-sent', at: AT_FOLDER });
+    await thrownBy(
+      withOrg(faulty, org.orgId, (tx) => tx.query(INSERT_FOLDER, [randomUUID(), folderName()])),
+    );
+    await killed.delivered;
+    expect(faults.databaseErrors()).toEqual([]);
+  });
+
   describe('the race helpers', () => {
     const LOCK = 'SELECT 1 FROM folder WHERE id = $1 FOR UPDATE';
 
@@ -532,6 +563,75 @@ describe('the fault harness (step 33)', () => {
           ).rejects.toThrow('nothing to wait for: the side that had to wait ended without waiting');
         },
       );
+    });
+
+    it('withoutWaitingFor gives what the unblocked side settled with, and says at once when the side that was not to wait does', async () => {
+      const id = randomUUID();
+      await withOrg(sql, org.orgId, (tx) => tx.query(INSERT_FOLDER, [id, folderName()]));
+      await withRival(
+        (holder) => holder.query(LOCK, [id]),
+        async (holder) => {
+          // Another row: nothing of the holder's is in its way.
+          expect(
+            await withoutWaitingFor(
+              sql,
+              backendPid(holder),
+              withOrg(sql, org.orgId, () => Promise.resolve('free')),
+              'a transaction that touches nothing of the holder',
+            ),
+          ).toBe('free');
+          const waiter = await sql.connect();
+          try {
+            await waiter.query('BEGIN');
+            await waiter.query("SELECT set_config('app.org_id', $1, true)", [org.orgId]);
+            const waiting = waiter.query(LOCK, [id]);
+            // Far sooner than the ten seconds it would give up after.
+            const began = Date.now();
+            await expect(
+              withoutWaitingFor(sql, backendPid(holder), waiting, 'the second lock'),
+            ).rejects.toThrow(
+              `the second lock: it waits for a lock of backend ${String(backendPid(holder))}`,
+            );
+            expect(Date.now() - began).toBeLessThan(5_000);
+            // A waiter the test already knows of is not counted against it.
+            await withoutWaitingFor(sql, backendPid(holder), Promise.resolve(), 'nothing', {
+              already: 1,
+            });
+            await holder.query('ROLLBACK');
+            await waiting;
+          } finally {
+            await waiter.query('ROLLBACK').catch(() => undefined);
+            waiter.release();
+          }
+        },
+      );
+    });
+
+    it('reachedBefore gives the backend of the request stopped at a hold, and fails at once for a request that answered without reaching it', async () => {
+      // An application on the harness's pool, for a real request to stop.
+      const app = await startTestApp({}, 1000, { wrapPool: faults.wrapPool });
+      try {
+        const member = await signIn(app, org);
+        const held = faults.hold((text) => AT_FOLDER.test(text));
+        const creating = member.fetch('/api/folders', {
+          method: 'POST',
+          json: { name: folderName() },
+        });
+        const pid = await reachedBefore(held, creating, 'the folder create');
+        expect((await backend(pid))?.state).toBe('idle in transaction');
+        held.release();
+        expect((await creating).status).toBe(201);
+
+        // A hold no statement of the request matches: the request answers first.
+        const never = faults.hold((text) => text.includes('never sent by any route'));
+        await expect(
+          reachedBefore(never, member.fetch('/api/folders'), 'the folder list'),
+        ).rejects.toThrow(
+          'the folder list answered 200 before it reached the statement it was to be held at',
+        );
+      } finally {
+        await app.close();
+      }
     });
   });
 });

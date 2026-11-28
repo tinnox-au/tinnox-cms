@@ -55,6 +55,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { changeAsDevice, verifyDeviceCredential, type VerifiedDevice } from '../auth/device.ts';
 import { AuthFailureGuard, clientKeyOf } from '../auth/failure-guard.ts';
+import { lockTimeoutAsUnavailable } from '../auth/permissions.ts';
 import {
   mediaUrlExpired,
   mediaUrlInvalid,
@@ -207,6 +208,18 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
     rateLimit: { ...perMinute(ctx, max), keyGenerator: playerKey },
   });
 
+  /**
+   * For the pairing transactions on changePreOrg: a wait past lock_timeout (55P03) answers 503
+   * service_unavailable with retry-after 2, as changeAsOperator and changeAsDevice answer it
+   * (Michael, 25 Nov 2026); nothing of the transaction is stored. Every other failure, and a
+   * COMMIT that did not confirm, is thrown as it came.
+   */
+  const lockTimeoutAs503 =
+    (request: FastifyRequest) =>
+    (error: unknown): never => {
+      throw lockTimeoutAsUnavailable(request, error);
+    };
+
   /* ------------------------------------------------------------- pairing */
 
   app.post(
@@ -252,7 +265,7 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
               detail: null,
             },
           };
-        });
+        }).catch(lockTimeoutAs503(request));
         if (result.outcome === 'rate_limited') {
           throw new HttpError(
             'rate_limited',
@@ -327,7 +340,7 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
         }
         // Every other outcome only read the session.
         return { value: polled, audit: unaudited('nothing_changed') };
-      });
+      }).catch(lockTimeoutAs503(request));
       switch (poll.outcome) {
         case 'pending':
           if (poll.expiresAt === null) throw new Error('pending pairing session without expiry');
@@ -410,7 +423,7 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
             detail: { displayId: done.displayId, pairingId: id },
           },
         };
-      });
+      }).catch(lockTimeoutAs503(request));
       if (paired === null) return { status: 'consumed' };
       const { done, display } = paired;
       return {

@@ -1154,7 +1154,7 @@ describe('the two writes outside a transaction (D2, CX-01)', () => {
     expect(stored.rowCount).toBe(0);
   });
 
-  it('sessionRevokeUnaudited ends the session, says whether one was live, and writes no audit row (CX-01 residual)', async () => {
+  it('sessionRevokeUnaudited ends the session, says whether one was live with the ID token it held, and writes no audit row (CX-01 residual)', async () => {
     const idHash = sha256(`cookie-${randomUUID()}`);
     await inTx(pool, (tx) =>
       sessionCreate(tx, {
@@ -1162,7 +1162,7 @@ describe('the two writes outside a transaction (D2, CX-01)', () => {
         oidcSub: a.oidcSub,
         csrfToken: 'c'.repeat(43),
         ttlSeconds: 3600,
-        idToken: null,
+        idToken: 'header.payload.signature',
         authTime: new Date(),
       }),
     );
@@ -1174,10 +1174,13 @@ describe('the two writes outside a transaction (D2, CX-01)', () => {
     };
     const before = await auditRows();
     expect(await sessionByIdHash(db, idHash, 1800)).not.toBeNull();
-    expect(await sessionRevokeUnaudited(databaseOn(pool), idHash)).toBe(true);
+    // The ID token is given up once, for the provider's sign-out (sec.session_revoke).
+    expect(await sessionRevokeUnaudited(databaseOn(pool), idHash)).toEqual({
+      idToken: 'header.payload.signature',
+    });
     expect(await sessionByIdHash(db, idHash, 1800)).toBeNull();
-    expect(await sessionRevokeUnaudited(databaseOn(pool), idHash)).toBe(false);
-    expect(await sessionRevokeUnaudited(databaseOn(pool), hash())).toBe(false);
+    expect(await sessionRevokeUnaudited(databaseOn(pool), idHash)).toBeNull();
+    expect(await sessionRevokeUnaudited(databaseOn(pool), hash())).toBeNull();
     expect(await auditRows()).toBe(before);
   });
 });
