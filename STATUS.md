@@ -361,3 +361,6 @@ from: CMS-4
 
 ### CMS-44
 from: CMS-4
+
+**Notes**
+- 29 Nov: 27 Nov, R6 cut 3: after replugging, steady red LED, no HDMI signal for 90 s+, until the power button was pressed; then normal boot. Bootloader config default; 5V rail 5.14 V; journal not kept across boots.
