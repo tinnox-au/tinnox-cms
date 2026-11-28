@@ -77,6 +77,18 @@ describe('deliveryWrites', () => {
       `${INSERT} (display_id, org_id) VALUES ($1, $2) ON CONFLICT (display_id) DO UPDATE SET last_seq = 0 WHERE ${TABLE}.desired_publication_id IS NULL`,
     ],
     ['a string', `${UPDATE} SET player_state = 'desired_at = now(), x' WHERE display_id = $1`],
+    [
+      'an escape string',
+      `${UPDATE} SET player_state = E'it\\'s, desired_at = now()' WHERE display_id = $1`,
+    ],
+    [
+      'a dollar-quoted string',
+      `${UPDATE} SET player_state = $tag$x's, desired_at = now()$tag$ WHERE display_id = $1`,
+    ],
+    [
+      'a condition after parameters, which open no dollar quote',
+      `${UPDATE} SET last_seq = $1, player_state = $2 WHERE desired_at < now()`,
+    ],
   ])('leaves the pointer alone where it is only read: in %s', (_what, statement) => {
     expect(deliveryWrites(`${statement};`)).toEqual([{ line: 1, statement, namesPointer: false }]);
   });
@@ -112,6 +124,26 @@ describe('deliveryWrites', () => {
       `${UPDATE} SET last_seq = 1, -- reset; then\n  desired_at = now()`,
     ],
     ['after a semicolon in a string', `${UPDATE} SET player_state = 'a;b', desired_at = now()`],
+    [
+      'after an escape string with an escaped quote',
+      `${UPDATE} SET player_state = E'it\\'s', desired_at = now()`,
+    ],
+    [
+      'after a lower-case escape string with an escaped quote and a semicolon',
+      `${UPDATE} SET player_state = e'a\\';b', desired_publication_id = $2`,
+    ],
+    [
+      'after a dollar-quoted string with an apostrophe',
+      `${UPDATE} SET player_state = $$x's$$, desired_at = now()`,
+    ],
+    [
+      'after a tagged dollar quote holding $$, an apostrophe and a semicolon',
+      `${UPDATE} SET player_state = $q$it's; $$ odd$q$, desired_publication_id = $2`,
+    ],
+    [
+      'after a plain string ending in a backslash, which escapes nothing',
+      `${UPDATE} SET player_state = 'C:\\', desired_at = now()`,
+    ],
   ])('flags the pointer where it is written: %s', (_what, statement) => {
     expect(deliveryWrites(`${statement};`)).toEqual([{ line: 1, statement, namesPointer: true }]);
   });

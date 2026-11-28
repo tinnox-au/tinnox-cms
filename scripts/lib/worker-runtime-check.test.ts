@@ -343,6 +343,233 @@ describe('dockerfileUser and undeclaredWorkerDefinitions', () => {
   });
 });
 
+describe('undeclaredWorkerDefinitions: the whole run of a derived container (OTH-15)', () => {
+  const PATH = 'apps/media-worker/scripts/check.mjs';
+  const head =
+    "const image = process.env.TINNOX_WORKER_IMAGE;\nconst isolation = JSON.parse(execFileSync(process.execPath, [join(root, 'scripts', 'worker-run-args.ts'), jobs]));\n";
+  const argv = (extra: string): string =>
+    `${head}spawn('docker', ['run', '--rm', '--name', name, ...isolation, ${extra}image]);`;
+  const scan = (text: string, path = PATH): string[] =>
+    undeclaredWorkerDefinitions([{ path, text }]);
+
+  it.each([
+    ["'--network', 'host', ", '--network, which gives the worker a network'],
+    ["'--network=bridge', ", '--network, which gives the worker a network'],
+    ["'--privileged', ", '--privileged, which gives it every capability'],
+    ["'--cap-add', 'SYS_ADMIN', ", '--cap-add, which gives it a capability back'],
+    ["'--security-opt', 'seccomp=unconfined', ", '--security-opt, which changes its confinement'],
+    ["'--security-opt', 'no-new-privileges:true', ", '--security-opt, which changes'],
+    ["'--user', '0:0', ", '--user, which changes the user it runs as'],
+    ["'-u', 'root', ", '-u, which changes the user it runs as'],
+    ["'--pid', 'host', ", '--pid, which shares a process namespace'],
+    ["'--ipc=host', ", '--ipc, which shares an IPC namespace'],
+    ["'--device', '/dev/kvm', ", '--device, which gives it a device of the host'],
+    ["'-v', '/:/host', ", '-v, which mounts more of the host'],
+    ["'--volume', '/srv/jobs:/scratch', ", '--volume, which mounts more of the host'],
+    ["'--mount', 'type=bind,src=/,dst=/h', ", '--mount, which mounts more of the host'],
+    ["'--env', 'DATABASE_URL=x', ", '--env, which passes it environment'],
+    ["'-e', 'A=b', ", '-e, which passes it environment'],
+    ["'--env-file', '.env', ", '--env-file, which passes it environment'],
+    ["'--tmpfs', '/data', ", '--tmpfs, which adds a writable file system'],
+    ["'--read-only=false', ", '--read-only=false, which makes its root file system writable'],
+    ["'--publish', '80:80', ", '--publish, which is not among the options a derived run may add'],
+    ['...extra, ', '...extra, options this check cannot read'],
+  ])('flags %s after the derived options, by name', (extra, what) => {
+    const problems = scan(argv(extra));
+    expect(problems).toEqual([
+      expect.stringContaining(`${PATH}: a run of the media worker adds ${what}`),
+    ]);
+    expect(problems[0]).toMatch(/\. Put the option in the worker service of /);
+  });
+
+  it('says where the option belongs and the closed list of what a run may add', () => {
+    expect(scan(argv("'--cap-add', 'SYS_ADMIN', "))).toEqual([
+      `${PATH}: a run of the media worker adds --cap-add, which gives it a capability back. Put the option in the worker service of infra/docker-compose.yml and infra/deploy/compose.yml, where workerServiceProblems judges it; besides the options from workerRunArgs a run may add only --rm, --detach, -d, --name <value>, --read-only before the image, then the image and its command (scripts/lib/worker-runtime-check.ts)`,
+    ]);
+  });
+
+  it('flags an option added before the spread, and one added to a derived shell line', () => {
+    expect(
+      scan(`${head}spawn('docker', ['run', '--privileged', ...isolation, image]);`),
+    ).toHaveLength(1);
+    expect(
+      scan(
+        'docker run --rm --cap-add SYS_ADMIN $(node scripts/worker-run-args.ts /srv/jobs) "$WORKER_IMAGE"\n',
+        'infra/deploy/check.sh',
+      ),
+    ).toEqual([expect.stringContaining('adds --cap-add, which gives it a capability back')]);
+  });
+
+  it('leaves what the two runs of today add, a restatement of the compose file, and the command after the image', () => {
+    expect(scan(argv(''))).toEqual([]);
+    expect(
+      scan(
+        "spawnSync('docker', ['run', '--detach', '--rm', ...workerContainerArgs(t.jobsDir), WORKER_IMAGE]);",
+        'scripts/worker-check.ts',
+      ),
+    ).toEqual([]);
+    expect(scan(argv("'--network', 'none', '--read-only', '-d', "))).toEqual([]);
+    expect(
+      scan(`${head}spawn('docker', ['run', '--rm', ...isolation, image, '--env', 'verbose']);`),
+    ).toEqual([]);
+    expect(
+      scan(
+        'docker run --rm --name w $(node scripts/worker-run-args.ts /srv/jobs) "$WORKER_IMAGE"\n',
+        'infra/deploy/check.sh',
+      ),
+    ).toEqual([]);
+  });
+
+  it('flags a run whose derived options come after the image, where they are its command', () => {
+    expect(scan(`${head}spawn('docker', ['run', '--rm', image, ...isolation]);`)).toEqual([
+      expect.stringMatching(/defines how the media worker runs, which nothing checks/),
+    ]);
+  });
+});
+
+describe('undeclaredWorkerDefinitions: the run forms it recognises (OTH-15)', () => {
+  const head = 'const image = process.env.TINNOX_WORKER_IMAGE;\n';
+  const isolation =
+    "const isolation = JSON.parse(execFileSync(process.execPath, [join(root, 'scripts', 'worker-run-args.ts'), jobs]));\n";
+  const flagged = (path: string, text: string): void => {
+    expect(undeclaredWorkerDefinitions([{ path, text }]), text).toEqual([
+      expect.stringMatching(/defines how the media worker runs, which nothing checks/),
+    ]);
+  };
+  const left = (path: string, text: string): void => {
+    expect(undeclaredWorkerDefinitions([{ path, text }]), text).toEqual([]);
+  };
+
+  it.each([
+    'docker container run --rm "$WORKER_IMAGE"',
+    'docker create --name w "$WORKER_IMAGE"',
+    'docker container create "$WORKER_IMAGE"',
+    'podman run --rm "$WORKER_IMAGE"',
+    'nerdctl run --rm tinnox-cms-media-worker:m0',
+    'podman container run \\\n  --rm \\\n  "$WORKER_IMAGE"',
+  ])('flags the shell line %s', (line) => {
+    flagged('infra/deploy/worker.sh', `${line}\n`);
+  });
+
+  it.each([
+    'docker container run --rm $(node scripts/worker-run-args.ts /srv/jobs) "$WORKER_IMAGE"',
+    'podman create $(node scripts/worker-run-args.ts /srv/jobs) "$WORKER_IMAGE"',
+    'docker container ls --filter ancestor="$WORKER_IMAGE"',
+    'docker image inspect "$WORKER_IMAGE"',
+  ])('leaves the shell line %s', (line) => {
+    left('infra/deploy/worker.sh', `${line}\n`);
+  });
+
+  it.each([
+    ["['container', 'run', '--rm', image]", 'container then run'],
+    ["['create', '--name', 'w', image]", 'create'],
+    ["['container', 'create', image]", 'container then create'],
+    ["[engineVerb, 'run', '--rm', image]", 'a variable first, then a literal run'],
+    ["[prefix, '--quiet', 'create', image]", 'a variable first, then a literal create'],
+    ["['run'].concat(['--rm', image])", 'arguments built by concat'],
+  ])('flags the argument array %s (%s)', (args) => {
+    flagged('apps/media-worker/scripts/check.mjs', `${head}spawn('docker', ${args});`);
+  });
+
+  it('flags arguments pushed in the call itself, which no one array holds', () => {
+    flagged(
+      'apps/media-worker/scripts/check.mjs',
+      `${head}${isolation}spawnSync('podman', (a.push('run', ...isolation), a), image);`,
+    );
+  });
+
+  it.each([
+    ["['container', 'run', '--rm', ...isolation, image]", 'container then run, derived'],
+    ["[engineVerb, 'run', ...isolation, image]", 'a variable first, derived'],
+    ["['container', 'ls', '--filter', image]", 'container then ls'],
+    ["[engineVerb, '--rm', image]", 'a variable first, with no literal run'],
+    ["['image', 'inspect', image]", 'an image inspection'],
+  ])('leaves the argument array %s (%s)', (args) => {
+    left('apps/media-worker/scripts/check.mjs', `${head}${isolation}spawn('docker', ${args});`);
+  });
+
+  it('leaves concat in a call that runs nothing', () => {
+    left(
+      'apps/media-worker/scripts/check.mjs',
+      `${head}spawnSync('docker', ['image', 'inspect'].concat([image]));`,
+    );
+  });
+
+  it.each([
+    [
+      'another compose file',
+      'docker compose -f infra/staging/compose.yml run --rm media-worker',
+      'starts the worker from infra/staging/compose.yml, which is not infra/docker-compose.yml or infra/deploy/compose.yml',
+    ],
+    [
+      'no compose file',
+      'docker compose --profile worker up -d',
+      'starts the worker with Docker Compose and names no compose file',
+    ],
+    [
+      'an option added to run',
+      'docker compose -f infra/docker-compose.yml run --cap-add SYS_ADMIN media-worker',
+      'adds --cap-add to docker compose run',
+    ],
+    [
+      'docker-compose, an environment added to run',
+      'docker-compose --file infra/docker-compose.yml run -e A=b media-worker',
+      'adds -e to docker compose run',
+    ],
+  ])('flags a Docker Compose run of the worker: %s', (_what, line, message) => {
+    const problems = undeclaredWorkerDefinitions([
+      { path: 'scripts/worker.sh', text: `${line}\n` },
+    ]);
+    expect(problems).toEqual([
+      expect.stringContaining(`scripts/worker.sh: a run of the media worker ${message}`),
+    ]);
+    expect(problems[0]).toMatch(
+      /\. Run the worker through infra\/docker-compose\.yml or infra\/deploy\/compose\.yml with --file, adding no option to the service, so workerServiceProblems judges what it runs with \(scripts\/lib\/worker-runtime-check\.ts\)$/,
+    );
+  });
+
+  it('names the one file a Docker Compose run must use', () => {
+    expect(
+      undeclaredWorkerDefinitions([
+        { path: 'scripts/worker.sh', text: 'docker compose --profile worker up -d\n' },
+      ]),
+    ).toEqual([
+      `scripts/worker.sh: a run of the media worker starts the worker with Docker Compose and names no compose file: name infra/docker-compose.yml or infra/deploy/compose.yml with --file. Run the worker through infra/docker-compose.yml or infra/deploy/compose.yml with --file, adding no option to the service, so workerServiceProblems judges what it runs with (scripts/lib/worker-runtime-check.ts)`,
+    ]);
+  });
+
+  it('flags a Docker Compose run in an argument array', () => {
+    expect(
+      undeclaredWorkerDefinitions([
+        {
+          path: 'apps/media-worker/scripts/check.mjs',
+          text: `${head}spawn('docker', ['compose', '-f', 'other.yml', 'up', 'media-worker']);`,
+        },
+      ]),
+    ).toEqual([expect.stringContaining('starts the worker from other.yml')]);
+  });
+
+  it('leaves Docker Compose runs through the declared files, and runs of other services', () => {
+    left(
+      'package.json',
+      '"infra:up": "docker compose --env-file .env -f infra/docker-compose.yml --profile worker up -d --build --wait postgres media-worker",',
+    );
+    left(
+      'infra/deploy/release.sh',
+      'docker compose --project-name "$PROJECT" --file "$here/compose.yml" \\\n  up --detach media-worker\n',
+    );
+    left(
+      'scripts/worker.sh',
+      'docker compose -f infra/docker-compose.yml run --rm --no-deps --name w media-worker\n',
+    );
+    left('scripts/db.sh', 'docker compose -f infra/other.yml up -d postgres\n');
+    left(
+      'scripts/setup.mjs',
+      'console.log(`docker compose -f infra/docker-compose.yml rm -sf keycloak && npm run infra:up`);',
+    );
+  });
+});
+
 describe('the repository', () => {
   const paths = spawnSync(
     'git',

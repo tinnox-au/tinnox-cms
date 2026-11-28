@@ -11,11 +11,15 @@
 // TypeScript, JavaScript, shell and SQL text (migrations and the sec.* functions they define
 // included), from its keyword to the end of the statement (a semicolon outside a comment or
 // string, or the end of the template literal); its comments write nothing and open no string.
+// Strings are read as PostgreSQL writes them: plain ('it''s'), escape (E'it\'s') and
+// dollar-quoted ($$it's$$, $tag$it's$tag$), so neither a quote nor a semicolon in one ends it early.
 // It flags one that names desired_publication_id or desired_at where a column is written: in an INSERT's column list (MERGE's included), or as the target of an
 // assignment in a SET list (UPDATE, ON CONFLICT DO UPDATE, MERGE's UPDATE). A mention in a
 // condition, a RETURNING list or the value of an assignment reads the column and is left alone.
 // It also flags an INSERT with no column list, which could write every column. It cannot see a
-// table or column name built at run time, nor a column list composed from a separate fragment.
+// table or column name built at run time, nor a column list composed from a separate fragment,
+// and it reads a backslash in a plain string as PostgreSQL does with standard_conforming_strings
+// on (the default since 9.1), not as an escape.
 //
 // Test code is not scanned: a test arranges a delivery row as it needs (a pointer to a
 // publication it inserted itself, as packages/db/test/support.ts does), and judging that is the
@@ -80,11 +84,30 @@ function blankComments(sql: string, strings = false): string {
         end += pair === '/*' || pair === '*/' ? 2 : 1;
       } while (depth > 0 && end < sql.length);
       blank = true;
+    } else if (
+      sql.charAt(i) === "'" &&
+      /(?:^|[^\w$])[Ee]$/.test(sql.slice(Math.max(0, i - 2), i))
+    ) {
+      // An escape string (E'it\'s'): a backslash takes the next character with it.
+      end = i + 1;
+      while (end < sql.length && sql.charAt(end) !== "'") end += sql.charAt(end) === '\\' ? 2 : 1;
+      end = Math.min(end + 1, sql.length);
+      blank = strings;
     } else if (sql.charAt(i) === "'") {
       // A doubled quote inside a string closes it and opens the next: the same blanks.
       const close = sql.indexOf("'", i + 1);
       end = close < 0 ? sql.length : close + 1;
       blank = strings;
+    } else if (sql.charAt(i) === '$' && !/[\w$]/.test(sql.charAt(i - 1))) {
+      // A dollar-quoted string ($$x's$$, $tag$...$tag$), to the same tag. With no closing tag the
+      // dollar is an ordinary character: the scan may have begun inside a function body, whose
+      // closing $$ it would otherwise read as an opening one.
+      const tag = /^\$(?:[A-Za-z_][\w]*)?\$/.exec(sql.slice(i))?.[0];
+      const close = tag === undefined ? -1 : sql.indexOf(tag, i + tag.length);
+      if (tag !== undefined && close >= 0) {
+        end = close + tag.length;
+        blank = strings;
+      }
     }
     const part = sql.slice(i, end);
     out += blank ? part.replace(/[^\n]/g, ' ') : part;
