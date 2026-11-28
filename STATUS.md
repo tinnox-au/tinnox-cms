@@ -52,7 +52,6 @@ None.
 
 | Id | Card | Agreed | PR | Since |
 |---|---|---|---|---|
-| CMS-4 | Real-hardware check on Raspberry Pi 5 (8GB) under Linux: the browser player in Chromium kiosk mode on a monitor | Michael 23 Nov | - | 23 Nov |
 | CMS-32 | Poteto pyramid refactor, group D: verification (steps 29 to 37 of the adoption plan); Michael starts it | Michael 25 Nov | - | 25 Nov |
 | CMS-37 | Deploy the CMS to production: agree the deployment plan first (data stays in Australia, stability, scalability, security), then the first production release | Michael 25 Nov | - | 25 Nov |
 
@@ -67,6 +66,7 @@ None.
 | Id | Date | Outcome | PR |
 |---|---|---|---|
 | CMS-41 | 28 Nov | Delete a screen from the Screens list (today a created screen can only be renamed or have its player revoked; Yodeck allows delete) | #54 |
+| CMS-4 | 28 Nov | Real-hardware check on Raspberry Pi 5 (8GB) under Linux: the browser player in Chromium kiosk mode on a monitor | - |
 | CMS-31 | 25 Nov | Poteto pyramid refactor, group C: errors and outcomes (steps 23 to 28 of the adoption plan); Michael starts it | #40 |
 | CMS-26 | 25 Nov | Ruleset on main: no force push or deletion, merge or squash only, pull requests and the three CI jobs required (poteto D12, D14); Michael creates it | - |
 | CMS-30 | 24 Nov | Poteto pyramid refactor, group B: the database API (steps 13 to 22 of the adoption plan), built locally first | #39 |
@@ -133,6 +133,9 @@ merged to main; CI green; full e2e suite (132 tests) passed on the merged tree
 - Power cut: resumes from cache without re-pairing; time to playback; clock with no RTC battery.
 - Storage persist answer; an update too big is refused, old content kept.
 - Record pass, fail or not run, with photos and OS, Chromium and build versions.
+
+**Evidence**
+Round 1 run 26-28 Nov on the stage 0 test site: setup, R1-R5, R7-R9 pass; R6 power cuts fail (2 of 5 needed a site visit). Report: https://claude.ai/artifact/JadWJ7VHzjPtu2vfVBDEUB
 
 ### CMS-5
 
