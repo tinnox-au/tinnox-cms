@@ -9,7 +9,7 @@
  * sleeps for a guessed time, and a loser that ends without having waited fails the test at
  * once, with a message, instead of passing on luck.
  *
- * Three groups:
+ * Four groups:
  *
  *  1. One race per constraint a route maps to an answer (CONSTRAINTS of @tinnox/db, step 26).
  *     For each, the request that maps the constraint is the loser, and the test pins who
@@ -29,6 +29,11 @@
  *     injected error can reach: the test says why.
  *  3. The pairs section 4.2 lists as not covered: a revoke against a revoke, against a player's
  *     reset and against a claim, and a single-session sign-out against a request in flight.
+ *  4. A screen deleted (DELETE /api/displays/:id, CMS-41, migration 0017) while it is being
+ *     edited, published or pushed to, paired, revoked, reset by its player or reported on, in
+ *     both orders: the request that comes second waits, and then either answers 404 or the
+ *     delete undoes what the first one did to the screen's player. No constraint and no guard
+ *     is raised. The describe's comment says why the alert check has no race there.
  *
  * Rule 2 (AGENTS.md): two of the races have a bystander in another organisation, sent while the
  * winner still holds its locks; it must answer without waiting, and as if it were alone.
@@ -392,6 +397,8 @@ const CONSTRAINT_RACES: readonly ConstraintRace[] = [
     refusedBy: null,
   },
   {
+    // The publish's FOR SHARE on the playlist (loadPlaylistDrafts) waits for the delete, then
+    // finds no live playlist.
     constraints: ['display_assigned_playlist_fk'],
     winner: 'DELETE /api/playlists/:id',
     loser: 'POST /api/playlists/:id/publish, which assigns the playlist',
@@ -417,6 +424,7 @@ const CONSTRAINT_RACES: readonly ConstraintRace[] = [
     refusedBy: null,
   },
   {
+    // The display's FOR SHARE on the schedule waits for the delete, then finds no row.
     constraints: ['display_assigned_schedule_fk'],
     winner: 'DELETE /api/schedules/:id',
     loser: 'PATCH /api/displays/:id assigning that schedule',
@@ -436,6 +444,8 @@ const CONSTRAINT_RACES: readonly ConstraintRace[] = [
     refusedBy: null,
   },
   {
+    // The delete's FOR UPDATE on the schedule waits for the assignment's FOR SHARE, then finds
+    // the screen that has it.
     constraints: ['display_assigned_schedule_fk'],
     winner: 'PATCH /api/displays/:id assigning the schedule',
     loser: 'DELETE /api/schedules/:id',
@@ -458,6 +468,7 @@ const CONSTRAINT_RACES: readonly ConstraintRace[] = [
     refusedBy: null,
   },
   {
+    // The display's FOR SHARE on the layout waits for the delete, then finds no row.
     constraints: ['display_assigned_layout_fk'],
     winner: 'DELETE /api/layouts/:id',
     loser: 'PATCH /api/displays/:id assigning that layout',
@@ -482,6 +493,8 @@ const CONSTRAINT_RACES: readonly ConstraintRace[] = [
     refusedBy: null,
   },
   {
+    // The delete's FOR UPDATE on the layout waits for the assignment's FOR SHARE, then finds
+    // the screen that has it.
     constraints: ['display_assigned_layout_fk'],
     winner: 'PATCH /api/displays/:id assigning the layout',
     loser: 'DELETE /api/layouts/:id',
@@ -505,6 +518,8 @@ const CONSTRAINT_RACES: readonly ConstraintRace[] = [
     refusedBy: null,
   },
   {
+    // The save's FOR SHARE on every playlist it names (saveSchedule) waits for the delete, then
+    // finds the default playlist not live.
     constraints: ['schedule_default_playlist_fk', 'schedule_default_playlist_guard'],
     winner: 'DELETE /api/playlists/:id',
     loser: 'POST /api/schedules with that default playlist',
@@ -524,6 +539,7 @@ const CONSTRAINT_RACES: readonly ConstraintRace[] = [
     refusedBy: null,
   },
   {
+    // The same FOR SHARE of saveSchedule, for the playlist of an event.
     constraints: ['schedule_event_playlist_fk', 'schedule_event_playlist_guard'],
     winner: 'DELETE /api/playlists/:id',
     loser: 'POST /api/schedules with an event for that playlist',
@@ -548,6 +564,8 @@ const CONSTRAINT_RACES: readonly ConstraintRace[] = [
     refusedBy: null,
   },
   {
+    // The save's FOR SHARE on every playlist of its zones (saveLayout) waits for the delete,
+    // then finds one not live.
     constraints: ['layout_zone_playlist_fk', 'layout_zone_playlist_guard'],
     winner: 'DELETE /api/playlists/:id',
     loser: 'POST /api/layouts with a zone for that playlist',
@@ -593,6 +611,8 @@ const CONSTRAINT_RACES: readonly ConstraintRace[] = [
     refusedBy: null,
   },
   {
+    // The delete's FOR UPDATE on the media row waits for the save's FOR KEY SHARE, then finds
+    // the playlist that uses the file.
     constraints: ['playlist_item_media_id_org_id_fkey'],
     winner: 'PUT /api/playlists/:id with the file',
     loser: 'DELETE /api/media/:id',
@@ -617,6 +637,8 @@ const CONSTRAINT_RACES: readonly ConstraintRace[] = [
     refusedBy: null,
   },
   {
+    // The save's FOR KEY SHARE on the app row (loadAppRecords) waits for the delete, then finds
+    // no row.
     constraints: ['playlist_item_app_fk'],
     winner: 'DELETE /api/apps/:id',
     loser: 'PUT /api/playlists/:id with that app',
@@ -641,6 +663,8 @@ const CONSTRAINT_RACES: readonly ConstraintRace[] = [
     refusedBy: null,
   },
   {
+    // The delete's FOR UPDATE on the app row waits for the save's FOR KEY SHARE, then finds the
+    // playlist that uses the app.
     constraints: ['playlist_item_app_fk'],
     winner: 'PUT /api/playlists/:id with the app',
     loser: 'DELETE /api/apps/:id',
@@ -720,7 +744,8 @@ const CONSTRAINT_RACES: readonly ConstraintRace[] = [
     refusedBy: 'membership_org_display_name_key',
   },
   {
-    // Under the membership lock the second invite's own check sees the first.
+    // The membership lock (lockMembership) makes the second invite wait; its own check of the
+    // address then sees the first.
     constraints: ['member_invite_pending_email_key'],
     winner: 'POST /api/invites',
     loser: 'POST /api/invites for the same address',
@@ -739,6 +764,7 @@ const CONSTRAINT_RACES: readonly ConstraintRace[] = [
     refusedBy: null,
   },
   {
+    // The same membership lock (lockMembership), then the second invite's own check of the name.
     constraints: ['member_invite_pending_name_key'],
     winner: 'POST /api/invites',
     loser: 'POST /api/invites with the same name',
@@ -781,7 +807,7 @@ const RACED_ELSEWHERE_OR_NOT: { readonly [Name in ConstraintName]?: string } = {
   membership_last_owner:
     'the describe "the last two Owners" below: it needs an organisation of its own, and its loser is refused before the route\'s check or the trigger is reached',
   display_tag_display_fk:
-    'no route maps it: PATCH /api/displays/:id holds the display FOR UPDATE before it writes its tags, and nothing deletes a display',
+    'no route maps it: PATCH /api/displays/:id holds the live display FOR UPDATE before it writes its tags, and a deleted screen keeps its row (deleted_at, 0017), so the key cannot fire; the edit that loses to a delete, in the describe "a screen deleted while something else happens to it" below, answers 404',
   media_tag_media_fk:
     'no route maps it: PATCH /api/media/:id holds the media row FOR UPDATE before it writes its tags, so a delete of the file waits for it',
   media_default_duration_images_only:
@@ -1092,15 +1118,18 @@ describe('one Idempotency-Key, two requests (publication_idempotency; TST-9)', (
 
   // TST-9, the answer of the keyed re-run to a media foreign key (BEH-5 of the group C review:
   // the second attempt carries the route's constraint map, where it once answered a raw 500).
-  // PINNED BY INJECTION, and it cannot be otherwise: PostgreSQL cannot be brought to raise this
-  // error on the re-run. (1) The re-run publishes only when the key has no publication, but it
-  // runs because the key's index refused the first attempt, so a publication with the key is
-  // committed, and publications are immutable for every role (publication_immutable), so it is
-  // still there: the re-run replays. (2) A publish holds FOR KEY SHARE on every file it
-  // publishes, so no transaction can delete one under it. (3) An asset row for any other file
-  // is refused first by publication_asset_guard (23001, no constraint name). So both errors
-  // here are the test's own, sent in place of the statement (`never-sent`), with the SQLSTATE
-  // and constraint name PostgreSQL would give them.
+  // PINNED BY INJECTION, because the 409 this mapping gives is unreachable: no requests, in any
+  // order, make PostgreSQL raise the media foreign key on the re-run. (1) The re-run runs
+  // because the key's index refused the first attempt, so a publication with the key is
+  // committed, and a publication is immutable for every role (publication_immutable): the re-run
+  // finds it and replays, and inserts no asset row. (2) Were it to publish, it holds FOR KEY
+  // SHARE on every file it publishes, so no transaction can delete one under it. (3) An asset
+  // row for any other file is refused first by publication_asset_guard (23001, no constraint
+  // name). So both errors below are the test's own, sent in place of the statement
+  // (`never-sent`) with the SQLSTATE and constraint name PostgreSQL would give them. What this
+  // pins is only that the second attempt applies the map; it is not evidence that the answer
+  // can occur. The plan asks for this violation "driven through PostgreSQL" (step 33, inherited
+  // from group C), which cannot be done; whether the mapping stays is Michael's to decide.
   it.each([
     [
       'publish',
@@ -1323,5 +1352,501 @@ describe('a single-session sign-out against a request in flight (section 4.2)', 
     await expectError(lost, 'unauthenticated');
     expect(await folders(name)).toBe(0);
     expect(await auditRowsAfter(mark)).toEqual(['auth.logout:success']);
+  });
+});
+
+/** What is left of a screen: whether it is deleted, and what it still has assigned or tagged. */
+async function screen(
+  displayId: string,
+): Promise<{ deleted: boolean; assigned: number; tags: number } | undefined> {
+  const rows = await administrator<{ deleted: boolean; assigned: number; tags: number }>(
+    `SELECT d.deleted_at IS NOT NULL AS deleted,
+            num_nonnulls(d.assigned_playlist_id, d.assigned_schedule_id, d.assigned_layout_id) AS assigned,
+            (SELECT count(*)::int FROM public.display_tag dt WHERE dt.display_id = d.id) AS tags
+       FROM public.display d WHERE d.id = $1`,
+    [displayId],
+  );
+  return rows[0];
+}
+/** A deleted screen: the row kept, nothing assigned to it, no tag on it (0017). */
+const DELETED = { deleted: true, assigned: 0, tags: 0 };
+const LIVE = { deleted: false };
+const SCREEN_GONE = { error: 'not_found', message: 'The screen was not found.' };
+
+/** What the screen's delete recorded: the claims it cancelled and the registration it revoked. */
+async function deleteRecorded(displayId: string): Promise<unknown> {
+  const rows = await administrator<{ detail: unknown }>(
+    `SELECT detail FROM public.audit_event
+      WHERE action = 'display.delete' AND object_id::text = $1 ORDER BY id`,
+    [displayId],
+  );
+  return rows.map((row) => row.detail);
+}
+
+/*
+ * Left out on purpose: the e-mail alert check (apps/api/src/alerts.ts) against a delete. Its
+ * insert of an episode takes a share of the display row, so it would wait for a delete that is
+ * committing and then open an episode for the deleted screen: the stray e-mail its stated
+ * shortcut accepts for any revocation that commits during a run ("settings and the active
+ * registration are read once per organisation per run"), and the next run closes that episode
+ * silently (display-alerts.test.ts, "closes the open episode of a deleted screen silently"). No
+ * race is written because the check runs over every organisation of the shared test database
+ * and a hold cannot tell its transactions apart by statement text, so the winner could be
+ * another file's organisation.
+ */
+describe('a screen deleted while something else happens to it (CMS-41, migration 0017)', () => {
+  const remove = (displayId: string) => (): Promise<Response> =>
+    send(owner, 'DELETE', `/api/displays/${displayId}`);
+  /** The poll of the player that asked for `pairing`: for a claimed session, the collection. */
+  const collect = (pairing: Pairing) => (): Promise<Response> =>
+    fetch(`${t.url}/player/pairing/${pairing.pairingId}`, {
+      headers: { authorization: `Bearer ${pairing.pollingToken}` },
+    });
+  /**
+   * A report of a player. The first inserts the screen's delivery row, whose foreign key takes a
+   * share of the display row; a later one inserts no delivery row, and meets the display row only
+   * when its history row is kept (one per display in ten seconds), whose foreign key takes that
+   * share. That share is where a report meets a delete, which holds the row FOR UPDATE.
+   */
+  const heartbeat =
+    (displayId: string, player: PairedPlayer, seq = 1) =>
+    (): Promise<Response> =>
+      fetch(`${t.url}/player/heartbeat`, {
+        method: 'POST',
+        headers: { ...player.headers, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          schemaVersion: 1,
+          seq,
+          sentAt: new Date().toISOString(),
+          displayId,
+          downloadedPublicationId: null,
+          activePublicationId: null,
+          activeItemIndex: null,
+          playerState: 'idle',
+          staging: null,
+          errors: [],
+          player: { version: 'integration-test', storagePersisted: null, online: true },
+        }),
+      });
+  /** The heartbeat's history row, its last write. */
+  const AT_HEARTBEAT_LOG = /^\s*INSERT INTO heartbeat_log/;
+  /** What the screen's player last reported, as stored. */
+  const reported = (
+    displayId: string,
+  ): Promise<{ registration: string | null; seq: string | null; desired: string | null }[]> =>
+    administrator(
+      `SELECT reporting_registration_id AS registration, last_seq::text AS seq,
+              desired_publication_id AS desired
+         FROM public.display_delivery WHERE display_id = $1`,
+      [displayId],
+    );
+  const displayTag = (): Promise<string> =>
+    created(
+      send(owner, 'POST', '/api/tags', { scope: 'display', name: randomUUID().slice(0, 12) }),
+    );
+
+  it('two deletes of one screen at once: the second waits for the screen’s pairing lock and answers 404; one delete, one audit row', async () => {
+    const display = await pairedDisplay('Deleted twice');
+    const mark = await newestAuditRow();
+    const { won, lost } = await race(remove(display.id), remove(display.id), {
+      locktype: 'advisory',
+    });
+    expect(won.status).toBe(204);
+    expect(await answered(lost)).toEqual(SCREEN_GONE);
+    expect(faults.databaseErrors()).toEqual([]);
+    expect(await screen(display.id)).toEqual(DELETED);
+    expect(await registrations(display.id)).toEqual([{ active: false, reason: 'operator' }]);
+    expect(await auditRowsAfter(mark)).toEqual(['display.delete:success']);
+    expect(await manifestStatus(display.player)).toBe(401);
+  });
+
+  it('an edit that is committing against a delete: the delete waits for the display row, then takes off the tag the edit put on', async () => {
+    const display = await createDisplay(owner, org, 'Edited, then deleted');
+    const tag = await displayTag();
+    const mark = await newestAuditRow();
+    const { won, lost } = await race(
+      () => send(owner, 'PATCH', `/api/displays/${display.id}`, { name: 'Renamed', tagIds: [tag] }),
+      remove(display.id),
+    );
+    expect(won.status).toBe(200);
+    expect(lost.status).toBe(204);
+    expect(faults.databaseErrors()).toEqual([]);
+    expect(await screen(display.id)).toEqual(DELETED);
+    expect(await deleteRecorded(display.id)).toMatchObject([{ tagCount: 1 }]);
+    expect(await auditRowsAfter(mark)).toEqual([
+      'display.update:success',
+      'display.delete:success',
+    ]);
+  });
+
+  it('an edit against a delete that is committing: the edit waits for the display row and answers 404; no tag is written, and neither display_tag_display_fk nor display_deleted_guard has to refuse it', async () => {
+    const display = await createDisplay(owner, org, 'Deleted, then edited');
+    const tag = await displayTag();
+    const mark = await newestAuditRow();
+    const { won, lost } = await race(remove(display.id), () =>
+      send(owner, 'PATCH', `/api/displays/${display.id}`, { name: 'Back again', tagIds: [tag] }),
+    );
+    expect(won.status).toBe(204);
+    expect(await answered(lost)).toEqual(SCREEN_GONE);
+    // The edit's own lock and check decided: PostgreSQL refused nothing.
+    expect(faults.databaseErrors()).toEqual([]);
+    expect(await screen(display.id)).toEqual(DELETED);
+    expect(await countOf('display', 'name', 'Back again', `AND x.id = '${display.id}'`)).toBe(0);
+    expect(await auditRowsAfter(mark)).toEqual(['display.delete:success']);
+  });
+
+  it('a publish that is committing against a delete: the delete waits for the display row; the publication stays, as publications do, and the screen is deleted with nothing assigned', async () => {
+    const mine = await publishable(owner, org, 'Published, then deleted');
+    const key = randomUUID();
+    const mark = await newestAuditRow();
+    const { won, lost } = await race(
+      publish(owner, mine.playlistId, mine.displayId, key),
+      remove(mine.displayId),
+    );
+    expect(won.status).toBe(201);
+    const { publicationId } = (await won.json()) as { publicationId: string };
+    expect(lost.status).toBe(204);
+    expect(faults.databaseErrors()).toEqual([]);
+    expect(await screen(mine.displayId)).toEqual(DELETED);
+    expect(await publicationsOf(mine.displayId)).toBe(1);
+    // The delete does not touch the pointer (U-14): it still names what was published.
+    expect(await reported(mine.displayId)).toMatchObject([{ desired: publicationId }]);
+    expect(await auditRowsAfter(mark)).toEqual([
+      'publication.create:success',
+      'display.delete:success',
+    ]);
+    // PINNED, as found (Observation), not decided: a repeat of that publish, with its key,
+    // replays the publication of a screen that is now deleted, where every other request for
+    // the screen answers 404. changeOncePerKey looks the key up before it locks the display; a
+    // push looks its screens up first, and its repeat answers 404 (the next test).
+    const repeat = await publish(owner, mine.playlistId, mine.displayId, key)();
+    expect(repeat.status).toBe(200);
+    expect(await repeat.json()).toMatchObject({ publicationId, replayed: true });
+    expect(
+      await answered(await publish(owner, mine.playlistId, mine.displayId, randomUUID())()),
+    ).toEqual(SCREEN_GONE);
+    // The playlist the screen had is free to go.
+    expect((await deletePlaylist(mine.playlistId)()).status).toBe(204);
+  });
+
+  it('a push that is committing against a delete: the delete waits for the display row; the publication stays, and a repeat of the push with its key answers 404', async () => {
+    const mine = await publishable(owner, org, 'Pushed, then deleted');
+    const key = randomUUID();
+    const mark = await newestAuditRow();
+    const { won, lost } = await race(
+      () => push(owner, [mine.displayId], key),
+      remove(mine.displayId),
+    );
+    expect(won.status).toBe(200);
+    expect(await won.json()).toMatchObject({
+      results: [{ displayId: mine.displayId, outcome: 'published' }],
+    });
+    expect(lost.status).toBe(204);
+    expect(faults.databaseErrors()).toEqual([]);
+    expect(await screen(mine.displayId)).toEqual(DELETED);
+    expect(await publicationsOf(mine.displayId)).toBe(1);
+    expect(await auditRowsAfter(mark)).toEqual([
+      'publication.create:success',
+      'display.delete:success',
+    ]);
+    // The push reads its screens before the key: the repeat does not replay.
+    expect(await answered(await push(owner, [mine.displayId], key))).toEqual(SCREEN_GONE);
+  });
+
+  it('a publish against a delete that is committing: the publish waits for the display row and answers 404; nothing is published or audited', async () => {
+    const mine = await publishable(owner, org, 'Deleted, then published');
+    const mark = await newestAuditRow();
+    const { won, lost } = await race(
+      remove(mine.displayId),
+      publish(owner, mine.playlistId, mine.displayId, randomUUID()),
+    );
+    expect(won.status).toBe(204);
+    expect(await answered(lost)).toEqual(SCREEN_GONE);
+    expect(faults.databaseErrors()).toEqual([]);
+    expect(await screen(mine.displayId)).toEqual(DELETED);
+    expect(await publicationsOf(mine.displayId)).toBe(0);
+    expect(await reported(mine.displayId)).toEqual([]);
+    expect(await auditRowsAfter(mark)).toEqual(['display.delete:success']);
+  });
+
+  it('a push of two screens against a delete of the second that is committing: the push waits at the second and answers 404 without results; the first stays published (the stated shortcut of routes/push.ts)', async () => {
+    const kept = await publishable(owner, org, 'Pushed and kept');
+    const gone = await publishable(owner, org, 'Deleted under a push');
+    const mark = await newestAuditRow();
+    const { won, lost } = await race(remove(gone.displayId), () =>
+      push(owner, [kept.displayId, gone.displayId], randomUUID()),
+    );
+    expect(won.status).toBe(204);
+    expect(await answered(lost)).toEqual(SCREEN_GONE);
+    expect(faults.databaseErrors()).toEqual([]);
+    expect(await screen(gone.displayId)).toEqual(DELETED);
+    expect(await publicationsOf(gone.displayId)).toBe(0);
+    // Each screen is a transaction of its own: the first had committed before the push waited.
+    expect(await screen(kept.displayId)).toMatchObject(LIVE);
+    expect(await publicationsOf(kept.displayId)).toBe(1);
+    // The delete's row was written first; it committed after the first screen's publication.
+    expect(await auditRowsAfter(mark)).toEqual([
+      'display.delete:success',
+      'publication.create:success',
+    ]);
+  });
+
+  it('a claim that is committing against a delete: the delete waits for the pairing lock and then cancels that claim, so the new player collects nothing', async () => {
+    const display = await pairedDisplay('Claimed, then deleted');
+    const pairing = await newPairing();
+    const mark = await newestAuditRow();
+    const { won, lost } = await race(claim(display.id, pairing), remove(display.id), {
+      locktype: 'advisory',
+    });
+    expect(won.status).toBe(200);
+    expect(lost.status).toBe(204);
+    expect(faults.databaseErrors()).toEqual([]);
+    expect(await screen(display.id)).toEqual(DELETED);
+    // The claim had ended the old player; the delete ended the claim.
+    expect(await deleteRecorded(display.id)).toMatchObject([
+      { cancelledPairingIds: [pairing.pairingId], revokedRegistrationId: null },
+    ]);
+    expect(await poll(pairing)).toEqual({ status: 'expired' });
+    expect(await registrations(display.id)).toEqual([{ active: false, reason: 'replaced' }]);
+    expect(await auditRowsAfter(mark)).toEqual([
+      'pairing.claim:success',
+      'player.revoke:success:replaced',
+      'display.delete:success',
+    ]);
+    expect(await manifestStatus(display.player)).toBe(401);
+  });
+
+  it('a claim against a delete that is committing: the claim waits for the pairing lock, reads the screen again and answers 404; the code is not used up and no wrong attempt is counted', async () => {
+    const display = await pairedDisplay('Deleted, then claimed');
+    const other = await createDisplay(owner, org, 'Claimed instead');
+    const pairing = await newPairing();
+    const wrongAttempts = (): Promise<number> =>
+      countOf('pairing_claim_failure', 'membership_id', org.membershipId);
+    const wrongBefore = await wrongAttempts();
+    const mark = await newestAuditRow();
+    const { won, lost } = await race(remove(display.id), claim(display.id, pairing), {
+      locktype: 'advisory',
+    });
+    expect(won.status).toBe(204);
+    expect(await answered(lost)).toEqual(SCREEN_GONE);
+    expect(faults.databaseErrors()).toEqual([]);
+    expect(await screen(display.id)).toEqual(DELETED);
+    expect(await registrations(display.id)).toEqual([{ active: false, reason: 'operator' }]);
+    expect(await wrongAttempts()).toBe(wrongBefore);
+    expect(await auditRowsAfter(mark)).toEqual(['display.delete:success']);
+    // The code still pairs another screen.
+    expect(await poll(pairing)).toMatchObject({ status: 'pending' });
+    expect((await claim(other.id, pairing)()).status).toBe(200);
+  });
+
+  it('a collection that is committing against a delete: the delete waits for the pairing session row and then revokes the registration the collection made; the credential the player was given answers 401', async () => {
+    const display = await createDisplay(owner, org, 'Collected, then deleted');
+    const pairing = await newPairing();
+    expect((await claim(display.id, pairing)()).status).toBe(200);
+    const mark = await newestAuditRow();
+    const { won, lost } = await race(collect(pairing), remove(display.id));
+    expect(won.status).toBe(200);
+    const collected = (await won.json()) as {
+      status: string;
+      deviceToken: string;
+      registrationId: string;
+    };
+    expect(collected.status).toBe('claimed');
+    expect(lost.status).toBe(204);
+    expect(faults.databaseErrors()).toEqual([]);
+    expect(await screen(display.id)).toEqual(DELETED);
+    // Nothing was left to cancel: the claim was collected. The registration it made is ended.
+    expect(await deleteRecorded(display.id)).toMatchObject([
+      { cancelledPairingIds: [], revokedRegistrationId: collected.registrationId },
+    ]);
+    expect(await registrations(display.id)).toEqual([{ active: false, reason: 'operator' }]);
+    expect(await auditRowsAfter(mark)).toEqual([
+      'pairing.complete:success',
+      'display.delete:success',
+    ]);
+    const manifest = await fetch(`${t.url}/player/manifest`, {
+      headers: { authorization: `Bearer ${collected.deviceToken}` },
+    });
+    await expectError(manifest, 'device_revoked');
+  });
+
+  it('a collection against a delete that is committing: the poll waits for the pairing session row the delete cancelled and answers expired; no player is made', async () => {
+    const display = await createDisplay(owner, org, 'Deleted, then collected');
+    const pairing = await newPairing();
+    expect((await claim(display.id, pairing)()).status).toBe(200);
+    const mark = await newestAuditRow();
+    const { won, lost } = await race(remove(display.id), collect(pairing));
+    expect(won.status).toBe(204);
+    expect(lost.status).toBe(200);
+    expect(await lost.json()).toEqual({ status: 'expired' });
+    expect(faults.databaseErrors()).toEqual([]);
+    expect(await screen(display.id)).toEqual(DELETED);
+    expect(await deleteRecorded(display.id)).toMatchObject([
+      { cancelledPairingIds: [pairing.pairingId], revokedRegistrationId: null },
+    ]);
+    expect(await registrations(display.id)).toEqual([]);
+    expect(await auditRowsAfter(mark)).toEqual(['display.delete:success']);
+  });
+
+  it('an operator revoke that is committing against a delete: the delete waits for the pairing lock and finds no player left to end; the registration is ended once', async () => {
+    const display = await pairedDisplay('Revoked, then deleted');
+    const mark = await newestAuditRow();
+    const { won, lost } = await race(revoke(display.id), remove(display.id), {
+      locktype: 'advisory',
+    });
+    expect(won.status).toBe(200);
+    expect(lost.status).toBe(204);
+    expect(faults.databaseErrors()).toEqual([]);
+    expect(await screen(display.id)).toEqual(DELETED);
+    expect(await deleteRecorded(display.id)).toMatchObject([{ revokedRegistrationId: null }]);
+    expect(await registrations(display.id)).toEqual([{ active: false, reason: 'operator' }]);
+    expect(await auditRowsAfter(mark)).toEqual([
+      'player.revoke:success:operator',
+      'display.delete:success',
+    ]);
+  });
+
+  it('an operator revoke against a delete that is committing: the revoke waits for the pairing lock and answers 404; the delete had ended the player, and the revoke writes nothing', async () => {
+    const display = await pairedDisplay('Deleted, then revoked');
+    const mark = await newestAuditRow();
+    const { won, lost } = await race(remove(display.id), revoke(display.id), {
+      locktype: 'advisory',
+    });
+    expect(won.status).toBe(204);
+    expect(await answered(lost)).toEqual(SCREEN_GONE);
+    expect(faults.databaseErrors()).toEqual([]);
+    expect(await screen(display.id)).toEqual(DELETED);
+    expect(await registrations(display.id)).toEqual([{ active: false, reason: 'operator' }]);
+    expect(await auditRowsAfter(mark)).toEqual(['display.delete:success']);
+    expect(await manifestStatus(display.player)).toBe(401);
+  });
+
+  it('a player’s reset that is committing against a delete: the delete waits for the registration row the reset ended, finds no player left to end and deletes the screen; the reason stays player_reset', async () => {
+    const display = await pairedDisplay('Reset, then deleted');
+    const mark = await newestAuditRow();
+    const { won, lost } = await race(reset(display.player), remove(display.id));
+    expect(won.status).toBe(204);
+    expect(lost.status).toBe(204);
+    expect(faults.databaseErrors()).toEqual([]);
+    expect(await screen(display.id)).toEqual(DELETED);
+    expect(await deleteRecorded(display.id)).toMatchObject([{ revokedRegistrationId: null }]);
+    expect(await registrations(display.id)).toEqual([{ active: false, reason: 'player_reset' }]);
+    expect(await auditRowsAfter(mark)).toEqual([
+      'player.revoke:success:player_reset',
+      'display.delete:success',
+    ]);
+  });
+
+  it('a player’s reset against a delete that is committing: past its credential lookup, the reset waits for the registration row the delete ended, finds itself revoked, answers 204 and writes nothing', async () => {
+    const display = await pairedDisplay('Deleted, then reset');
+    const mark = await newestAuditRow();
+    const { won, lost } = await race(remove(display.id), reset(display.player));
+    expect(won.status).toBe(204);
+    expect(lost.status).toBe(204);
+    expect(faults.databaseErrors()).toEqual([]);
+    expect(await screen(display.id)).toEqual(DELETED);
+    expect(await deleteRecorded(display.id)).toMatchObject([
+      { revokedRegistrationId: display.player.registrationId },
+    ]);
+    expect(await registrations(display.id)).toEqual([{ active: false, reason: 'operator' }]);
+    expect(await auditRowsAfter(mark)).toEqual(['display.delete:success']);
+    expect(await manifestStatus(display.player)).toBe(401);
+  });
+
+  it('a player’s first report that is committing against a delete: the delete waits for the display row; the report is stored for a screen that is then deleted, and the player’s next request answers 401', async () => {
+    const display = await pairedDisplay('Reported, then deleted');
+    const mark = await newestAuditRow();
+    const { won, lost } = await race(heartbeat(display.id, display.player), remove(display.id), {
+      wrote: AT_HEARTBEAT_LOG,
+    });
+    expect(won.status).toBe(200);
+    expect(await won.json()).toMatchObject({ accepted: true, ignoredReason: null });
+    expect(lost.status).toBe(204);
+    expect(faults.databaseErrors()).toEqual([]);
+    expect(await screen(display.id)).toEqual(DELETED);
+    expect(await reported(display.id)).toEqual([
+      { registration: display.player.registrationId, seq: '1', desired: null },
+    ]);
+    expect(await registrations(display.id)).toEqual([{ active: false, reason: 'operator' }]);
+    // A heartbeat is telemetry (D3): only the delete is audited.
+    expect(await auditRowsAfter(mark)).toEqual(['display.delete:success']);
+    expect(await manifestStatus(display.player)).toBe(401);
+  });
+
+  it('a player’s first report against a delete that is committing: past its credential lookup, it waits for the display row, stores nothing of a revoked registration and still answers accepted (D8; Michael, 25 Nov 2026); the next request answers 401', async () => {
+    const display = await pairedDisplay('Deleted, then reported');
+    const mark = await newestAuditRow();
+    const { won, lost } = await race(remove(display.id), heartbeat(display.id, display.player));
+    expect(won.status).toBe(204);
+    expect(lost.status).toBe(200);
+    expect(await lost.json()).toMatchObject({ accepted: true, ignoredReason: null });
+    expect(faults.databaseErrors()).toEqual([]);
+    expect(await screen(display.id)).toEqual(DELETED);
+    // The delivery row the report made holds no report: its registration was no longer active.
+    expect(await reported(display.id)).toEqual([{ registration: null, seq: null, desired: null }]);
+    expect(await countOf('heartbeat_log', 'display_id', display.id)).toBe(0);
+    expect(await auditRowsAfter(mark)).toEqual(['display.delete:success']);
+    await expectError(await heartbeat(display.id, display.player)(), 'device_revoked');
+  });
+
+  /**
+   * A screen whose player has reported once, with that report's history row made older than the
+   * sampling interval, so that the next report keeps a history row: the write by which a later
+   * report meets the display row. Within the interval a later report keeps none, takes no lock a
+   * delete holds and commits without waiting, as the D8 window allows.
+   */
+  async function reportedOnce(name: string): Promise<{ id: string; player: PairedPlayer }> {
+    const display = await pairedDisplay(name);
+    expect((await heartbeat(display.id, display.player)()).status).toBe(200);
+    await admin.query(
+      `UPDATE public.heartbeat_log SET received_at = received_at - interval '1 minute'
+        WHERE display_id = $1`,
+      [display.id],
+    );
+    return display;
+  }
+
+  it('a player’s later report that is committing against a delete: the delete waits for the display row the report’s history row shares; the report is stored for a screen that is then deleted, and the player’s next request answers 401', async () => {
+    const display = await reportedOnce('Reported again, then deleted');
+    const mark = await newestAuditRow();
+    const { won, lost } = await race(heartbeat(display.id, display.player, 2), remove(display.id), {
+      wrote: AT_HEARTBEAT_LOG,
+    });
+    expect(won.status).toBe(200);
+    expect(await won.json()).toMatchObject({ accepted: true, ignoredReason: null });
+    expect(lost.status).toBe(204);
+    expect(faults.databaseErrors()).toEqual([]);
+    expect(await screen(display.id)).toEqual(DELETED);
+    expect(await reported(display.id)).toEqual([
+      { registration: display.player.registrationId, seq: '2', desired: null },
+    ]);
+    expect(await countOf('heartbeat_log', 'display_id', display.id)).toBe(2);
+    expect(await registrations(display.id)).toEqual([{ active: false, reason: 'operator' }]);
+    expect(await auditRowsAfter(mark)).toEqual(['display.delete:success']);
+    expect(await manifestStatus(display.player)).toBe(401);
+  });
+
+  it('a player’s later report against a delete that is committing: past its credential lookup, it stores its report before it waits for the display row at its history row, and answers accepted (D8); the next request answers 401', async () => {
+    const display = await reportedOnce('Deleted, then reported again');
+    const mark = await newestAuditRow();
+    const { won, lost } = await race(remove(display.id), heartbeat(display.id, display.player, 2));
+    expect(won.status).toBe(204);
+    expect(lost.status).toBe(200);
+    expect(await lost.json()).toMatchObject({ accepted: true, ignoredReason: null });
+    expect(faults.databaseErrors()).toEqual([]);
+    expect(await screen(display.id)).toEqual(DELETED);
+    // PINNED, as found (Observation), not decided: unlike a first report, which waits before its
+    // conditional UPDATE and then reads the revocation, a later report has made that UPDATE
+    // before it waits, while the revocation was not yet committed, so it is stored with the
+    // revoked registration. That is the window D8 states (a request past its credential lookup
+    // finishes its transaction), and nothing reads it: the status view and the alert check count
+    // only a report from the active registration.
+    expect(await reported(display.id)).toEqual([
+      { registration: display.player.registrationId, seq: '2', desired: null },
+    ]);
+    expect(await countOf('heartbeat_log', 'display_id', display.id)).toBe(2);
+    expect(await registrations(display.id)).toEqual([{ active: false, reason: 'operator' }]);
+    expect(await auditRowsAfter(mark)).toEqual(['display.delete:success']);
+    await expectError(await heartbeat(display.id, display.player, 3)(), 'device_revoked');
   });
 });

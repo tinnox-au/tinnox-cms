@@ -86,7 +86,7 @@ const NESTED_REVOKE = nested(
 // Defined outside the callbacks below: lint reports the form it can read
 // (tinnox/no-nested-transaction), and these cases are the rest, which only the run-time guard sees.
 const writeRefusal = (pool: Pool): Promise<void> => auditStandalone(databaseOn(pool), refusal);
-const endSession = (pool: Pool): Promise<boolean> =>
+const endSession = (pool: Pool): Promise<{ idToken: string | null } | null> =>
   sessionRevokeUnaudited(databaseOn(pool), Buffer.alloc(32));
 
 describe('auditStandalone (D2)', () => {
@@ -265,15 +265,21 @@ describe('AuditInput (AG-3.3, AG-3.4, D19)', () => {
 });
 
 describe('sessionRevokeUnaudited (CX-01 residual)', () => {
-  it('ends the session in one statement on the pool and says whether one was live', async () => {
+  it('ends the session in one statement on the pool and says whether one was live, with the ID token it held', async () => {
     const idHash = Buffer.alloc(32, 7);
-    const live = recordingPool([{ '?column?': 1 }]);
-    expect(await sessionRevokeUnaudited(databaseOn(live.pool), idHash)).toBe(true);
+    const live = recordingPool([{ id_token: 'header.payload.signature' }]);
+    expect(await sessionRevokeUnaudited(databaseOn(live.pool), idHash)).toEqual({
+      idToken: 'header.payload.signature',
+    });
     expect(live.onPool).toEqual([
-      { text: 'SELECT 1 FROM sec.session_revoke($1)', values: [idHash] },
+      { text: 'SELECT id_token FROM sec.session_revoke($1)', values: [idHash] },
     ]);
     expect(live.connectionsTaken()).toBe(0);
-    expect(await sessionRevokeUnaudited(databaseOn(recordingPool().pool), idHash)).toBe(false);
+    // A session the provider gave no ID token for was live all the same.
+    expect(
+      await sessionRevokeUnaudited(databaseOn(recordingPool([{ id_token: null }]).pool), idHash),
+    ).toEqual({ idToken: null });
+    expect(await sessionRevokeUnaudited(databaseOn(recordingPool().pool), idHash)).toBeNull();
   });
 
   it('is refused while a transaction is open on the same path, with the revocation to use on the outer tx (U-3)', async () => {

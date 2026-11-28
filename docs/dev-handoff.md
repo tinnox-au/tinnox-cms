@@ -142,7 +142,7 @@ deviceByTokenHash(tx, tokenHash): Promise<{ registrationId, orgId, displayId } |
 auditScoped(tx /* changeOrg */, event): Promise<void>                                             // @tinnox/db/testing only
 auditUnscoped(tx, event): Promise<void>                                                         // org_id NULL; @tinnox/db/testing only
 auditStandalone(db, event): Promise<void>                                                       // org_id NULL, refusals only
-sessionRevokeUnaudited(db, idHash): Promise<boolean>                                            // sign-out fallback only
+sessionRevokeUnaudited(db, idHash): Promise<{ idToken } | null>                                 // sign-out fallback only; null when no live session was left
 ```
 
 Hashes are `sha256(rawValue)` Buffers. Raw session ids, polling tokens and device tokens are never stored.

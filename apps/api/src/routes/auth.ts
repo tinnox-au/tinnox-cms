@@ -450,9 +450,10 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
    * A wait past lock_timeout (55P03) is answered by what the fallback found, because "try
    * again" is true only while the session may still be there: 503 with Retry-After when the
    * fallback failed too, as every other write answers a lock timeout; a sign-out's own answer
-   * when the fallback ended the session (with no ID token to hand the provider: the fallback
-   * does not read it); and the 401 of a session that is no longer live when another request had
-   * ended it. Every other failure keeps the answer it had.
+   * when the fallback ended the session, with the provider's end-session URL built from the ID
+   * token the fallback got back, as after any sign-out; and the 401 of a session that is no
+   * longer live when another request had ended it (Michael, 29 Nov 2026). Every other failure
+   * keeps the answer it had.
    */
   async function afterFailedSignOut(
     request: FastifyRequest,
@@ -461,17 +462,20 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
     failed: { readonly unconfirmed: boolean; readonly lockTimeout: boolean },
   ): Promise<{ readonly answer: LogoutResponse } | { readonly error: unknown }> {
     const fallback = await sessionRevokeUnaudited(ctx.db, idHash).then(
-      (ended) => (ended ? ('ended' as const) : ('nothing_to_end' as const)),
+      (ended) =>
+        ended === null
+          ? { found: 'nothing_to_end' as const }
+          : { found: 'ended' as const, idToken: ended.idToken },
       (revokeError: unknown) => {
         request.log.error({ err: revokeError }, 'sign-out could not end the session either');
-        return 'failed' as const;
+        return { found: 'failed' as const };
       },
     );
-    switch (fallback) {
+    switch (fallback.found) {
       case 'ended':
         request.log.error({ err: error }, 'sign-out was not audited; the session was ended anyway');
         if (!failed.lockTimeout) return { error };
-        return { answer: { redirectTo: await ctx.idp.endSessionUrl(null) } };
+        return { answer: { redirectTo: await ctx.idp.endSessionUrl(fallback.idToken) } };
       case 'nothing_to_end':
         request.log.error(
           { err: error },

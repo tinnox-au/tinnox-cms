@@ -540,12 +540,13 @@ export interface Operator {
  * Creates a session for the member through sec.session_create and returns a client that uses it.
  * `authTime` defaults to a minute from now, after any cut-off a test has set (even within the
  * same second, or with the database clock a little ahead; nothing checks an upper bound). Tests
- * of the cut-off pass their own.
+ * of the cut-off pass their own. `idToken` is what the provider would have issued; none unless
+ * given.
  */
 export async function signIn(
   t: TestApp,
   org: TestOrg,
-  options: { readonly authTime?: Date | null } = {},
+  options: { readonly authTime?: Date | null; readonly idToken?: string } = {},
 ): Promise<Operator> {
   const sessionId = randomBytes(32).toString('base64url');
   const csrfToken = randomBytes(32).toString('base64url');
@@ -560,7 +561,7 @@ export async function signIn(
         oidcSub: org.oidcSub,
         csrfToken,
         ttlSeconds: 3600,
-        idToken: null,
+        idToken: options.idToken ?? null,
         authTime: options.authTime === undefined ? new Date(Date.now() + 60_000) : options.authTime,
       }),
   );

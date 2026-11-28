@@ -68,6 +68,7 @@ import {
   PORTAL_ORIGIN,
   publishImages,
   push,
+  reachedBefore,
   readyImage,
   registeredRoutes,
   signIn,
@@ -219,6 +220,11 @@ let owner: Operator;
 let sql: Pool;
 let admin: pg.Client;
 
+/** Where the stand-in identity provider ends its own session. */
+const PROVIDER_SIGN_OUT = 'http://localhost:8080/sign-out';
+/** What the provider issued at sign-in; not a real token. */
+const ID_TOKEN = 'header.payload.signature';
+
 /** The subject the stand-in identity provider answers a sign-in with, and its last state. */
 let signingIn = '';
 let lastState = '';
@@ -234,7 +240,9 @@ const provider: IdentityProvider = {
   },
   completeLogin: () =>
     Promise.resolve({ sub: signingIn, acr: null, amr: [], idToken: null, authTime: null }),
-  endSessionUrl: () => Promise.resolve(null),
+  // Shows the ID token it was given, so a test can tell which sign-out handed one over.
+  endSessionUrl: (idToken) =>
+    Promise.resolve(idToken === null ? null : `${PROVIDER_SIGN_OUT}?id_token_hint=${idToken}`),
   check: () => Promise.resolve(true),
 };
 
@@ -862,7 +870,8 @@ const TABLE: Readonly<Record<string, Row | NoTransaction>> = {
   //  - a lock timeout rolled back too, and the fallback then ended the session, so the sign-out
   //    happened and answers as one, with no audit row (the same residual). "Try again" (503)
   //    would be untrue: there is nothing left to end. The cases where the fallback finds
-  //    nothing, or fails too, are in the describe at the end of this file;
+  //    nothing, or fails too, are in the describe "the sign-out catch-all says what happened"
+  //    below (the answers kept by Michael, 29 Nov 2026);
   //  - a lost COMMIT answer answers 500 commit_outcome_unknown; the first transaction did end
   //    the session and write its auth.logout row, and the fallback finds nothing to end.
   // The browser's cookie is cleared in every mode.
@@ -1286,9 +1295,9 @@ describe('the sign-out catch-all says what happened, in its answer and its log l
     'the accepted CX-01 residual: a sign-out whose change rolled back still ends the session, through sessionRevokeUnaudited (adoption plan section 2.1 A)';
 
   /** A member with one live session, and what the test reads of it afterwards. */
-  async function signedIn(name: string) {
+  async function signedIn(name: string, options: { readonly idToken?: string } = {}) {
     const member = await addMember(org, 'viewer', name);
-    const session = await signIn(t, member);
+    const session = await signIn(t, member, options);
     const live = async (): Promise<number | undefined> =>
       (
         await administrator<{ n: number }>(
@@ -1347,7 +1356,7 @@ describe('the sign-out catch-all says what happened, in its answer and its log l
       const { rowCount } = await sql.query(
         `SELECT 1 FROM pg_stat_activity a
           WHERE a.datname = current_database() AND a.wait_event_type = 'Lock'
-            AND a.query LIKE 'SELECT 1 FROM sec.session_revoke(%'
+            AND a.query LIKE 'SELECT id_token FROM sec.session_revoke(%'
             AND $1 = ANY (pg_blocking_pids(a.pid))`,
         [holder],
       );
@@ -1390,8 +1399,8 @@ describe('the sign-out catch-all says what happened, in its answer and its log l
     expect(signOutLines(from)).toEqual([`50 ${NOT_AUDITED}`]);
   });
 
-  it('a lock timeout, and the fallback ends the session: the sign-out answers 200 with the cookie cleared, not 503, and the log line says it was not audited', async () => {
-    const leaving = await signedIn('Lottie Locked');
+  it('a lock timeout, and the fallback ends the session: the sign-out answers 200 with the cookie cleared, not 503, with the provider URL of any sign-out, and the log line says it was not audited', async () => {
+    const leaving = await signedIn('Lottie Locked', { idToken: ID_TOKEN });
     const mark = await newestAuditRow();
     const from = logs.lines.length;
     const fault = faults.arm({ mode: 'lock-timeout', at: AT_AUDIT });
@@ -1400,8 +1409,18 @@ describe('the sign-out catch-all says what happened, in its answer and its log l
     );
     expect((await fault.delivered).sqlstate).toBe('55P03');
     expect(response.status).toBe(200);
-    // No ID token: the fallback does not read it, so the provider is given none.
-    expect(await response.json()).toEqual({ redirectTo: null });
+    // The fallback hands on the ID token it got back from sec.session_revoke, so the provider
+    // ends its own session as after any sign-out, without asking the user to confirm.
+    expect(await response.json()).toEqual({
+      redirectTo: `${PROVIDER_SIGN_OUT}?id_token_hint=${ID_TOKEN}`,
+    });
+    // Given up once: the session row keeps no copy.
+    expect(
+      await administrator(
+        'SELECT revoked_at IS NOT NULL AS ended, id_token FROM public.session WHERE id_hash = $1',
+        [leaving.idHash],
+      ),
+    ).toEqual([{ ended: true, id_token: null }]);
     expect(response.headers.get('retry-after')).toBeNull();
     expect(setCookie(response, t.config.sessionCookieName)).toBe('');
     expect(await leaving.live()).toBe(0);
@@ -1506,5 +1525,68 @@ describe('the sign-out catch-all says what happened, in its answer and its log l
     expect(signOutLines(from)).toEqual([]);
     expect(await leaving.live()).toBe(1);
     expect(await auditRowsAfter(mark)).toEqual([]);
+  });
+});
+
+/**
+ * The pairing poll runs two transactions: the read of the session (sec.pairing_poll, which locks
+ * the session row) and, for a claimed session, the collection. The table above strikes the
+ * collection, at its audit row. This holds the read to the same answer (Michael, 25 Nov 2026):
+ * the session row is really held, by a claim that has not committed, for all of lock_timeout.
+ */
+describe('the pairing poll answers a lock timeout in its read as it does in its collection', () => {
+  it('a poll that waits past lock_timeout for the session row a claim holds answers 503 service_unavailable with retry-after 2 and stores nothing; the next poll collects', async () => {
+    const display = await createDisplay(owner, org, 'Slowly claimed screen');
+    const pairing = await newPairing();
+    const poll = (): Promise<Response> =>
+      fetch(`${t.url}/player/pairing/${pairing.pairingId}`, {
+        headers: { authorization: `Bearer ${pairing.pollingToken}` },
+      });
+    const mark = await newestAuditRow();
+
+    // The operator's claim, stopped before its audit row: sec.pairing_claim has written the
+    // session row and holds it until the claim commits.
+    const held = faults.hold((text) => /^\s*INSERT INTO audit_event \(org_id/.test(text));
+    const claiming = send(owner, 'POST', `/api/displays/${display.id}/claim`, {
+      code: pairing.code,
+    });
+    const claimer = await reachedBefore(held, claiming, 'the claim');
+    let timedOut: Response;
+    try {
+      const polling = poll();
+      await waitForLockWaiters(
+        sql,
+        claimer,
+        1,
+        'the poll never waited for the pairing session row the claim holds',
+        { waiter: polling },
+      );
+      // The claim is not let go: the poll waits out tinnox_app's 5 s lock_timeout.
+      timedOut = await polling;
+    } finally {
+      held.release();
+    }
+    expect(timedOut.headers.get('retry-after')).toBe('2');
+    await expectError(timedOut, 'service_unavailable');
+    // PostgreSQL raised it, in the poll's read and nowhere else.
+    expect(
+      faults
+        .databaseErrors()
+        .map((seen) => [seen.sqlstate, /sec\.pairing_\w+/.exec(seen.statement)?.[0]]),
+    ).toEqual([['55P03', 'sec.pairing_poll']]);
+
+    // The poll stored nothing, and the claim it waited for committed.
+    expect((await claiming).status).toBe(200);
+    expect(await countOf('player_registration', 'display_id', display.id)).toBe(0);
+    expect(await auditRowsAfter(mark)).toEqual(['pairing.claim:success']);
+    // "Try again" was true: the next poll collects the credential.
+    const collected = await poll();
+    expect(collected.status).toBe(200);
+    expect(await collected.json()).toMatchObject({ status: 'claimed' });
+    expect(await countOf('player_registration', 'display_id', display.id)).toBe(1);
+    expect(await auditRowsAfter(mark)).toEqual([
+      'pairing.claim:success',
+      'pairing.complete:success',
+    ]);
   });
 });

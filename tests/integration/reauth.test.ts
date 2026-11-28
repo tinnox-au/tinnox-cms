@@ -457,17 +457,28 @@ describe('signing in again after the sessions were ended', () => {
       change: (id: string) => owner.fetch(`/api/members/${id}/sign-out`, { method: 'POST' }),
       // The sign-in is sent back to the provider once.
       refusal: 'reauth',
+      // The whole answer: the one session the first sign-in made.
+      ended: (body: unknown): void => {
+        expect(body).toEqual({ sessionsEnded: 1 });
+      },
     },
     {
       name: 'a demotion',
       change: (id: string) =>
         owner.fetch(`/api/members/${id}`, { method: 'PATCH', json: { role: 'viewer' } }),
       refusal: 'reauth',
+      // The answer also carries the member as changed.
+      ended: (body: unknown): void => {
+        expect(body).toMatchObject({ sessionsEnded: 1, invitesCancelled: 0 });
+      },
     },
     {
       name: 'a removal',
       change: (id: string) => owner.fetch(`/api/members/${id}/remove`, { method: 'POST' }),
       refusal: 'no_membership',
+      ended: (body: unknown): void => {
+        expect(body).toMatchObject({ sessionsEnded: 1, invitesCancelled: 0 });
+      },
     },
   ] as const;
 
@@ -488,7 +499,7 @@ describe('signing in again after the sessions were ended', () => {
 
   describe.each(PEOPLE_ROUTES)(
     'a sign-in that meets $name at the member row (TST-6)',
-    ({ change, refusal }) => {
+    ({ change, refusal, ended }) => {
       it('the route holds the row: the sign-in waits for it, and is refused once the change has committed', async () => {
         const target = await addMember(org, 'editor');
         const sub = idp.sub;
@@ -588,7 +599,7 @@ describe('signing in again after the sessions were ended', () => {
           // The route got the row next and ended that session.
           const changed = await changing;
           expect(changed.status).toBe(200);
-          expect(await changed.json()).toMatchObject({ sessionsEnded: 1 });
+          ended(await changed.json());
           // The second sign-in got the row after the change: refused, though it was
           // authenticated after the route's transaction began.
           expectRefused(await again, refusal, idp.state);
