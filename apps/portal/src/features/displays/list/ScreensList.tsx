@@ -528,6 +528,12 @@ export function ScreensList() {
         if (alreadyGone) toast.info(`${display.name} was already deleted`);
         else toast.success(`${display.name} deleted`);
       }}
+      onUnsure={() => {
+        // The server may have deleted it: the list shows what is true now.
+        reloadDisplays();
+        reloadStatuses();
+        refreshPush();
+      }}
       rowFocus={{
         mode: 'row',
         order: list.rows.map(rowId),

@@ -1,11 +1,21 @@
 import { describe, expect, it } from 'vitest';
-import { ApiRequestError, type ClientErrorCode } from '../api/client.ts';
 import {
+  ApiRequestError,
+  errorFromResponse,
+  isOutcomeUnknown,
+  type ClientErrorCode,
+} from '../api/client.ts';
+import {
+  DELETE_UNCONFIRMED,
   deleteScreen,
   deleteScreensFailureTitle,
   deleteScreensLabel,
   deleteScreensQuestion,
+  isScreenGone,
   pairedPlayersLose,
+  SCREEN_DELETE_UNCONFIRMED_LINE,
+  screenDeleteUnconfirmed,
+  SCREENS_READ_AGAIN,
   screensDeletedNote,
   screensDeletedToast,
 } from './screensDelete.ts';
@@ -29,6 +39,50 @@ describe('deleteScreen', () => {
     await expect(deleteScreen(() => Promise.reject(forbidden))).rejects.toBe(forbidden);
     const network = new Error('offline');
     await expect(deleteScreen(() => Promise.reject(network))).rejects.toBe(network);
+  });
+
+  it("SDC-01: passes on a 404 that is not the API's own, an unknown outcome", async () => {
+    // A proxy's page: no error envelope.
+    const page = errorFromResponse(404, '<html>Not Found</html>', null);
+    expect(page.fromApi).toBe(false);
+    expect(page.code).toBe('invalid_response');
+    expect(isOutcomeUnknown(page)).toBe(true);
+    await expect(deleteScreen(() => Promise.reject(page))).rejects.toBe(page);
+  });
+});
+
+describe('isScreenGone', () => {
+  it("SDC-01: is true only for the API's own not_found 404", () => {
+    const envelope = JSON.stringify({ error: { code: 'not_found', message: 'Not found.' } });
+    expect(isScreenGone(errorFromResponse(404, envelope, null))).toBe(true);
+    expect(isScreenGone(refusal(404, 'not_found'))).toBe(true);
+    expect(isScreenGone(errorFromResponse(404, '<html>Not Found</html>', null))).toBe(false);
+    expect(isScreenGone(errorFromResponse(404, '', null))).toBe(false);
+    expect(
+      isScreenGone(
+        new ApiRequestError({ status: 404, code: 'not_found', message: 'No.', fromApi: false }),
+      ),
+    ).toBe(false);
+    expect(isScreenGone(refusal(404, 'validation_failed'))).toBe(false);
+    expect(isScreenGone(refusal(410, 'not_found'))).toBe(false);
+    expect(isScreenGone(new Error('Not found'))).toBe(false);
+  });
+});
+
+describe('SDC-02: an unconfirmed delete', () => {
+  it('never says the screen was not deleted', () => {
+    expect(DELETE_UNCONFIRMED).toBe('The delete could not be confirmed');
+    expect(screenDeleteUnconfirmed('Lobby', 'list')).toBe(
+      'The server may or may not have deleted Lobby. The list was read again; check it before you try again.',
+    );
+    expect(screenDeleteUnconfirmed('Lobby', 'page')).toBe(
+      'The server may or may not have deleted Lobby. The page was read again; check it before you try again.',
+    );
+    expect(deleteScreensFailureTitle(1, 1, true)).toBe('The delete could not be confirmed');
+    expect(deleteScreensFailureTitle(1, 3, true)).toBe('Not every delete could be confirmed');
+    expect(deleteScreensFailureTitle(3, 3, true)).toBe('Not every delete could be confirmed');
+    expect(SCREEN_DELETE_UNCONFIRMED_LINE).toBe('The server may or may not have deleted it.');
+    expect(SCREENS_READ_AGAIN).toBe('The list was read again; check it before you try again.');
   });
 });
 
@@ -83,6 +137,10 @@ describe('bulk screen delete words', () => {
       deleteScreensQuestion(2),
       deleteScreensLabel(2),
       deleteScreensFailureTitle(1, 2),
+      deleteScreensFailureTitle(1, 2, true),
+      screenDeleteUnconfirmed('A', 'list'),
+      SCREEN_DELETE_UNCONFIRMED_LINE,
+      SCREENS_READ_AGAIN,
       pairedPlayersLose(1, 2),
       screensDeletedToast([{ name: 'A', result: 'gone' }]).message,
     ];

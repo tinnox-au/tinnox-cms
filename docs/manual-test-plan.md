@@ -725,7 +725,7 @@ Expected:
 
 Expected:
 
-- [ ] Step 1: the dialog "Delete Tiny strip?" says the screen is removed for good, that its paired player loses access at once while content it cached stays on the device until it is reset there, and that its history stays in the activity log. **Cancel** has the focus; the red button reads **Delete screen**. Confirm: toast "Tiny strip deleted", the row is gone, and the dashboard's screen count and the push dialog no longer include it.
+- [ ] Step 1: the dialog "Delete Tiny strip?" says the screen is removed for good and its history stays in the activity log, and, since no player is paired with it, that any pairing code accepted for it that no player has collected yet stops working. (For a paired screen it says instead that the player loses access at once and shows "This player was unregistered" until it is reset there; open **Delete** on `Reception TV` to read it, then press **Cancel**.) **Cancel** has the focus; the red button reads **Delete screen**. Confirm: toast "Tiny strip deleted", the row is gone, and the dashboard's screen count and the push dialog no longer include it.
 - [ ] Step 2: **Cancel** keeps the screen. After the delete the Screens list opens with the toast "Spare screen deleted". Browser **Back** to its address shows **Screen not found**, which says it may have been deleted.
 - [ ] Step 3: the dialog "Delete 2 screens?" lists both names; the red button reads **Delete 2 screens**. Confirm: "Deleting 1 of 2" may show briefly, then the toast "2 screens deleted", both rows are gone and the selection bar closes.
 - [ ] A paired screen's player, when its screen is deleted, shows "This player was unregistered" as in T15.1 (the automated suite checks this; do not delete `Reception TV` here).

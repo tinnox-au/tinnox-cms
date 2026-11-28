@@ -52,6 +52,18 @@ describe('guardReturnedFocus', () => {
     await focusIs(target);
   });
 
+  it('puts focus back again when the control it moved focus to, once the opener went, goes too', async () => {
+    const opener = button('Delete');
+    opener.focus();
+    const first = button('Select all');
+    guard(() => document.body.querySelector('button'));
+    opener.remove();
+    await focusIs(first);
+    first.remove();
+    const second = button('Add screen');
+    await focusIs(second);
+  });
+
   it('keeps guarding when focus comes back to the opener (React moving its row, the window regaining focus)', async () => {
     const opener = button('Actions for Lobby');
     opener.focus();
@@ -88,7 +100,8 @@ describe('guardReturnedFocus', () => {
 
   it('stops at the first pointer press', async () => {
     const target = button('Add screen');
-    guard(() => target);
+    // Any live button would do, so only the stop keeps focus off 'Another' below.
+    guard(() => document.body.querySelector('button'));
     await focusIs(target);
     document.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
     target.remove();

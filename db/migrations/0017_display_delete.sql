@@ -5,17 +5,18 @@
 --      pairing_session and display_alert have no cascade), so the row stays and every operator
 --      query for live displays filters on the column. display_org_idx stays as it is: the alert
 --      check reads every display of an organisation, deleted ones included, so that an open
---      episode of a deleted display still closes (alerts.ts).
+--      episode of a deleted display still closes (alerts.ts). display_deleted_unassigned: a
+--      deleted display has nothing assigned, as the delete leaves it.
 --   2. display_deleted_guard: a deleted display is final. No write may change it again, so
 --      neither an un-delete nor an edit that raced the delete can bring it back. A later
 --      migration that updates display rows must filter on deleted_at IS NULL, or lift the guard
 --      for its backfill and restore it in the same transaction (as 0005 did with FORCE).
 --   3. sec.pairing_claim: a deleted display is not found, checked again once the display's
 --      pairing lock is held. DELETE /api/displays/:id takes that lock first
---      (sec.pairing_cancel_claims, which stays unfiltered so the delete can still cancel claims)
---      and holds it to COMMIT; a claim that passed the first check while the delete was open
---      waits for the lock and then sees the delete (each statement takes a fresh snapshot at
---      READ COMMITTED).
+--      (sec.pairing_cancel_claims, unchanged: the delete calls it while the row is still live,
+--      and a deleted display has no claims left) and holds it to COMMIT; a claim that passed the
+--      first check while the delete was open waits for the lock and then sees the delete (each
+--      statement takes a fresh snapshot at READ COMMITTED).
 --
 -- sec.pairing_complete is not changed. Every claim of the display is cancelled under its
 -- pairing lock in the delete's own transaction, and pairing_claim refuses the display after it,
@@ -30,13 +31,18 @@
 -- pairing_claim's owner, pinned search_path and EXECUTE for tinnox_app only.
 --
 -- Locks: ACCESS EXCLUSIVE on display until commit (ADD COLUMN, a nullable column with no default,
--- is a catalogue change; CREATE TRIGGER). Nothing is read or rewritten. An API from before 0017
--- keeps working (it never names the column), so migrate, then start the new API and portal; run
--- it while the API is idle.
+-- is a catalogue change; ADD CONSTRAINT; CREATE TRIGGER). Validating the CHECK reads display
+-- once, and every row passes (deleted_at is NULL on all of them); nothing is rewritten. An API
+-- from before 0017 keeps working (it never names the column), so migrate, then start the new API
+-- and portal; run it while the API is idle.
 
 -- ----------------------------------------------------------------------- 1. display
 
 ALTER TABLE public.display ADD COLUMN deleted_at timestamptz;
+
+-- The delete clears the assignments in the same UPDATE, so no write of ours trips this.
+ALTER TABLE public.display ADD CONSTRAINT display_deleted_unassigned
+  CHECK (deleted_at IS NULL OR num_nonnulls(assigned_playlist_id, assigned_schedule_id, assigned_layout_id) = 0);
 
 -- display is granted column by column.
 GRANT UPDATE (deleted_at) ON public.display TO tinnox_app;

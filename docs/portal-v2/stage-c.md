@@ -915,7 +915,7 @@ Every operator route stays inside the operator plugin (session, CSRF, exact Orig
 
 ### 6.1 Route-to-key table (`ROUTE_PERMISSIONS`, `apps/api/src/auth/permissions.ts`)
 
-Keyed by `` `${METHOD} ${ROUTES.<name>}` `` (the contract constants, so a renamed path breaks the build). An entry is `{ all: [...] }` or `{ any: [...], refine: RefineName }`. 59 entries: the 51 of `tests/integration/session-csrf.test.ts:43-94` plus 8 people routes. 26 GET, 33 writes. Row 60 was added on 2026-11-27 (CMS-41); the alert routes of CMS-15 are in `stage-c-alerts.md`.
+Keyed by `` `${METHOD} ${ROUTES.<name>}` `` (the contract constants, so a renamed path breaks the build). An entry is `{ all: [...] }` or `{ any: [...], refine: RefineName }`. 59 entries: the 51 of `tests/integration/session-csrf.test.ts:43-94` plus 8 people routes. 26 GET, 33 writes. Row 60 was added on 2026-11-27 (CMS-41), making 60 entries, 26 GET and 34 writes; the alert routes of CMS-15 are in `stage-c-alerts.md`.
 
 | # | Method | Path (`ROUTES.`) | Rule | Handler |
 |---|---|---|---|---|

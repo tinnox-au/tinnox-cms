@@ -115,6 +115,11 @@ export const NULL_PASSING_CHECKS: Readonly<Record<string, NullPassingCheck>> = {
     ['content_height', 'content_width', 'content_x', 'content_y'],
     'NULL content_x means no content rectangle and is accepted by name. With content_x set the other three are set too (display_content_rect_all_or_none), and the canvas columns are NOT NULL, so no comparison is NULL.',
   ),
+  'public.display.display_deleted_unassigned': total(
+    'CHECK (((deleted_at IS NULL) OR (num_nonnulls(assigned_playlist_id, assigned_schedule_id, assigned_layout_id) = 0)))',
+    ['assigned_layout_id', 'assigned_playlist_id', 'assigned_schedule_id', 'deleted_at'],
+    'An IS NULL test and num_nonnulls(), neither of which is ever NULL.',
+  ),
   'public.display.display_description_length': optional(
     'CHECK (((char_length(description) >= 1) AND (char_length(description) <= 500)))',
     ['description'],

@@ -3,6 +3,7 @@ import { createMemoryRouter, RouterProvider } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { userEvent } from 'vitest/browser';
 import { render } from 'vitest-browser-react';
+import { ApiRequestError } from '../../../api/client.ts';
 import { WithSession } from '../../../session/session.test-support.tsx';
 import type { EditorPageProps } from '../../../shell/EditorPage.tsx';
 import { ToastProvider } from '../../../ui/index.ts';
@@ -63,9 +64,31 @@ const PUSH: PushContextValue = {
   refreshPending: () => undefined,
 };
 
-async function renderDetail(role: Role) {
-  // The status stays loading: the menu does not wait for it.
-  getDisplayStatus.mockReturnValue(new Promise(() => undefined));
+// The latest status of a screen with a player that has not reported yet.
+const PAIRED_STATUS: DeliveryStatusView = {
+  displayId: DISPLAY.id,
+  paired: true,
+  registrationId: ID(800),
+  desired: null,
+  downloaded: null,
+  active: null,
+  playerState: null,
+  staging: null,
+  lastHeartbeatAt: null,
+  stale: true,
+  staleAfterSeconds: 90,
+  errors: [],
+  summary: 'awaiting_player',
+  asOf: T,
+};
+
+async function renderDetail(
+  role: Role,
+  options: { readonly status?: DeliveryStatusView; readonly onReload?: () => void } = {},
+) {
+  // Without one the status stays loading: the menu does not wait for it.
+  if (options.status === undefined) getDisplayStatus.mockReturnValue(new Promise(() => undefined));
+  else getDisplayStatus.mockResolvedValue(options.status);
   listTags.mockResolvedValue([]);
   const router = createMemoryRouter(
     [
@@ -76,7 +99,7 @@ async function renderDetail(role: Role) {
             data={{ display: DISPLAY, site: null }}
             refreshError={null}
             back={{ to: '/screens', label: 'All screens' }}
-            onReload={() => undefined}
+            onReload={options.onReload ?? (() => undefined)}
             onChanged={() => undefined}
           />
         ),
@@ -125,6 +148,50 @@ describe('ScreenDetail: "Delete screen"', () => {
     await expect
       .element(screen.getByRole('region', { name: 'Notifications' }).getByText('Lobby deleted'))
       .toBeVisible();
+  });
+
+  it('SDC-06: says what happens to the player when only the latest status says one is paired', async () => {
+    // The screen was read before the pairing; the 5 s status has seen it since.
+    const { screen } = await renderDetail('owner', { status: PAIRED_STATUS });
+    await expect.element(screen.getByTestId('status-headline')).toBeVisible();
+    await screen.getByRole('button', { name: 'More actions for Lobby' }).click();
+    await screen.getByRole('menuitem', { name: 'Delete screen' }).click();
+    const dialog = screen.getByTestId('screens-delete-dialog');
+    await expect.element(dialog.getByText(/This player was unregistered/)).toBeVisible();
+    expect(dialog.getByText(/pairing code accepted for it/).query()).toBeNull();
+  });
+
+  it('SDC-02: when the answer is lost, stays open and reads the screen and its status again', async () => {
+    deleteDisplay.mockRejectedValue(
+      new ApiRequestError({
+        status: 0,
+        code: 'network_error',
+        message: 'The server could not be reached.',
+        fromApi: false,
+      }),
+    );
+    const onReload = vi.fn<() => void>();
+    const { screen, router } = await renderDetail('editor', { status: PAIRED_STATUS, onReload });
+    await expect.element(screen.getByTestId('status-headline')).toBeVisible();
+    const statusReads = getDisplayStatus.mock.calls.length;
+    await screen.getByRole('button', { name: 'More actions for Lobby' }).click();
+    await screen.getByRole('menuitem', { name: 'Delete screen' }).click();
+    await screen.getByTestId('screens-delete-dialog-confirm').click();
+
+    const dialog = screen.getByTestId('screens-delete-dialog');
+    await expect.element(dialog.getByText('The delete could not be confirmed')).toBeVisible();
+    await expect
+      .element(
+        dialog.getByText(
+          'The server may or may not have deleted Lobby. The page was read again; check it before you try again.',
+          { exact: false },
+        ),
+      )
+      .toBeVisible();
+    expect(onReload).toHaveBeenCalledTimes(1);
+    await expect.poll(() => getDisplayStatus.mock.calls.length).toBeGreaterThan(statusReads);
+    expect(refreshPush).toHaveBeenCalledTimes(1);
+    expect(router.state.location.pathname).toBe(`/screens/${DISPLAY.id}`);
   });
 
   it('is offered after the separator, beside "Revoke player", to an Owner', async () => {

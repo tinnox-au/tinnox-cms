@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useState } from 'react';
 import { isOutcomeUnknown } from '../../../api/client.ts';
 import { api } from '../../../api/index.ts';
 import {
@@ -13,6 +13,8 @@ import {
   deleteScreensLabel,
   deleteScreensQuestion,
   pairedPlayersLose,
+  SCREEN_DELETE_UNCONFIRMED_LINE,
+  SCREENS_READ_AGAIN,
   screensDeletedNote,
   screensDeletedToast,
   type ScreenDeleteResult,
@@ -47,7 +49,8 @@ interface Progress {
 /**
  * Confirms deleting the selected screens (CMS-41), as the Playlists list does: one request
  * per screen, one after another, and every failure listed with the server's reason and error
- * code. A screen already gone (404) counts as deleted. "Try again" repeats only the failures.
+ * code. A screen already gone (404) counts as deleted. A failure whose answer was lost says the
+ * server may have deleted it (SDC-02). "Try again" repeats only the failures and keeps focus.
  */
 export function DeleteScreensDialog({
   targets,
@@ -67,7 +70,6 @@ export function DeleteScreensDialog({
   const [outcome, setOutcome] = useState<DeleteOutcome | null>(null);
   const [progress, setProgress] = useState<Progress | null>(null);
   const [wasOpen, setWasOpen] = useState(open);
-  const closeRef = useRef<HTMLButtonElement>(null);
   if (open !== wasOpen) {
     setWasOpen(open);
     if (targets !== null) {
@@ -83,6 +85,8 @@ export function DeleteScreensDialog({
   const paired = items.filter((screen) => screen.paired).length;
   const failed = outcome?.failed ?? [];
   const pending = outcome === null ? items : failed.map((failure) => failure.item);
+  // Any failure that may have deleted its screen: the words never say "not deleted" then.
+  const unconfirmed = failed.some((failure) => isOutcomeUnknown(failure.error));
 
   const run = async () => {
     if (busy || pending.length === 0) return;
@@ -109,12 +113,6 @@ export function DeleteScreensDialog({
       return;
     }
     setOutcome(merged);
-    if (attempt.done.length === 0 && outcome !== null) {
-      // Nothing moved on a retry; Close takes focus, inside the dialog.
-      window.requestAnimationFrame(() => {
-        closeRef.current?.focus();
-      });
-    }
   };
 
   const attempted = outcome !== null;
@@ -125,7 +123,9 @@ export function DeleteScreensDialog({
       open={open}
       onClose={onClose}
       title={
-        attempted ? deleteScreensFailureTitle(failed.length, total) : deleteScreensQuestion(total)
+        attempted
+          ? deleteScreensFailureTitle(failed.length, total, unconfirmed)
+          : deleteScreensQuestion(total)
       }
       busy={busy}
       returnFocus={returnFocus}
@@ -139,7 +139,6 @@ export function DeleteScreensDialog({
       footer={
         <>
           <Button
-            ref={closeRef}
             onClick={onClose}
             aria-disabled={busy || undefined}
             data-autofocus
@@ -205,15 +204,19 @@ export function DeleteScreensDialog({
             <ul className="tx-screens-delete__failures" data-testid="screens-bulk-delete-failures">
               {failed.map(({ item, error }) => {
                 const text = failureText(error);
+                const message = isOutcomeUnknown(error)
+                  ? SCREEN_DELETE_UNCONFIRMED_LINE
+                  : text.message;
                 return (
                   <li key={item.id}>
                     <span className="tx-strong tx-break">{item.name}</span>:{' '}
-                    <span className="tx-break">{text.message}</span>{' '}
+                    <span className="tx-break">{message}</span>{' '}
                     {text.code !== null && <span className="tx-code">{text.code}</span>}
                   </li>
                 );
               })}
             </ul>
+            {unconfirmed && <p>{SCREENS_READ_AGAIN}</p>}
           </Banner>
         )}
       </div>

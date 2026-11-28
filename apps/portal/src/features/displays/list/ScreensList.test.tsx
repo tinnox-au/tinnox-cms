@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { userEvent } from 'vitest/browser';
 import { render } from 'vitest-browser-react';
-import { ApiRequestError, type ClientErrorCode } from '../../../api/client.ts';
+import { ApiRequestError, errorFromResponse, type ClientErrorCode } from '../../../api/client.ts';
 import { WithSession } from '../../../session/session.test-support.tsx';
 import { ToastProvider } from '../../../ui/index.ts';
 import { PushContext, type PushContextValue } from '../../push/PushContext.tsx';
@@ -340,6 +340,78 @@ describe('ScreensList: deleting a screen', () => {
     expect(screen.getByText('Lobby deleted').query()).toBeNull();
   });
 
+  it('SDC-02: when the answer is lost, says the delete could not be confirmed, reads everything again and stays open; deleting again settles it', async () => {
+    serve([LOBBY, ONE]);
+    deleteDisplay
+      .mockRejectedValueOnce(
+        new ApiRequestError({
+          status: 0,
+          code: 'network_error',
+          message: 'The server could not be reached.',
+          fromApi: false,
+        }),
+      )
+      .mockRejectedValueOnce(
+        new ApiRequestError({
+          status: 404,
+          code: 'not_found',
+          message: 'The screen was not found.',
+          fromApi: true,
+        }),
+      );
+    const screen = await renderList('owner');
+    await screen.getByRole('button', { name: 'Actions for Lobby' }).click();
+    await screen.getByRole('menuitem', { name: 'Delete' }).click();
+    // The server did delete it; only its answer was lost.
+    served = [ONE];
+    await screen.getByTestId('screens-delete-dialog-confirm').click();
+
+    const dialog = screen.getByTestId('screens-delete-dialog');
+    await expect.element(dialog.getByText('The delete could not be confirmed')).toBeVisible();
+    await expect
+      .element(
+        dialog.getByText(
+          'The server may or may not have deleted Lobby. The list was read again; check it before you try again.',
+          { exact: false },
+        ),
+      )
+      .toBeVisible();
+    await expect.element(dialog.getByText('network_error', { exact: true })).toBeVisible();
+    expect(dialog.getByText('The screen was not deleted').query()).toBeNull();
+    expect(reloadDisplays).toHaveBeenCalledTimes(1);
+    expect(reloadStatuses).toHaveBeenCalledTimes(1);
+    expect(refreshPush).toHaveBeenCalledTimes(1);
+    await expect.element(screen.getByRole('link', { name: 'Lobby' })).not.toBeInTheDocument();
+    expect(screen.getByText('Lobby deleted').query()).toBeNull();
+
+    // Deleting again: a 404 now reads as already deleted.
+    await screen.getByTestId('screens-delete-dialog-confirm').click();
+    await expect.element(dialog).not.toBeVisible();
+    expect(deleteDisplay.mock.calls).toEqual([[LOBBY.id], [LOBBY.id]]);
+    await expect
+      .element(
+        screen
+          .getByRole('region', { name: 'Notifications' })
+          .getByText('Lobby was already deleted'),
+      )
+      .toBeVisible();
+  });
+
+  it("SDC-01: a 404 that is not the API's own is not read as already deleted", async () => {
+    serve([LOBBY]);
+    deleteDisplay.mockRejectedValue(errorFromResponse(404, '<html>Not Found</html>', null));
+    const screen = await renderList('owner');
+    await screen.getByRole('button', { name: 'Actions for Lobby' }).click();
+    await screen.getByRole('menuitem', { name: 'Delete' }).click();
+    await screen.getByTestId('screens-delete-dialog-confirm').click();
+
+    const dialog = screen.getByTestId('screens-delete-dialog');
+    await expect.element(dialog.getByText('The delete could not be confirmed')).toBeVisible();
+    await expect.element(dialog.getByText('invalid_response', { exact: true })).toBeVisible();
+    expect(reloadDisplays).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('Lobby was already deleted').query()).toBeNull();
+  });
+
   it('says what happens to the player only when one is paired', async () => {
     const paired = display(4, {
       name: 'Hall',
@@ -666,6 +738,92 @@ describe('ScreensList: deleting the selected screens', () => {
       )
       .toBeVisible();
     expect(screen.getByRole('region', { name: 'Selected screens' }).query()).toBeNull();
+  });
+
+  it('SDC-02: says which deletes could not be confirmed, with their codes, and reads the list again', async () => {
+    serve([ONE, TWO, THREE]);
+    deleteDisplay
+      .mockResolvedValueOnce()
+      .mockRejectedValueOnce(
+        new ApiRequestError({
+          status: 0,
+          code: 'network_error',
+          message: 'The server could not be reached.',
+          fromApi: false,
+        }),
+      )
+      .mockRejectedValueOnce(refusal(403, 'forbidden', 'Your role does not allow this.'));
+    const screen = await renderList('owner');
+    await tick(screen, 'Screen 1', 'Screen 2', 'Screen 3');
+    await screen.getByTestId('screens-bulk-delete').click();
+    served = [TWO, THREE];
+    await screen.getByTestId('screens-bulk-delete-confirm').click();
+
+    const dialog = screen.getByTestId('screens-bulk-delete-dialog');
+    await expect
+      .element(screen.getByRole('heading', { name: 'Not every delete could be confirmed' }))
+      .toBeVisible();
+    const failures = screen.getByTestId('screens-bulk-delete-failures');
+    expect(
+      failures
+        .getByRole('listitem')
+        .elements()
+        .map((item) => item.textContent),
+    ).toEqual([
+      'Screen 2: The server may or may not have deleted it. network_error',
+      'Screen 3: Your role does not allow this. forbidden',
+    ]);
+    await expect.element(dialog.getByText('1 screen was deleted.')).toBeVisible();
+    await expect
+      .element(dialog.getByText('The list was read again; check it before you try again.'))
+      .toBeVisible();
+    expect(reloadDisplays).toHaveBeenCalledTimes(1);
+    expect(reloadStatuses).toHaveBeenCalledTimes(1);
+    expect(refreshPush).toHaveBeenCalledTimes(1);
+  });
+
+  it('SDC-02: for one screen, says the delete could not be confirmed', async () => {
+    serve([ONE, TWO]);
+    deleteDisplay.mockRejectedValue(
+      refusal(500, 'commit_outcome_unknown', 'The change may have been saved.'),
+    );
+    const screen = await renderList('owner');
+    await tick(screen, 'Screen 2');
+    await screen.getByTestId('screens-bulk-delete').click();
+    await screen.getByTestId('screens-bulk-delete-confirm').click();
+
+    await expect
+      .element(screen.getByRole('heading', { name: 'The delete could not be confirmed' }))
+      .toBeVisible();
+    await expect
+      .element(screen.getByTestId('screens-bulk-delete-failures').getByRole('listitem'))
+      .toHaveTextContent(
+        'Screen 2: The server may or may not have deleted it. commit_outcome_unknown',
+      );
+    expect(screen.getByText(/was not deleted/).query()).toBeNull();
+    expect(reloadDisplays).toHaveBeenCalledTimes(1);
+  });
+
+  it('SDG-07: a keyboard retry that fails again leaves focus on "Try again"', async () => {
+    serve([ONE, TWO]);
+    deleteDisplay.mockRejectedValue(refusal(403, 'forbidden', 'Your role does not allow this.'));
+    const screen = await renderList('owner');
+    await tick(screen, 'Screen 1', 'Screen 2');
+    await screen.getByTestId('screens-bulk-delete').click();
+    await screen.getByTestId('screens-bulk-delete-confirm').click();
+    await expect
+      .element(screen.getByRole('heading', { name: 'None of the 2 screens were deleted' }))
+      .toBeVisible();
+
+    const retry = screen.getByTestId('screens-bulk-delete-retry');
+    // Focuses it, then presses Enter.
+    await userEvent.type(retry, '{Enter}');
+    await expect.poll(() => deleteDisplay.mock.calls.length).toBe(4);
+    await expect.element(retry).not.toHaveAttribute('aria-busy');
+    // Past the frame in which focus used to move to Close.
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    await expect.element(retry).toHaveFocus();
   });
 
   it('EAX-14: puts focus on the first remaining screen after a bulk delete', async () => {

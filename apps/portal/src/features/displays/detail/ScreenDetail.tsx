@@ -201,7 +201,10 @@ export function ScreenDetail({ data, refreshError, back, onReload, onChanged }: 
                 selectTab('pairing');
               }}
               onDelete={() => {
-                setDeleting({ id: display.id, name: display.name, paired });
+                // As on the list, the 5 s status counts too (SDC-06): a player may have
+                // collected its credential since the screen was read.
+                const reported = status.state.status === 'ready' && status.state.data.paired;
+                setDeleting({ id: display.id, name: display.name, paired: paired || reported });
               }}
               canPair={!readOnly.pairing}
               revoke={revoke?.origin === 'summary' ? revoke : null}
@@ -304,6 +307,11 @@ export function ScreenDetail({ data, refreshError, back, onReload, onChanged }: 
           void navigate('/screens');
           if (alreadyGone) toast.info(`${screen.name} was already deleted`);
           else toast.success(`${screen.name} deleted`);
+        }}
+        onUnsure={() => {
+          // The server may have deleted it: read the screen, its status and the push plan again.
+          afterPlayerChange();
+          push.refresh();
         }}
         rowFocus="opener"
       />

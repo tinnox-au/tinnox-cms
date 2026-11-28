@@ -111,6 +111,7 @@ export const CHECK_TWINS: Readonly<Record<string, CheckTwin>> = {
   'public.display.display_content_rect_all_or_none': { reason: ROW_STATE },
   'public.display.display_content_rect_in_canvas': { reason: BOUND },
   'public.display.display_default_fit_check': { reason: CLOSED_LIST },
+  'public.display.display_deleted_unassigned': { reason: ROW_STATE },
   'public.display.display_description_length': { reason: LABEL },
   'public.display.display_name_check': { reason: LABEL },
   'public.display.display_one_assignment': { reason: ROW_STATE },

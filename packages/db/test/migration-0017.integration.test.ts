@@ -1,13 +1,14 @@
 /**
  * Migration 0017: a screen can be deleted (CMS-41). display gets deleted_at, tinnox_app's
- * UPDATE on the column, a guard that makes a deleted display final, and sec.pairing_claim
- * refuses a deleted display, again after the display's pairing lock.
+ * UPDATE on the column, a CHECK that a deleted display has nothing assigned, a guard that makes a
+ * deleted display final, and sec.pairing_claim refuses a deleted display, again after the
+ * display's pairing lock.
  *
  * Builds a database at migration 0016 with the seeders of the migrate-forward chain (levels.ts,
  * atLevel), whose level 0013 leaves two organisations with an Owner and a display each
  * (levels/seed-0013.ts). Then it applies 0017 with the real migration runner and checks that
- * no display changed, the column, that display_org_idx is unchanged, the grant and the guard,
- * and, as the runtime role, the delete DELETE /api/displays/:id runs (softDeleteDisplay of
+ * no display changed, the column, that display_org_idx is unchanged, the CHECK, the grant and
+ * the guard, and, as the runtime role, the delete DELETE /api/displays/:id runs (softDeleteDisplay of
  * ../src/display-player.ts) against the guard and against a claim on another connection.
  *
  * The database is atLevel's own, dropped in `afterAll`; the shared integration-test database is
@@ -84,18 +85,32 @@ async function asAdministrator(sql: string): Promise<unknown[]> {
   }
 }
 
-/** A display of the organisation with no player, no claim and no tag. */
-async function newDisplay(): Promise<string> {
-  const id = randomUUID();
+/** Runs one statement as the migrator in the organisation, in a transaction of its own. */
+async function arrange(sql: string, values: unknown[]): Promise<void> {
   const { migrator: client } = clients();
   await client.query('BEGIN');
   await client.query("SELECT set_config('app.org_id', $1, true)", [org.orgId]);
-  await client.query(
-    `INSERT INTO display (id, org_id, site_id, name, canvas_width, canvas_height)
-     VALUES ($1, $2, $3, 'Level 0017 display', 640, 360)`,
-    [id, org.orgId, BEFORE_ALERTS_A.site],
-  );
+  await client.query(sql, values);
   await client.query('COMMIT');
+}
+
+/** A display of the organisation with no player, no claim and no tag, and the playlist given. */
+async function newDisplay(assignedPlaylistId: string | null = null): Promise<string> {
+  const id = randomUUID();
+  await arrange(
+    `INSERT INTO display (id, org_id, site_id, name, canvas_width, canvas_height, assigned_playlist_id)
+     VALUES ($1, $2, $3, 'Level 0017 display', 640, 360, $4)`,
+    [id, org.orgId, BEFORE_ALERTS_A.site, assignedPlaylistId],
+  );
+  return id;
+}
+
+async function newPlaylist(): Promise<string> {
+  const id = randomUUID();
+  await arrange("INSERT INTO playlist (id, org_id, name) VALUES ($1, $2, 'Level 0017 playlist')", [
+    id,
+    org.orgId,
+  ]);
   return id;
 }
 
@@ -174,6 +189,19 @@ describe('migration 0017 on a database that already holds displays', () => {
     expect(indexes[0]?.def).toMatch(/\(org_id, created_at\)$/);
   });
 
+  it('adds display_deleted_unassigned, validated', async () => {
+    const { rows } = await clients().migrator.query(
+      `SELECT pg_get_constraintdef(oid) AS def, convalidated AS validated FROM pg_constraint
+       WHERE conrelid = 'public.display'::regclass AND conname = 'display_deleted_unassigned'`,
+    );
+    expect(rows).toEqual([
+      {
+        def: 'CHECK (((deleted_at IS NULL) OR (num_nonnulls(assigned_playlist_id, assigned_schedule_id, assigned_layout_id) = 0)))',
+        validated: true,
+      },
+    ]);
+  });
+
   it('lets tinnox_app set deleted_at, and still not delete a display', async () => {
     const { rows: updatable } = await clients().migrator.query<{ column_name: string }>(
       `SELECT column_name FROM information_schema.column_privileges
@@ -220,6 +248,32 @@ describe('migration 0017 on a database that already holds displays', () => {
         everyone: false,
       },
     ]);
+  });
+});
+
+describe('a deleted display has nothing assigned', () => {
+  it('refuses deleted_at on a live display that keeps its assignment, and the row is unchanged', async () => {
+    const playlist = await newPlaylist();
+    const display = await newDisplay(playlist);
+    const readRow = () =>
+      withOrg(clients().pool, org.orgId, async (tx) => {
+        const { rows } = await tx.query(
+          'SELECT deleted_at, assigned_playlist_id, updated_at FROM display WHERE id = $1',
+          [display],
+        );
+        return rows[0];
+      });
+    const before = await readRow();
+    expect(before).toMatchObject({ deleted_at: null, assigned_playlist_id: playlist });
+    // The guard lets a live row through, so the CHECK is what refuses it.
+    expect(
+      await pgViolation(
+        withOrg(clients().pool, org.orgId, (tx) =>
+          tx.query('UPDATE display SET deleted_at = now() WHERE id = $1', [display]),
+        ),
+      ),
+    ).toEqual({ code: PG.check, constraint: 'display_deleted_unassigned' });
+    expect(await readRow()).toEqual(before);
   });
 });
 
