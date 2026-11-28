@@ -3,7 +3,7 @@ contract: status/v2
 repo: tinnox-au/tinnox-cms
 initiative: TINNOX CMS
 key: CMS
-next_id: 44
+next_id: 45
 phase: Not written yet: one sentence on what this project is and where it stands
 gate: -
 seeded: 17 Nov 2026 by status init
@@ -43,6 +43,7 @@ None.
 | CMS-39 | Compiled API image before stage 1 (first customer): add a build step and a CI job that tests the compiled build; stage 0 runs the API through tsx | proposed | - | 25 Nov |
 | CMS-40 | Sign-in that fails on a server error shows a raw JSON 500; redirect to the sign-in page with an error instead | proposed | - | 25 Nov |
 | CMS-42 | Native Linux player (Epic F): media on disk outside browser storage, boot start, crash recovery, read-only root, remote update, offline wipe on revoke | proposed | - | 26 Nov |
+| CMS-44 | Pi stays in standby after a power cut (CMS-4 R6 cut 3): find the cause, retest on CM5 with auto power-on | proposed | - | 29 Nov |
 
 ## To do
 
@@ -357,3 +358,6 @@ from: CMS-4
 - 26 Nov: Offline removal: a revoked or stolen offline device keeps its last content until it reconnects; consider encryption at rest and an optional max-days-offline rule.
 - 26 Nov: A player plan revision (DEC-36, PROPOSED 21 Nov) sits uncommitted in the main checkout on branch docs/player-runtime-plan.
 - 27 Nov: 27 Nov, CMS-4 R6: a power cut wiped the browser player's IndexedDB (pairing) and media cache; Chromium recreated an empty store, so the screen needed re-pairing. 2 of 5 cuts needed a site visit.
+
+### CMS-44
+from: CMS-4
