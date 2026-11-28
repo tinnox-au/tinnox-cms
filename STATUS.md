@@ -58,14 +58,13 @@ None.
 
 ## In review
 
-| Id | Card | Agreed | PR | Since |
-|---|---|---|---|---|
-| CMS-41 | Delete a screen from the Screens list (today a created screen can only be renamed or have its player revoked; Yodeck allows delete) | Michael 27 Nov | #54 | 27 Nov |
+None.
 
 ## Done, last 14 days
 
 | Id | Date | Outcome | PR |
 |---|---|---|---|
+| CMS-41 | 28 Nov | Delete a screen from the Screens list (today a created screen can only be renamed or have its player revoked; Yodeck allows delete) | #54 |
 | CMS-31 | 25 Nov | Poteto pyramid refactor, group C: errors and outcomes (steps 23 to 28 of the adoption plan); Michael starts it | #40 |
 | CMS-26 | 25 Nov | Ruleset on main: no force push or deletion, merge or squash only, pull requests and the three CI jobs required (poteto D12, D14); Michael creates it | - |
 | CMS-30 | 24 Nov | Poteto pyramid refactor, group B: the database API (steps 13 to 22 of the adoption plan), built locally first | #39 |
@@ -341,7 +340,9 @@ from: CMS-37
 from: CMS-32
 
 ### CMS-41
-urgent: Michael 26 Nov
+
+**Evidence**
+Merged via #54 with CI and the manual e2e run green on the merged commit; Deploy to test submitted on 28 Nov, waiting for reviewer approval
 
 ### CMS-42
 from: CMS-4
