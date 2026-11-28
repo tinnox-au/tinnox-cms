@@ -11,14 +11,15 @@ import { PushContext, type PushContextValue } from '../../push/PushContext.tsx';
 import { ScreensList } from './ScreensList.tsx';
 import { useScreensData, type ScreensData } from './useScreensData.ts';
 
-const { patchDisplay, deleteDisplay, listPlaylists, listTags } = vi.hoisted(() => ({
+const { patchDisplay, deleteDisplay, getDisplay, listPlaylists, listTags } = vi.hoisted(() => ({
   patchDisplay: vi.fn<(id: string, patch: unknown) => Promise<DisplayDto>>(),
   deleteDisplay: vi.fn<(id: string) => Promise<void>>(),
+  getDisplay: vi.fn<(id: string) => Promise<DisplayDto>>(),
   listPlaylists: vi.fn<() => Promise<PlaylistSummaryDto[]>>(),
   listTags: vi.fn<() => Promise<TagDto[]>>(),
 }));
 vi.mock('../../../api/index.ts', () => ({
-  api: { patchDisplay, deleteDisplay, listPlaylists, listTags },
+  api: { patchDisplay, deleteDisplay, getDisplay, listPlaylists, listTags },
 }));
 vi.mock('./useScreensData.ts', () => ({ useScreensData: vi.fn() }));
 vi.mock('../../../shell/Page.tsx', () => ({
@@ -150,6 +151,10 @@ beforeEach(() => {
   mockedScreensData.mockReturnValue(screensData([LOBBY]));
   listPlaylists.mockResolvedValue([]);
   listTags.mockResolvedValue([]);
+  // After a delete's 404 the dialog reads the screen: gone, unless a test says otherwise.
+  getDisplay.mockRejectedValue(
+    new ApiRequestError({ status: 404, code: 'not_found', message: 'Gone.', fromApi: true }),
+  );
 });
 
 afterEach(() => {
@@ -371,7 +376,7 @@ describe('ScreensList: deleting a screen', () => {
     await expect
       .element(
         dialog.getByText(
-          'The server may or may not have deleted Lobby. The list was read again; check it before you try again.',
+          'The server may or may not have deleted Lobby. The list is being read again; check it before you try again.',
           { exact: false },
         ),
       )
@@ -395,6 +400,66 @@ describe('ScreensList: deleting a screen', () => {
           .getByText('Lobby was already deleted'),
       )
       .toBeVisible();
+  });
+
+  it("R2-01, R2-02: a 429 on deleting again shows the server's words, and the lost answer stays in view", async () => {
+    serve([LOBBY]);
+    deleteDisplay
+      .mockRejectedValueOnce(
+        new ApiRequestError({
+          status: 0,
+          code: 'network_error',
+          message: 'The server could not be reached.',
+          fromApi: false,
+        }),
+      )
+      .mockRejectedValueOnce(
+        new ApiRequestError({
+          status: 429,
+          code: 'rate_limited',
+          message: 'Too many requests. Try again in 1 minute.',
+          fromApi: true,
+        }),
+      );
+    const screen = await renderList('owner');
+    await screen.getByRole('button', { name: 'Actions for Lobby' }).click();
+    await screen.getByRole('menuitem', { name: 'Delete' }).click();
+    await screen.getByTestId('screens-delete-dialog-confirm').click();
+    const dialog = screen.getByTestId('screens-delete-dialog');
+    await expect.element(dialog.getByText('network_error', { exact: true })).toBeVisible();
+
+    await screen.getByTestId('screens-delete-dialog-confirm').click();
+    await expect.element(dialog.getByText('Deleting it again was refused')).toBeVisible();
+    await expect
+      .element(dialog.getByText(/Too many requests\. Try again in 1 minute\./))
+      .toBeVisible();
+    await expect.element(dialog.getByText('The delete could not be confirmed')).toBeVisible();
+    expect(dialog.getByText('The screen was not deleted').query()).toBeNull();
+    expect(reloadDisplays).toHaveBeenCalledTimes(2);
+  });
+
+  it('#7: a 404 while the screen is still there (an API without the route) is not "already deleted"', async () => {
+    serve([LOBBY]);
+    deleteDisplay.mockRejectedValue(
+      new ApiRequestError({
+        status: 404,
+        code: 'not_found',
+        message: 'There is nothing at this address.',
+        fromApi: true,
+      }),
+    );
+    getDisplay.mockResolvedValue(LOBBY);
+    const screen = await renderList('owner');
+    await screen.getByRole('button', { name: 'Actions for Lobby' }).click();
+    await screen.getByRole('menuitem', { name: 'Delete' }).click();
+    await screen.getByTestId('screens-delete-dialog-confirm').click();
+
+    const dialog = screen.getByTestId('screens-delete-dialog');
+    await expect.element(dialog.getByText('The screen was not deleted')).toBeVisible();
+    await expect.element(dialog.getByText(/There is nothing at this address\./)).toBeVisible();
+    expect(getDisplay).toHaveBeenCalledExactlyOnceWith(LOBBY.id);
+    expect(reloadDisplays).not.toHaveBeenCalled();
+    expect(screen.getByText('Lobby was already deleted').query()).toBeNull();
   });
 
   it("SDC-01: a 404 that is not the API's own is not read as already deleted", async () => {
@@ -775,11 +840,43 @@ describe('ScreensList: deleting the selected screens', () => {
     ]);
     await expect.element(dialog.getByText('1 screen was deleted.')).toBeVisible();
     await expect
-      .element(dialog.getByText('The list was read again; check it before you try again.'))
+      .element(dialog.getByText('The list is being read again; check it before you try again.'))
       .toBeVisible();
     expect(reloadDisplays).toHaveBeenCalledTimes(1);
     expect(reloadStatuses).toHaveBeenCalledTimes(1);
     expect(refreshPush).toHaveBeenCalledTimes(1);
+  });
+
+  it('R2-01: a retry refused after a lost answer keeps that screen unconfirmed', async () => {
+    serve([ONE, TWO]);
+    deleteDisplay
+      .mockResolvedValueOnce()
+      .mockRejectedValueOnce(
+        new ApiRequestError({
+          status: 0,
+          code: 'network_error',
+          message: 'The server could not be reached.',
+          fromApi: false,
+        }),
+      )
+      .mockRejectedValueOnce(refusal(403, 'forbidden', 'Your role does not allow this.'));
+    const screen = await renderList('owner');
+    await tick(screen, 'Screen 1', 'Screen 2');
+    await screen.getByTestId('screens-bulk-delete').click();
+    served = [TWO];
+    await screen.getByTestId('screens-bulk-delete-confirm').click();
+    // (A 429 never gets here: the bulk run waits it out and sends the delete again.)
+    await screen.getByTestId('screens-bulk-delete-retry').click();
+
+    await expect
+      .poll(() => screen.getByTestId('screens-bulk-delete-failures').element().textContent)
+      .toBe(
+        'Screen 2: The server may or may not have deleted it. Your role does not allow this. forbidden',
+      );
+    await expect
+      .element(screen.getByRole('heading', { name: 'Not every delete could be confirmed' }))
+      .toBeVisible();
+    expect(reloadDisplays).toHaveBeenCalledTimes(2);
   });
 
   it('SDC-02: for one screen, says the delete could not be confirmed', async () => {

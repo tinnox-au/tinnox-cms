@@ -1,9 +1,10 @@
 import { useState } from 'react';
-import { isApiRequestError, isOutcomeUnknown } from '../../api/client.ts';
+import { isApiRequestError } from '../../api/client.ts';
 import { api } from '../../api/index.ts';
 import {
   DELETE_UNCONFIRMED,
   deleteScreen,
+  isDeleteUnconfirmed,
   screenDeleteUnconfirmed,
 } from '../../lib/screensDelete.ts';
 import { Banner, ConfirmDialog, ErrorNotice } from '../../ui/index.ts';
@@ -81,10 +82,13 @@ export function DeleteScreenDialog({
     if (busy || shown === null) return;
     const target = shown;
     setBusy(true);
+    // An earlier unconfirmed answer stays until this one settles it (R2-01).
     setError(null);
-    setUnsure(null);
     // Already deleted (the API's 404) resolves as gone: what the operator asked for is true.
-    deleteScreen(() => api.deleteDisplay(target.id)).then(
+    deleteScreen(
+      () => api.deleteDisplay(target.id),
+      () => api.getDisplay(target.id),
+    ).then(
       (result) => {
         setBusy(false);
         onClose();
@@ -93,11 +97,12 @@ export function DeleteScreenDialog({
       (reason: unknown) => {
         setBusy(false);
         // The server may have deleted it: never say it was not.
-        if (isOutcomeUnknown(reason)) {
+        if (isDeleteUnconfirmed(reason)) {
           setUnsure({ code: isApiRequestError(reason) ? reason.code : null });
           onUnsure?.();
           return;
         }
+        if (unsure !== null) onUnsure?.();
         setError(reason);
       },
     );
@@ -138,7 +143,12 @@ export function DeleteScreenDialog({
           </p>
         </Banner>
       )}
-      {error !== null && <ErrorNotice error={error} title="The screen was not deleted" />}
+      {error !== null && (
+        <ErrorNotice
+          error={error}
+          title={unsure === null ? 'The screen was not deleted' : 'Deleting it again was refused'}
+        />
+      )}
     </ConfirmDialog>
   );
 }

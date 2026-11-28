@@ -10,12 +10,15 @@ import { ToastProvider } from '../../../ui/index.ts';
 import { PushContext, type PushContextValue } from '../../push/PushContext.tsx';
 import { ScreenDetail } from './ScreenDetail.tsx';
 
-const { getDisplayStatus, listTags, deleteDisplay } = vi.hoisted(() => ({
+const { getDisplayStatus, listTags, deleteDisplay, getDisplay } = vi.hoisted(() => ({
   getDisplayStatus: vi.fn<() => Promise<DeliveryStatusView>>(),
   listTags: vi.fn<() => Promise<TagDto[]>>(),
   deleteDisplay: vi.fn<(id: string) => Promise<void>>(),
+  getDisplay: vi.fn<(id: string) => Promise<unknown>>(),
 }));
-vi.mock('../../../api/index.ts', () => ({ api: { getDisplayStatus, listTags, deleteDisplay } }));
+vi.mock('../../../api/index.ts', () => ({
+  api: { getDisplayStatus, listTags, deleteDisplay, getDisplay },
+}));
 // The page frame needs the whole shell; the test reads what the page hands it.
 vi.mock('../../../shell/EditorPage.tsx', () => ({
   EditorPage: ({ title, status, children }: EditorPageProps) => (
@@ -183,7 +186,7 @@ describe('ScreenDetail: "Delete screen"', () => {
     await expect
       .element(
         dialog.getByText(
-          'The server may or may not have deleted Lobby. The page was read again; check it before you try again.',
+          'The server may or may not have deleted Lobby. The page is being read again; check it before you try again.',
           { exact: false },
         ),
       )

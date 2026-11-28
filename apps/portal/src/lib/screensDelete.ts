@@ -5,7 +5,7 @@
  * outcome is unknown (SDC-02) never says "not deleted": the server may have deleted it.
  */
 
-import { isApiRequestError } from '../api/client.ts';
+import { isApiRequestError, isOutcomeUnknown } from '../api/client.ts';
 import { bulkFailureTitle, countOf } from './bulkOutcome.ts';
 
 /** How one delete ended: deleted now, or already gone (404). */
@@ -21,13 +21,37 @@ export function isScreenGone(error: unknown): boolean {
   );
 }
 
-/** Runs one delete; the API's 404 is the end the operator asked for, so it resolves as `gone`. */
-export async function deleteScreen(remove: () => Promise<void>): Promise<ScreenDeleteResult> {
+/**
+ * The delete may or may not have been carried out: an unknown outcome, except the API's own 429,
+ * which its rate limiter answers before the route runs (R2-02).
+ */
+export function isDeleteUnconfirmed(error: unknown): boolean {
+  return (
+    isOutcomeUnknown(error) &&
+    !(isApiRequestError(error) && error.fromApi && error.code === 'rate_limited')
+  );
+}
+
+/**
+ * Runs one delete; the API's 404 is the end the operator asked for, so it resolves as `gone`.
+ * The API answers a route it lacks with the same 404 (an older API), so `read` asks for the
+ * screen first: only when that is gone too is the screen gone (#7).
+ */
+export async function deleteScreen(
+  remove: () => Promise<void>,
+  read: () => Promise<unknown>,
+): Promise<ScreenDeleteResult> {
   try {
     await remove();
     return 'deleted';
   } catch (error) {
-    if (isScreenGone(error)) return 'gone';
+    if (!isScreenGone(error)) throw error;
+    try {
+      await read();
+    } catch (readError) {
+      if (isScreenGone(readError)) return 'gone';
+      throw readError;
+    }
     throw error;
   }
 }
@@ -38,16 +62,16 @@ export const DELETE_UNCONFIRMED = 'The delete could not be confirmed';
 /** The same, for one failure in a dialog that deleted several screens. */
 export const SCREEN_DELETE_UNCONFIRMED_LINE = 'The server may or may not have deleted it.';
 
-/** Says the list was read again after an unconfirmed delete. */
-export const SCREENS_READ_AGAIN = 'The list was read again; check it before you try again.';
+/** Says the list is read again after an unconfirmed delete. */
+export const SCREENS_READ_AGAIN = 'The list is being read again; check it before you try again.';
 
 /**
  * The single delete's notice when its answer was lost: "The server may or may not have deleted
- * Lobby. The list was read again; check it before you try again." `where` is what was read
+ * Lobby. The list is being read again; check it before you try again." `where` is what is read
  * again: the Screens list, or the screen's own page.
  */
 export function screenDeleteUnconfirmed(name: string, where: 'list' | 'page'): string {
-  return `The server may or may not have deleted ${name}. The ${where} was read again; check it before you try again.`;
+  return `The server may or may not have deleted ${name}. The ${where} is being read again; check it before you try again.`;
 }
 
 /**

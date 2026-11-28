@@ -256,9 +256,9 @@ export async function heldOrgTx(pool: Pool, orgId: OrgId): Promise<HeldOrgTx> {
 
 /**
  * Two `heldOrgTx` transactions for `orgId`: the two sides of a race in which one runs this
- * package's own code. The second opens inside the first's cleanup, and whatever `work` has not
- * ended is rolled back afterwards, both sides at once, so a side still waiting for the other's
- * lock is not left waiting behind it.
+ * package's own code. Whatever `work` has not ended is rolled back afterwards, both sides at
+ * once, so a side still waiting for the other's lock is not left waiting behind it; the first is
+ * rolled back too if the second fails to open.
  */
 export async function heldTransactions(
   pool: Pool,

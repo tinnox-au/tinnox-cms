@@ -11,6 +11,7 @@ import {
   deleteScreensFailureTitle,
   deleteScreensLabel,
   deleteScreensQuestion,
+  isDeleteUnconfirmed,
   isScreenGone,
   pairedPlayersLose,
   SCREEN_DELETE_UNCONFIRMED_LINE,
@@ -22,23 +23,40 @@ import {
 
 const refusal = (status: number, code: ClientErrorCode) =>
   new ApiRequestError({ status, code, message: 'No.', fromApi: true });
+// What reading the screen answers once a delete got a 404: gone, or still there.
+const goneOnRead = () => Promise.reject(refusal(404, 'not_found'));
+const thereOnRead = () => Promise.resolve({});
 
 describe('deleteScreen', () => {
   it('resolves deleted when the server deleted it', async () => {
-    await expect(deleteScreen(() => Promise.resolve())).resolves.toBe('deleted');
+    await expect(deleteScreen(() => Promise.resolve(), thereOnRead)).resolves.toBe('deleted');
   });
 
-  it('resolves gone on a 404: the screen was already deleted', async () => {
-    await expect(deleteScreen(() => Promise.reject(refusal(404, 'not_found')))).resolves.toBe(
-      'gone',
+  it('resolves gone on a 404 when reading the screen finds it gone too', async () => {
+    await expect(
+      deleteScreen(() => Promise.reject(refusal(404, 'not_found')), goneOnRead),
+    ).resolves.toBe('gone');
+  });
+
+  it('#7: passes the 404 on when the screen is still there (an API without the route)', async () => {
+    const missingRoute = refusal(404, 'not_found');
+    await expect(deleteScreen(() => Promise.reject(missingRoute), thereOnRead)).rejects.toBe(
+      missingRoute,
     );
+    const offline = refusal(0, 'network_error');
+    await expect(
+      deleteScreen(
+        () => Promise.reject(missingRoute),
+        () => Promise.reject(offline),
+      ),
+    ).rejects.toBe(offline);
   });
 
   it('passes any other failure on', async () => {
     const forbidden = refusal(403, 'forbidden');
-    await expect(deleteScreen(() => Promise.reject(forbidden))).rejects.toBe(forbidden);
+    await expect(deleteScreen(() => Promise.reject(forbidden), goneOnRead)).rejects.toBe(forbidden);
     const network = new Error('offline');
-    await expect(deleteScreen(() => Promise.reject(network))).rejects.toBe(network);
+    await expect(deleteScreen(() => Promise.reject(network), goneOnRead)).rejects.toBe(network);
   });
 
   it("SDC-01: passes on a 404 that is not the API's own, an unknown outcome", async () => {
@@ -47,7 +65,17 @@ describe('deleteScreen', () => {
     expect(page.fromApi).toBe(false);
     expect(page.code).toBe('invalid_response');
     expect(isOutcomeUnknown(page)).toBe(true);
-    await expect(deleteScreen(() => Promise.reject(page))).rejects.toBe(page);
+    await expect(deleteScreen(() => Promise.reject(page), goneOnRead)).rejects.toBe(page);
+  });
+});
+
+describe('isDeleteUnconfirmed', () => {
+  it("R2-02: is an unknown outcome, except the API's own 429, which refused before the route ran", () => {
+    expect(isDeleteUnconfirmed(refusal(429, 'rate_limited'))).toBe(false);
+    expect(isDeleteUnconfirmed(refusal(500, 'commit_outcome_unknown'))).toBe(true);
+    expect(isDeleteUnconfirmed(refusal(0, 'network_error'))).toBe(true);
+    expect(isDeleteUnconfirmed(errorFromResponse(429, '<html>Slow down</html>', null))).toBe(true);
+    expect(isDeleteUnconfirmed(refusal(403, 'forbidden'))).toBe(false);
   });
 });
 
@@ -73,16 +101,16 @@ describe('SDC-02: an unconfirmed delete', () => {
   it('never says the screen was not deleted', () => {
     expect(DELETE_UNCONFIRMED).toBe('The delete could not be confirmed');
     expect(screenDeleteUnconfirmed('Lobby', 'list')).toBe(
-      'The server may or may not have deleted Lobby. The list was read again; check it before you try again.',
+      'The server may or may not have deleted Lobby. The list is being read again; check it before you try again.',
     );
     expect(screenDeleteUnconfirmed('Lobby', 'page')).toBe(
-      'The server may or may not have deleted Lobby. The page was read again; check it before you try again.',
+      'The server may or may not have deleted Lobby. The page is being read again; check it before you try again.',
     );
     expect(deleteScreensFailureTitle(1, 1, true)).toBe('The delete could not be confirmed');
     expect(deleteScreensFailureTitle(1, 3, true)).toBe('Not every delete could be confirmed');
     expect(deleteScreensFailureTitle(3, 3, true)).toBe('Not every delete could be confirmed');
     expect(SCREEN_DELETE_UNCONFIRMED_LINE).toBe('The server may or may not have deleted it.');
-    expect(SCREENS_READ_AGAIN).toBe('The list was read again; check it before you try again.');
+    expect(SCREENS_READ_AGAIN).toBe('The list is being read again; check it before you try again.');
   });
 });
 

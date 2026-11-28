@@ -1,5 +1,4 @@
 import { useState } from 'react';
-import { isOutcomeUnknown } from '../../../api/client.ts';
 import { api } from '../../../api/index.ts';
 import {
   countOf,
@@ -12,6 +11,7 @@ import {
   deleteScreensFailureTitle,
   deleteScreensLabel,
   deleteScreensQuestion,
+  isDeleteUnconfirmed,
   pairedPlayersLose,
   SCREEN_DELETE_UNCONFIRMED_LINE,
   SCREENS_READ_AGAIN,
@@ -69,6 +69,8 @@ export function DeleteScreensDialog({
   const [items, setItems] = useState<readonly ScreenToDelete[]>(targets ?? []);
   const [outcome, setOutcome] = useState<DeleteOutcome | null>(null);
   const [progress, setProgress] = useState<Progress | null>(null);
+  // Screens whose delete answer was lost; a later refusal does not make them "not deleted" (R2-01).
+  const [unsureIds, setUnsureIds] = useState<ReadonlySet<string>>(new Set());
   const [wasOpen, setWasOpen] = useState(open);
   if (open !== wasOpen) {
     setWasOpen(open);
@@ -76,6 +78,7 @@ export function DeleteScreensDialog({
       setItems(targets);
       setOutcome(null);
       setProgress(null);
+      setUnsureIds(new Set());
     }
   }
 
@@ -86,22 +89,31 @@ export function DeleteScreensDialog({
   const failed = outcome?.failed ?? [];
   const pending = outcome === null ? items : failed.map((failure) => failure.item);
   // Any failure that may have deleted its screen: the words never say "not deleted" then.
-  const unconfirmed = failed.some((failure) => isOutcomeUnknown(failure.error));
+  const unconfirmed = failed.some((failure) => unsureIds.has(failure.item.id));
 
   const run = async () => {
     if (busy || pending.length === 0) return;
     setProgress({ finished: 0, total: pending.length });
     const attempt = await runInSequence(
       pending,
-      (screen) => deleteScreen(() => api.deleteDisplay(screen.id)),
+      (screen) =>
+        deleteScreen(
+          () => api.deleteDisplay(screen.id),
+          () => api.getDisplay(screen.id),
+        ),
       (finished, of) => {
         setProgress({ finished, total: of });
       },
     );
     const merged = outcome === null ? attempt : mergeBulkOutcomes(outcome, attempt);
     setProgress(null);
-    // A failure whose outcome is unknown may have deleted the screen: read the list again then too.
-    const unsure = attempt.failed.some((failure) => isOutcomeUnknown(failure.error));
+    const nowUnsure = new Set(unsureIds);
+    for (const { item, error } of attempt.failed) {
+      if (isDeleteUnconfirmed(error)) nowUnsure.add(item.id);
+    }
+    setUnsureIds(nowUnsure);
+    // A failure that may have deleted its screen: read the list again then too.
+    const unsure = merged.failed.some((failure) => nowUnsure.has(failure.item.id));
     if (attempt.done.length > 0 || unsure) onDeleted(attempt.done.map((entry) => entry.item.id));
     if (merged.failed.length === 0) {
       onClose();
@@ -204,9 +216,12 @@ export function DeleteScreensDialog({
             <ul className="tx-screens-delete__failures" data-testid="screens-bulk-delete-failures">
               {failed.map(({ item, error }) => {
                 const text = failureText(error);
-                const message = isOutcomeUnknown(error)
+                // A later refusal keeps the earlier lost answer in view.
+                const message = isDeleteUnconfirmed(error)
                   ? SCREEN_DELETE_UNCONFIRMED_LINE
-                  : text.message;
+                  : unsureIds.has(item.id)
+                    ? `${SCREEN_DELETE_UNCONFIRMED_LINE} ${text.message}`
+                    : text.message;
                 return (
                   <li key={item.id}>
                     <span className="tx-strong tx-break">{item.name}</span>:{' '}
