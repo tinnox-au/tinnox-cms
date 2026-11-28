@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-react';
 import { routes } from '../App.tsx';
 import { PushContext, type PushContextValue } from '../features/push/PushContext.tsx';
+import { ROUTE_MANIFEST, type GuardedPath } from '../routes.manifest.ts';
 import { WithSession } from '../session/session.test-support.tsx';
 import { ShellContext, type ShellContextValue } from './ShellContext.ts';
 
@@ -33,24 +34,32 @@ const PUSH: PushContextValue = {
 };
 
 /** A child route of App.tsx's table, as App.tsx defines it (its lazy page and its guard). */
-function appRoute(path: string): RouteObject {
-  const route = routes[0]?.children?.find((child) => child.path === path);
+function appRoute(path: GuardedPath): RouteObject {
+  const route = routes[0]?.children?.find((child) => child.path === path.slice(1));
   if (route === undefined) throw new Error(`App.tsx has no route '${path}'`);
   return route;
 }
 
-/** The guarded routes of App.tsx, and the heading each page's stand-in shows. */
-const GUARDED = [
-  { path: '/users', route: 'users', heading: 'Users' },
-  { path: '/screens/new', route: 'screens/new', heading: 'Add a screen' },
-  { path: '/settings/alerts', route: 'settings/alerts', heading: 'Alerts' },
-] as const;
+/**
+ * The heading of each guarded page's stand-in (the mocks above). Keyed by the manifest's
+ * guarded paths, so a new guarded route fails typecheck here until it has a stand-in.
+ */
+const STAND_IN_HEADINGS = {
+  '/users': 'Users',
+  '/screens/new': 'Add a screen',
+  '/settings/alerts': 'Alerts',
+} as const satisfies Record<GuardedPath, string>;
+
+/** The guarded routes of routes.manifest.ts, and the heading each page's stand-in shows. */
+const GUARDED = ROUTE_MANIFEST.flatMap((entry) =>
+  'permission' in entry ? [{ path: entry.path, heading: STAND_IN_HEADINGS[entry.path] }] : [],
+);
 
 /** Renders App.tsx's guarded routes as `role`, starting at `path`, inside the real page frame. */
-function renderAt(role: Role, path: string) {
+function renderAt(role: Role, path: GuardedPath) {
   const router = createMemoryRouter(
     [
-      ...GUARDED.map(({ route }) => appRoute(route)),
+      ...GUARDED.map((guarded) => appRoute(guarded.path)),
       { path: 'dashboard', element: <h1>Dashboard</h1> },
     ],
     { initialEntries: [path] },
@@ -67,6 +76,10 @@ function renderAt(role: Role, path: string) {
 }
 
 describe('RequirePermission on the routes of App.tsx', () => {
+  it('finds every guarded route of the manifest', () => {
+    expect(GUARDED.map(({ path }) => path).sort()).toEqual(Object.keys(STAND_IN_HEADINGS).sort());
+  });
+
   for (const { path, heading } of GUARDED) {
     it(`shows a Viewer on ${path} that the role does not allow the page`, async () => {
       const screen = await renderAt('viewer', path);

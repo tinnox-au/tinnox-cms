@@ -1,12 +1,13 @@
 /**
- * Automated accessibility checks (axe, WCAG 2.2 A and AA) on every main page of the portal and
- * its key dialogs, in light and dark. Fails on serious or critical problems only. This guards
- * what the pages already do; it does not replace a pass with a real screen reader.
+ * Automated accessibility checks (axe, WCAG 2.2 A and AA) on every page of the portal's route
+ * table and its key dialogs, in light and dark. Fails on serious or critical problems only.
+ * This guards what the pages already do; it does not replace a pass with a real screen reader.
  * Data is set up through the API: one image, one app, one playlist, one schedule, one layout,
  * one screen. The people on Users are the seeded members.
  */
 import { randomUUID } from 'node:crypto';
 import { expect, test } from '@playwright/test';
+import { PAGE_ROUTES, type ObjectKind, type PagePath } from '@tinnox/portal/routes-manifest';
 import { encodePng } from '../support/png.ts';
 import { expectAccessible } from './support/a11y.ts';
 import { operatorSession, type OperatorSession } from './support/contexts.ts';
@@ -24,6 +25,19 @@ let playlistId = '';
 let scheduleId = '';
 let layoutId = '';
 let displayId = '';
+
+/** The object the fixture made of each kind, whose id opens a per-object page. */
+function fixtureId(kind: ObjectKind): string {
+  const ids: Record<ObjectKind, string> = {
+    media: mediaId,
+    app: appId,
+    playlist: playlistId,
+    schedule: scheduleId,
+    layout: layoutId,
+    screen: displayId,
+  };
+  return ids[kind];
+}
 
 test.beforeAll(async ({ browser }) => {
   operator = await operatorSession(browser, 'operator');
@@ -87,27 +101,59 @@ async function open(path: string, heading: string | RegExp): Promise<void> {
   await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
 }
 
-const PAGES: readonly (readonly [string, () => string, string | RegExp])[] = [
-  ['dashboard', () => '/dashboard', 'Dashboard'],
-  ['media library', () => '/media', /Media|All media/],
-  ['media detail', () => `/media/${mediaId}`, `ZZ a11y ${runId}.png`],
-  ['apps', () => '/apps', 'Apps'],
-  ['app editor', () => `/apps/${appId}`, `ZZ a11y clock ${runId}`],
-  ['playlists', () => '/playlists', 'Playlists'],
-  ['playlist editor', () => `/playlists/${playlistId}`, `ZZ a11y playlist ${runId}`],
-  ['schedules', () => '/schedules', 'Schedules'],
-  ['schedule editor', () => `/schedules/${scheduleId}`, `ZZ a11y schedule ${runId}`],
-  ['layouts', () => '/layouts', 'Layouts'],
-  ['layout editor', () => `/layouts/${layoutId}`, `ZZ a11y layout ${runId}`],
-  ['screens', () => '/screens', 'Screens'],
-  ['screen page', () => `/screens/${displayId}`, `ZZ a11y screen ${runId}`],
-  ['add screen', () => '/screens/new', /screen/i],
-  ['settings', () => '/settings', 'Settings'],
-  ['tags', () => '/settings/tags', /Tags/],
-  ['alert addresses', () => '/settings/alerts', 'Alerts'],
-  ['users', () => '/users', 'Users'],
-  ['audit', () => '/audit', /Activity|Audit/],
-];
+interface PageScan {
+  /** The test's name for the page. */
+  readonly name: string;
+  /** Its `h1`, waited for before the scan. */
+  readonly heading: string | RegExp;
+  /** The address to open, for a pattern no fixture id fills (`/*`). */
+  readonly at?: string;
+}
+
+/**
+ * One scan for every page of the portal's route table (apps/portal/src/routes.manifest.ts).
+ * Keyed by `PagePath`, so a route added to the manifest fails `npm run typecheck` here until
+ * it has a scan: give it its name and heading. A per-object page (`:id`) opens the object of
+ * the fixture above that its manifest entry names.
+ */
+const SCANS = {
+  '/dashboard': { name: 'dashboard', heading: 'Dashboard' },
+  '/media': { name: 'media library', heading: /Media|All media/ },
+  '/media/images': { name: 'media library, images', heading: 'Images' },
+  '/media/videos': { name: 'media library, videos', heading: 'Videos' },
+  '/media/audio': { name: 'audio (planned)', heading: 'Audio' },
+  '/media/documents': { name: 'documents (planned)', heading: 'Documents' },
+  '/media/web-pages': { name: 'web pages (planned)', heading: 'Web pages' },
+  '/media/:id': { name: 'media detail', heading: `ZZ a11y ${runId}.png` },
+  '/apps': { name: 'apps', heading: 'Apps' },
+  '/apps/:id': { name: 'app editor', heading: `ZZ a11y clock ${runId}` },
+  '/layouts': { name: 'layouts', heading: 'Layouts' },
+  '/layouts/:id': { name: 'layout editor', heading: `ZZ a11y layout ${runId}` },
+  '/users': { name: 'users', heading: 'Users' },
+  '/playlists': { name: 'playlists', heading: 'Playlists' },
+  '/playlists/:id': { name: 'playlist editor', heading: `ZZ a11y playlist ${runId}` },
+  '/schedules': { name: 'schedules', heading: 'Schedules' },
+  '/schedules/:id': { name: 'schedule editor', heading: `ZZ a11y schedule ${runId}` },
+  '/screens': { name: 'screens', heading: 'Screens' },
+  '/screens/new': { name: 'add screen', heading: /screen/i },
+  '/screens/:id': { name: 'screen page', heading: `ZZ a11y screen ${runId}` },
+  '/settings': { name: 'settings', heading: 'Settings' },
+  '/settings/tags': { name: 'tags', heading: /Tags/ },
+  '/settings/alerts': { name: 'alert addresses', heading: 'Alerts' },
+  '/audit': { name: 'audit', heading: /Activity|Audit/ },
+  '/*': { name: 'page not found', heading: 'Page not found', at: `/no-page-here-${runId}` },
+} satisfies Record<PagePath, PageScan>;
+
+/** The address a scan opens: the page's own, its fixture object's, or the one the scan names. */
+function addressOf(entry: (typeof PAGE_ROUTES)[number]): string {
+  const scan: PageScan = SCANS[entry.path];
+  if (scan.at !== undefined) return scan.at;
+  if ('idFrom' in entry) return entry.path.replace(':id', fixtureId(entry.idFrom));
+  if (/[:*]/.test(entry.path)) {
+    throw new Error(`${entry.path} is a pattern: give its scan an address to open ("at")`);
+  }
+  return entry.path;
+}
 
 for (const scheme of ['light', 'dark'] as const) {
   test.describe(`${scheme} mode`, () => {
@@ -115,9 +161,10 @@ for (const scheme of ['light', 'dark'] as const) {
       await operator.page.emulateMedia({ colorScheme: scheme });
     });
 
-    for (const [name, path, heading] of PAGES) {
+    for (const entry of PAGE_ROUTES) {
+      const { name, heading } = SCANS[entry.path];
       test(`${name} has no serious accessibility problem`, async () => {
-        await open(path(), heading);
+        await open(addressOf(entry), heading);
         await expectAccessible(operator.page, `${name} (${scheme})`);
       });
     }

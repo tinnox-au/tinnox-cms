@@ -45,12 +45,15 @@ only (`apps/player-web/src/core/playback.test.ts`): the player corrects its cloc
 the server, so a faked browser clock would not move it. Both files pass in the full suite.
 
 `e2e/11-accessibility.spec.ts` runs axe (`@axe-core/playwright`, WCAG 2.2 A and AA) on
-every main portal page and on the schedule editor with errors, the create-schedule and
-push dialogs, the screen page's tabs and its Change menu, in light and in dark. It fails
+every page of the portal's route table and on the schedule editor with errors, the
+create-schedule and push dialogs, the screen page's tabs and its Change menu, in light and
+in dark. It fails
 on serious and critical findings only (`e2e/support/a11y.ts`, which first waits for short
 entrance animations so a dialog is not measured while it fades in). An automated check
 finds a share of what a screen-reader user meets; a listening pass with a real screen
-reader is still a manual step.
+reader is still a manual step. Its page scans are keyed by `PagePath`, the pages of
+`apps/portal/src/routes.manifest.ts` (imported as `@tinnox/portal/routes-manifest`), so a
+page added there without a scan fails `npm run typecheck` (a redirect needs none).
 
 `integration/` gained the schedule routes in `session-csrf.test.ts` and the schedule
 probes in `cross-org.test.ts`; the API's own schedule tests are

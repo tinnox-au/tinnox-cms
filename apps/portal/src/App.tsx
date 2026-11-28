@@ -8,6 +8,12 @@ import {
   useParams,
   type RouteObject,
 } from 'react-router-dom';
+import {
+  ROUTE_MANIFEST,
+  type PagePath,
+  type RouteEntry,
+  type RoutePath,
+} from './routes.manifest.ts';
 import { AuthenticatedProvider } from './session/AuthenticatedSession.tsx';
 import { SessionProvider, useSessionState } from './session/SessionContext.tsx';
 import { AppShell } from './shell/AppShell.tsx';
@@ -36,20 +42,21 @@ function loginHref(): string {
 }
 
 /**
- * A route whose page is loaded on first visit, so each feature is its own bundle. The page
- * modules export named components (see the table in src/ui/README.md, "Shell"); `render`
- * picks the component and gives it its props.
+ * A page loaded on first visit, so each feature is its own bundle. The page modules export
+ * named components (see the table in src/ui/README.md, "Shell"); `render` picks the component
+ * and gives it its props.
  */
-function page<M>(
-  path: string,
-  load: () => Promise<M>,
-  render: (module: M) => ReactElement,
-): RouteObject {
-  return {
-    path,
-    hydrateFallbackElement: <RouteLoading />,
-    lazy: async () => ({ element: render(await load()) }),
-  };
+interface LazyPage {
+  readonly load: () => Promise<ReactElement>;
+}
+
+function lazyPage<M>(load: () => Promise<M>, render: (module: M) => ReactElement): LazyPage {
+  return { load: async () => render(await load()) };
+}
+
+/** A route rendered at once: the redirects and the "page not found" page. */
+interface EagerElement {
+  readonly element: ReactElement;
 }
 
 const dashboard = () => import('./features/dashboard/DashboardPage.tsx');
@@ -104,88 +111,83 @@ function OldDisplaysRedirect() {
 }
 
 /**
- * The route table of docs/portal-v2/stage-a.md, section 1. Exported for
- * shell/RequirePermission.test.tsx, which renders the guarded routes from here.
+ * What each address of routes.manifest.ts renders. Keyed by `RoutePath`, so the router has an
+ * element for every manifest entry and none without one; the manifest holds the order, the
+ * guards and which pages are per object. A redirect takes only an `EagerElement`, so a lazily
+ * loaded page cannot hide under `kind: 'redirect'` and escape the page scans that `PagePath`
+ * demands; a page may be eager too, as "page not found" is.
+ */
+const ELEMENTS = {
+  '/': { element: <Navigate to={HOME_PATH} replace /> },
+  '/dashboard': lazyPage(dashboard, (m) => <m.DashboardPage />),
+
+  '/media': lazyPage(mediaLibrary, (m) => <m.MediaLibraryPage kind="all" />),
+  '/media/images': lazyPage(mediaLibrary, (m) => <m.MediaLibraryPage kind="image" />),
+  '/media/videos': lazyPage(mediaLibrary, (m) => <m.MediaLibraryPage kind="video" />),
+  '/media/audio': lazyPage(planned, (m) => <m.PlannedPage section="audio" />),
+  '/media/documents': lazyPage(planned, (m) => <m.PlannedPage section="documents" />),
+  '/media/web-pages': lazyPage(planned, (m) => <m.PlannedPage section="web-pages" />),
+  '/media/:id': lazyPage(mediaDetail, (m) => <m.MediaDetailPage />),
+
+  '/apps': lazyPage(appsPage, (m) => <m.AppsPage />),
+  '/apps/:id': lazyPage(appEditor, (m) => <m.AppEditorPage />),
+  '/layouts': lazyPage(layoutsPage, (m) => <m.LayoutsPage />),
+  '/layouts/:id': lazyPage(layoutEditor, (m) => <m.LayoutEditorPage />),
+  '/users': lazyPage(users, (m) => <m.UsersPage />),
+
+  '/playlists': lazyPage(playlists, (m) => <m.PlaylistsPage />),
+  '/playlists/:id': lazyPage(playlistEditor, (m) => <m.PlaylistEditorPage />),
+
+  '/schedules': lazyPage(schedulesPage, (m) => <m.SchedulesPage />),
+  '/schedules/:id': lazyPage(scheduleEditor, (m) => <m.ScheduleEditorPage />),
+
+  '/screens': lazyPage(displays, (m) => <m.DisplaysPage />),
+  '/screens/new': lazyPage(displayWizard, (m) => <m.DisplayWizardPage />),
+  '/screens/:id': lazyPage(displayDetail, (m) => <m.DisplayDetailPage />),
+  '/screens/:id/edit': { element: <ScreenEditRedirect /> },
+  '/displays/*': { element: <OldDisplaysRedirect /> },
+
+  '/settings': lazyPage(settings, (m) => <m.SettingsPage />),
+  '/settings/tags': lazyPage(tags, (m) => <m.TagsPage />),
+  '/settings/alerts': lazyPage(alerts, (m) => <m.AlertsPage />),
+  '/audit': lazyPage(audit, (m) => <m.AuditPage />),
+
+  '/*': { element: <NotFoundPage /> },
+} satisfies { [P in RoutePath]: P extends PagePath ? LazyPage | EagerElement : EagerElement };
+
+/** The element of `entry` inside the guard and the per-object key its manifest entry asks for. */
+function framed(entry: RouteEntry, element: ReactElement): ReactElement {
+  const guarded =
+    entry.permission === undefined ? (
+      element
+    ) : (
+      <RequirePermission permission={entry.permission}>{element}</RequirePermission>
+    );
+  return entry.idFrom === undefined ? guarded : <PerObject>{guarded}</PerObject>;
+}
+
+/** The router's child route for a manifest entry: `/` is the index route. */
+function childRoute(entry: (typeof ROUTE_MANIFEST)[number]): RouteObject {
+  const source: LazyPage | EagerElement = ELEMENTS[entry.path];
+  const where = entry.path === '/' ? { index: true as const } : { path: entry.path.slice(1) };
+  if ('element' in source) return { ...where, element: framed(entry, source.element) };
+  return {
+    ...where,
+    hydrateFallbackElement: <RouteLoading />,
+    lazy: async () => ({ element: framed(entry, await source.load()) }),
+  };
+}
+
+/**
+ * The route table of docs/portal-v2/stage-a.md, section 1, built from routes.manifest.ts.
+ * Exported for shell/RequirePermission.test.tsx, which renders the guarded routes from here.
  */
 export const routes: RouteObject[] = [
   {
     path: '/',
     element: <AppShell />,
     errorElement: <RouteError />,
-    children: [
-      { index: true, element: <Navigate to={HOME_PATH} replace /> },
-      page('dashboard', dashboard, (m) => <m.DashboardPage />),
-
-      page('media', mediaLibrary, (m) => <m.MediaLibraryPage kind="all" />),
-      page('media/images', mediaLibrary, (m) => <m.MediaLibraryPage kind="image" />),
-      page('media/videos', mediaLibrary, (m) => <m.MediaLibraryPage kind="video" />),
-      page('media/audio', planned, (m) => <m.PlannedPage section="audio" />),
-      page('media/documents', planned, (m) => <m.PlannedPage section="documents" />),
-      page('media/web-pages', planned, (m) => <m.PlannedPage section="web-pages" />),
-      page('media/:id', mediaDetail, (m) => (
-        <PerObject>
-          <m.MediaDetailPage />
-        </PerObject>
-      )),
-
-      page('apps', appsPage, (m) => <m.AppsPage />),
-      page('apps/:id', appEditor, (m) => (
-        <PerObject>
-          <m.AppEditorPage />
-        </PerObject>
-      )),
-      page('layouts', layoutsPage, (m) => <m.LayoutsPage />),
-      page('layouts/:id', layoutEditor, (m) => (
-        <PerObject>
-          <m.LayoutEditorPage />
-        </PerObject>
-      )),
-      page('users', users, (m) => (
-        <RequirePermission permission="member.read">
-          <m.UsersPage />
-        </RequirePermission>
-      )),
-
-      page('playlists', playlists, (m) => <m.PlaylistsPage />),
-      page('playlists/:id', playlistEditor, (m) => (
-        <PerObject>
-          <m.PlaylistEditorPage />
-        </PerObject>
-      )),
-
-      page('schedules', schedulesPage, (m) => <m.SchedulesPage />),
-      page('schedules/:id', scheduleEditor, (m) => (
-        <PerObject>
-          <m.ScheduleEditorPage />
-        </PerObject>
-      )),
-
-      page('screens', displays, (m) => <m.DisplaysPage />),
-      page('screens/new', displayWizard, (m) => (
-        <RequirePermission permission="screen.setup">
-          <m.DisplayWizardPage />
-        </RequirePermission>
-      )),
-      page('screens/:id', displayDetail, (m) => (
-        <PerObject>
-          <m.DisplayDetailPage />
-        </PerObject>
-      )),
-      // Only a redirect to the Canvas tab, which is read-only without screen.setup: no guard.
-      { path: 'screens/:id/edit', element: <ScreenEditRedirect /> },
-      { path: 'displays/*', element: <OldDisplaysRedirect /> },
-
-      page('settings', settings, (m) => <m.SettingsPage />),
-      page('settings/tags', tags, (m) => <m.TagsPage />),
-      page('settings/alerts', alerts, (m) => (
-        <RequirePermission permission="alerts.manage">
-          <m.AlertsPage />
-        </RequirePermission>
-      )),
-      page('audit', audit, (m) => <m.AuditPage />),
-
-      { path: '*', element: <NotFoundPage /> },
-    ],
+    children: ROUTE_MANIFEST.map(childRoute),
   },
 ];
 

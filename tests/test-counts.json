@@ -12,7 +12,7 @@
     "09-review-round-2.spec.ts": 9,
     "09-schedules-portal.spec.ts": 9,
     "10-schedules-player.spec.ts": 4,
-    "11-accessibility.spec.ts": 46,
+    "11-accessibility.spec.ts": 58,
     "12-layouts-portal.spec.ts": 10,
     "13-layouts-player.spec.ts": 8,
     "14-roles.spec.ts": 7,
@@ -23,8 +23,8 @@
     "09-review-round-2.spec.ts": 2
   },
   "vitest": {
-    "unit": 5191,
-    "component (chromium)": 145,
+    "unit": 5193,
+    "component (chromium)": 149,
     "integration": 1238,
     "api-integration": 544
   }

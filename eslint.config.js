@@ -1240,8 +1240,10 @@ export const IMPORT_LAYERS = {
   'apps/media-worker': ['contracts'],
   'apps/portal': ['contracts', 'domain', 'app-render'],
   'apps/player-web': ['contracts', 'domain', 'app-render'],
-  // The API's test harness is the one app entry anything may import (apps/api/package.json).
-  tests: ['contracts', 'db', 'domain', 'app-render', 'api/test-support'],
+  // Two app entries are open to tests, each a package.json export of its app: the API's test
+  // harness, and the portal's JSX-free route manifest, which the accessibility spec keys its
+  // page scans by (adoption plan section 4.5, step 35).
+  tests: ['contracts', 'db', 'domain', 'app-render', 'api/test-support', 'portal/routes-manifest'],
   scripts: ['contracts', 'db', 'domain'],
 };
 
@@ -1527,7 +1529,7 @@ function layerPatterns(dir) {
     {
       regex: `^@tinnox/${allowedApps.length === 0 ? '' : `(?!${anyOf(allowedApps)})`}${anyOf(APP_PACKAGES)}`,
       message:
-        "Apps are not libraries. Move the shared code into a package under packages/ and import that; tests reach the API's harness only as '@tinnox/api/test-support'.",
+        "Apps are not libraries. Move the shared code into a package under packages/ and import that; tests reach an app only through the entries IMPORT_LAYERS opens to them: the API's harness as '@tinnox/api/test-support' and the portal's route table as '@tinnox/portal/routes-manifest'.",
     },
     {
       // An app's files are the previous entry's to report.
