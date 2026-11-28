@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // Checks the worker image by itself, without the API in front of it: every sample file is
-// handed to a throwaway worker container (same isolation flags as the compose service) as a
-// job, and the verdict files are compared with what is expected. This proves the worker
-// rejects disguised and hostile files on its own, even those the API would refuse earlier.
+// handed to a throwaway worker container as a job, and the verdict files are compared with
+// what is expected. The container has the isolation of the compose service, read from
+// infra/docker-compose.yml by scripts/worker-run-args.ts, so the two cannot drift
+// (OTH-15). This proves the worker rejects disguised and hostile files on its own, even those
+// the API would refuse earlier.
 //
 // Prerequisites: the image is built and node apps/api/test-fixtures/generate.mjs has run.
 // Usage: node apps/media-worker/scripts/direct-check.mjs
@@ -34,6 +36,14 @@ mkdirSync(outbox);
 chmodSync(jobs, 0o755);
 chmodSync(inbox, 0o755);
 chmodSync(outbox, 0o1777);
+// The container's options, printed by scripts/worker-run-args.ts from the compose service (apps/
+// may not import scripts/lib). Before any job is written, so a compose file Docker cannot render
+// stops the check first.
+const isolation = JSON.parse(
+  execFileSync(process.execPath, [join(root, 'scripts', 'worker-run-args.ts'), jobs], {
+    encoding: 'utf8',
+  }),
+);
 
 const limits = {
   maxBytes: 200 * 1024 * 1024,
@@ -154,40 +164,9 @@ job('inspection over its time budget (1 ms)', fixture('h264.mp4'), 'rejected ins
 });
 
 const name = `tinnox-worker-check-${process.pid}`;
-const container = spawn(
-  'docker',
-  [
-    'run',
-    '--rm',
-    '--name',
-    name,
-    '--network',
-    'none',
-    '--read-only',
-    '--user',
-    '10001:10001',
-    '--cap-drop',
-    'ALL',
-    '--security-opt',
-    'no-new-privileges:true',
-    '--pids-limit',
-    '128',
-    '--memory',
-    '768m',
-    '--memory-swap',
-    '768m',
-    '--cpus',
-    '1',
-    '--tmpfs',
-    '/tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777',
-    '-e',
-    'MEDIA_JOBS_DIR=/jobs',
-    '-v',
-    `${jobs}:/jobs:rw`,
-    image,
-  ],
-  { stdio: ['ignore', 'pipe', 'pipe'] },
-);
+const container = spawn('docker', ['run', '--rm', '--name', name, ...isolation, image], {
+  stdio: ['ignore', 'pipe', 'pipe'],
+});
 let log = '';
 container.stdout.on('data', (chunk) => (log += chunk));
 container.stderr.on('data', (chunk) => (log += chunk));

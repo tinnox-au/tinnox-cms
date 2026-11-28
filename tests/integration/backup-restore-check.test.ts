@@ -10,15 +10,25 @@
  * no ready media; and no publications yet), backups that must still fail (a changed or
  * missing file, a missing thumbnail, an empty database) and restored controls that must
  * still be checked (the publication triggers, forced row-level security, tenant isolation).
+ *
+ * The script reads manifest JSON in SQL, without the contracts, so each manifest
+ * `schemaVersion` the contracts define gets a consistent restore that must pass and a broken
+ * one that must fail (CU-01, adoption plan step 33). The versions are read from ManifestSchema,
+ * so a new version without a case in MANIFEST_CASES fails here.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AppContent } from '@tinnox/contracts';
+import { isMediaItem, ManifestSchema, type AppContent, type Manifest } from '@tinnox/contracts';
 import { resetTestDatabase, runMigrations } from '@tinnox/db/migrate';
-import { buildManifest, type ResolvedItem, type ResolvedMediaItem } from '@tinnox/domain';
+import {
+  buildManifest,
+  type PublicationDraft,
+  type ResolvedItem,
+  type ResolvedMediaItem,
+} from '@tinnox/domain';
 import pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { fixturesDir, repoRoot } from './support.ts';
@@ -227,8 +237,23 @@ async function addReadyImage(c: pg.Client, org: Org, originalName: string): Prom
   };
 }
 
-/** Puts `items` in the screen's playlist and publishes it, with the manifest the API would build. */
-async function publish(c: pg.Client, org: Org, items: readonly ResolvedItem[]): Promise<void> {
+/** What a draft carries beyond its items: playback options, a schedule or a layout's zones. */
+type DraftShape = Partial<
+  Pick<PublicationDraft, 'transition' | 'shuffle' | 'rotation' | 'schedule' | 'zones'>
+>;
+
+/**
+ * Puts `items` in the screen's playlist and publishes it, with the manifest the API would build
+ * for that draft (`shape`), and returns that manifest. `edit` changes the stored copy only, for
+ * a backup that must fail.
+ */
+async function publish(
+  c: pg.Client,
+  org: Org,
+  items: readonly ResolvedItem[],
+  shape: DraftShape = {},
+  edit: (manifest: Manifest) => unknown = (manifest) => manifest,
+): Promise<Manifest> {
   const publicationId = randomUUID();
   await c.query("SELECT set_config('app.org_id', $1, true)", [org.orgId]);
   for (const [position, item] of items.entries()) {
@@ -260,6 +285,7 @@ async function publish(c: pg.Client, org: Org, items: readonly ResolvedItem[]): 
       timeZone: org.timeZone,
       schedule: null,
       zones: null,
+      ...shape,
     },
     { publicationId, createdAt: new Date() },
   );
@@ -270,7 +296,7 @@ async function publish(c: pg.Client, org: Org, items: readonly ResolvedItem[]): 
       org.orgId,
       org.displayId,
       org.playlistId,
-      JSON.stringify(manifest),
+      JSON.stringify(edit(manifest)),
       randomBytes(16).toString('hex'),
       org.membershipId,
     ],
@@ -286,6 +312,7 @@ async function publish(c: pg.Client, org: Org, items: readonly ResolvedItem[]): 
     'INSERT INTO display_delivery (display_id, org_id, desired_publication_id, desired_at) VALUES ($1, $2, $3, now())',
     [org.displayId, org.orgId, publicationId],
   );
+  return manifest;
 }
 
 const NAVY = { textColour: '#ffffff', backgroundColour: '#0b1f3a' };
@@ -493,6 +520,175 @@ describe('backup and restore check: valid databases pass', () => {
     },
     RUN_TIMEOUT_MS,
   );
+});
+
+/** A draft that buildManifest writes in one manifest schemaVersion, holding one ready image. */
+interface ManifestCase {
+  readonly what: string;
+  draft(
+    c: pg.Client,
+    org: Org,
+    image: ResolvedMediaItem,
+  ): Promise<{ readonly items: ResolvedItem[]; readonly shape: DraftShape }>;
+}
+
+const EVERY_DAY = [true, true, true, true, true, true, true];
+const CUT = { transition: 'cut', shuffle: false } as const;
+const clock = (c: pg.Client, org: Org): Promise<ResolvedItem> =>
+  addApp(
+    c,
+    org,
+    'Local time',
+    { type: 'clock', settings: { hourCycle: '12', showSeconds: false, ...NAVY } },
+    8_000,
+  );
+
+/**
+ * One case per manifest schemaVersion of the contracts (CU-01). The image sits after an app and,
+ * in versions 4 and 5, in the second playlist or zone, so the script must read the whole flat
+ * list of `assets` and tell apps from media there.
+ */
+const MANIFEST_CASES: Readonly<Record<number, ManifestCase>> = {
+  1: {
+    what: 'an image and nothing else',
+    draft: (_c, _org, image) => Promise.resolve({ items: [image], shape: {} }),
+  },
+  2: {
+    what: 'an image with a fade, an option only version 2 carries',
+    draft: (_c, _org, image) => Promise.resolve({ items: [image], shape: { transition: 'fade' } }),
+  },
+  3: {
+    what: 'an app before an image',
+    draft: async (c, org, image) => ({ items: [await clock(c, org), image], shape: {} }),
+  },
+  4: {
+    what: 'a schedule whose second playlist holds the image',
+    draft: async (c, org, image) => ({
+      items: [await clock(c, org), image],
+      shape: {
+        schedule: {
+          playlists: [
+            { count: 1, ...CUT },
+            { count: 1, ...CUT },
+          ],
+          events: [{ playlist: 1, days: EVERY_DAY, start: '09:00', end: '17:00' }],
+        },
+      },
+    }),
+  },
+  5: {
+    what: 'a layout whose band zone holds the image',
+    draft: async (c, org, image) => ({
+      items: [await clock(c, org), image],
+      shape: {
+        zones: [
+          { rect: { x: 0, y: 0, width: org.canvas.width, height: 918 }, count: 1, ...CUT },
+          { rect: { x: 0, y: 918, width: org.canvas.width, height: 162 }, count: 1, ...CUT },
+        ],
+      },
+    }),
+  },
+};
+
+const HERE = 'MANIFEST_CASES in tests/integration/backup-restore-check.test.ts';
+/** Every manifest schemaVersion the contracts define, read from the schema itself. */
+const CONTRACT_VERSIONS: readonly number[] = ManifestSchema.options.map(
+  (option) => option.shape.schemaVersion.value,
+);
+
+function caseOf(version: number): ManifestCase {
+  const found = Object.hasOwn(MANIFEST_CASES, version) ? MANIFEST_CASES[version] : undefined;
+  if (found === undefined) {
+    throw new Error(
+      `manifest schemaVersion ${String(version)} has no backup case: add one to ${HERE}, a draft that buildManifest writes as version ${String(version)} with a ready image in it, and check that scripts/backup-restore-check.sh still finds every media item of that version's assets (it reads the manifest JSON in SQL, not through the contracts; CU-01)`,
+    );
+  }
+  return found;
+}
+
+/** One organisation with a ready image, published in a manifest of `version`. */
+async function publishedVersion(
+  version: number,
+  edit?: (manifest: Manifest) => unknown,
+): Promise<Manifest> {
+  const manifest = await arrange(async (c) => {
+    const a = await melbourne(c);
+    const image = await addReadyImage(c, a, 'showroom-banner.jpg');
+    const { items, shape } = await caseOf(version).draft(c, a, image.item);
+    return publish(c, a, items, shape, edit);
+  });
+  expect(
+    manifest.schemaVersion,
+    `the case of schemaVersion ${String(version)} in ${HERE} builds another version: change its draft`,
+  ).toBe(version);
+  return manifest;
+}
+
+/** The manifest with a frozen hash that no stored file has, on every media item. */
+const wrongHashes = (manifest: Manifest): unknown => ({
+  ...manifest,
+  assets: manifest.assets.map((item) =>
+    isMediaItem(item) ? { ...item, sha256: '0'.repeat(64) } : item,
+  ),
+});
+
+describe('backup and restore check: every manifest schemaVersion of the contracts (CU-01)', () => {
+  it('has a case for every manifest schemaVersion the contracts define, and for no other', () => {
+    expect(CONTRACT_VERSIONS).toContain(1);
+    const missing = CONTRACT_VERSIONS.filter((version) => !Object.hasOwn(MANIFEST_CASES, version));
+    expect(
+      missing.map((version) => `schemaVersion ${String(version)} has no case in ${HERE}`),
+    ).toEqual([]);
+    const unknown = Object.keys(MANIFEST_CASES)
+      .map(Number)
+      .filter((version) => !CONTRACT_VERSIONS.includes(version));
+    expect(
+      unknown.map(
+        (version) =>
+          `${HERE} has a case for schemaVersion ${String(version)}, which ManifestSchema does not define: remove it`,
+      ),
+    ).toEqual([]);
+  });
+
+  for (const version of CONTRACT_VERSIONS) {
+    const what = Object.hasOwn(MANIFEST_CASES, version) ? `: ${caseOf(version).what}` : '';
+    it(
+      `passes a consistent restore of a schemaVersion ${String(version)} manifest${what}`,
+      async () => {
+        const manifest = await publishedVersion(version);
+        const media = manifest.assets.filter(isMediaItem).length;
+        const apps = manifest.assets.length - media;
+        const run = runCheck();
+        expect(run.output).toContain(
+          `publications: 1; media items: ${String(media)}; app items (no file): ${String(apps)}`,
+        );
+        expect(run.output).toContain(
+          `publication assets: checked ${String(media)}; missing 0; hash mismatches 0; size mismatches 0`,
+        );
+        expect(run.output).toContain('RESULT: restore verified');
+        expect(run.status, run.output).toBe(0);
+      },
+      RUN_TIMEOUT_MS,
+    );
+
+    it(
+      `fails when the bytes a schemaVersion ${String(version)} manifest froze are not the restored bytes`,
+      async () => {
+        // The media row and its file agree, so only the reading of this manifest can fail.
+        await publishedVersion(version, wrongHashes);
+        const run = runCheck();
+        expect(run.output).toContain(
+          'media rows: checked 1; missing 0; hash mismatches 0; size mismatches 0',
+        );
+        expect(run.output).toContain(
+          'publication assets: checked 1; missing 0; hash mismatches 1; size mismatches 0',
+        );
+        expect(run.output).toContain('RESULT: FAILED');
+        expect(run.status, run.output).toBe(1);
+      },
+      RUN_TIMEOUT_MS,
+    );
+  }
 });
 
 describe('backup and restore check: broken backups fail', () => {

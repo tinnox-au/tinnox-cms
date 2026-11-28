@@ -13,6 +13,12 @@ import { parseEnv } from 'node:util';
 import pg from 'pg';
 import type { Operator, PairedPlayer, TestApp } from '@tinnox/api/test-support';
 import { unjudgedSql } from '@tinnox/db/testing';
+import {
+  DEVELOPMENT_COMPOSE_FILE,
+  renderedWorkerService,
+  workerRunArgs,
+  type ComposeService,
+} from '../../scripts/lib/worker-runtime-check.ts';
 
 export * from '@tinnox/api/test-support';
 
@@ -143,8 +149,26 @@ export function lastConfirmationToken(t: TestApp): string {
 }
 
 /**
+ * The worker service of a compose file (from the repository root), as Docker Compose renders
+ * it (renderedWorkerService of scripts/lib/worker-runtime-check.ts, which says why when Compose
+ * cannot render it).
+ */
+export function composeWorkerService(file: string): ComposeService {
+  return renderedWorkerService(repoRoot, file);
+}
+
+/**
+ * The options of `docker run` that start the worker on `jobsDir` with the isolation of its
+ * service in infra/docker-compose.yml, read from that file each time (OTH-15): the compose file
+ * is the one place it is written.
+ */
+export function workerContainerArgs(jobsDir: string): string[] {
+  return workerRunArgs(composeWorkerService(DEVELOPMENT_COMPOSE_FILE), jobsDir);
+}
+
+/**
  * Starts the real validation worker image on the test application's job directory, with
- * the same isolation as infra/docker-compose.yml. Returns a function that removes it.
+ * the isolation of infra/docker-compose.yml. Returns a function that removes it.
  */
 export function startWorkerContainer(t: TestApp): () => void {
   // mkdtemp makes the parent 0700; the worker (uid 10001) must be able to enter it on Linux.
@@ -152,31 +176,7 @@ export function startWorkerContainer(t: TestApp): () => void {
   chmodSync(t.jobsDir, 0o755);
   const id = execFileSync(
     'docker',
-    [
-      'run',
-      '--detach',
-      '--rm',
-      '--network',
-      'none',
-      '--read-only',
-      '--user',
-      '10001:10001',
-      '--cap-drop',
-      'ALL',
-      '--security-opt',
-      'no-new-privileges:true',
-      '--pids-limit',
-      '128',
-      '--memory',
-      '768m',
-      '--cpus',
-      '1',
-      '--tmpfs',
-      '/tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777',
-      '--volume',
-      `${t.jobsDir}:/jobs:rw`,
-      WORKER_IMAGE,
-    ],
+    ['run', '--detach', '--rm', ...workerContainerArgs(t.jobsDir), WORKER_IMAGE],
     { encoding: 'utf8' },
   ).trim();
   return () => {
