@@ -69,6 +69,10 @@
     {
       "file": "0016_twin_guards.sql",
       "test": "packages/db/test/migration-0016.integration.test.ts"
+    },
+    {
+      "file": "0017_display_delete.sql",
+      "test": "packages/db/test/migration-0017.integration.test.ts"
     }
   ]
 }

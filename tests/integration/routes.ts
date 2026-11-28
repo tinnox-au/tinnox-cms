@@ -7,7 +7,8 @@ import { ROUTES, type Role } from '@tinnox/contracts';
 
 /**
  * Every route of the operator API, as registered (`:id` is a UUID): the 51 of portal v2, the
- * 8 people routes of stage C (CMS-13) and the 3 alert address routes (CMS-15). session-csrf.test.ts fails when the application serves
+ * 8 people routes of stage C (CMS-13), the 3 alert address routes (CMS-15) and the screen
+ * delete (CMS-41). session-csrf.test.ts fails when the application serves
  * an operator route that is not listed here, so a new route cannot skip the session, CSRF,
  * Origin and role checks unnoticed.
  */
@@ -18,6 +19,7 @@ export const OPERATOR_ROUTE_PATTERNS: readonly (readonly [string, string])[] = [
   ['GET', '/api/displays/status'],
   ['GET', '/api/displays/:id'],
   ['PATCH', '/api/displays/:id'],
+  ['DELETE', '/api/displays/:id'],
   ['POST', '/api/displays/:id/claim'],
   ['POST', '/api/displays/:id/revoke-player'],
   ['GET', '/api/displays/:id/status'],

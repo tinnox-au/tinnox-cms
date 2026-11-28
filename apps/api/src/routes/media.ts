@@ -455,7 +455,7 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
       const displays = await tx.query<{ id: string; name: string }>(
         `SELECT d.id, d.name FROM display d
          JOIN display_delivery dd ON dd.display_id = d.id AND dd.org_id = d.org_id
-         WHERE d.org_id = app_org_id()
+         WHERE d.org_id = app_org_id() AND d.deleted_at IS NULL
            AND EXISTS (SELECT 1 FROM publication_asset pa
                        WHERE pa.publication_id = dd.desired_publication_id
                          AND pa.org_id = dd.org_id AND pa.media_id = $1)

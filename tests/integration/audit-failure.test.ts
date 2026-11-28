@@ -383,6 +383,14 @@ const CASES: { readonly [A in AuditAction]: Case | readonly Case[] | MigrationOn
       200,
     );
   }),
+  'display.delete': via(route('DELETE', ROUTES.displayPattern), async () => {
+    const display = await createDisplay(owner, org, 'Deleted screen');
+    return change(
+      () => send(owner, 'DELETE', `/api/displays/${display.id}`),
+      () => rowOf('display', display.id),
+      204,
+    );
+  }),
   'display.offline_alert': via(OFF_ROUTE, async () => {
     await confirmedAlertAddress();
     const name = 'Offline alert screen';

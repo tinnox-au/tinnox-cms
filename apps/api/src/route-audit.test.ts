@@ -137,7 +137,7 @@ describe('the audit statements of the application', { timeout: 30_000 }, () => {
     const app = await builtApp();
     try {
       const stated = [...Object.keys(ROUTE_PERMISSIONS), ...Object.keys(OTHER_ROUTE_AUDIT)];
-      expect(stated).toHaveLength(62 + 14);
+      expect(stated).toHaveLength(63 + 14);
       for (const route of stated) {
         const [method = '', url = ''] = route.split(' ');
         expect(app.hasRoute({ method, url }), route).toBe(true);

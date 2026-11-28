@@ -379,6 +379,8 @@ export async function registerPlayerRoutes(app: FastifyInstance, ctx: AppContext
           };
         }
         const tx = await enterOrg(done.orgId);
+        // Not filtered on deleted_at: deleting a screen cancels its claims first, and the claim
+        // checks the screen again under the same lock (migration 0017), so none completes here.
         const { rows } = await tx.query<{
           id: string;
           name: string;

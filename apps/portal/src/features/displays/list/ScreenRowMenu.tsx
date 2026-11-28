@@ -1,7 +1,7 @@
 import type { DisplayDto } from '@tinnox/contracts';
 import { assignedContent } from '../../../lib/assignedContent.ts';
 import type { ScreenRow } from '../../../lib/screensList.ts';
-import { Ellipsis, Eye, ListVideo, Send, Tags, Unlink } from '../../../ui/icons.ts';
+import { Ellipsis, Eye, ListVideo, Send, Tags, Trash, Unlink } from '../../../ui/icons.ts';
 import { IconButton, Menu, MenuItem, MenuSeparator } from '../../../ui/index.ts';
 
 /** Each action left out is hidden: the member's role does not allow it. */
@@ -11,19 +11,34 @@ export interface ScreenRowMenuProps {
   readonly onPush?: (display: DisplayDto) => void;
   readonly onEditTags?: (display: DisplayDto) => void;
   readonly onRevoke?: (display: DisplayDto) => void;
+  readonly onDelete?: (display: DisplayDto) => void;
 }
 
 /**
  * The actions of one screen, behind the three-dot button of its row or tile. "Revoke player"
- * is offered only while a player holds a credential for the screen. "Push now" is disabled,
+ * is offered only while a player holds a credential for the screen; "Delete" whether paired or
+ * not. "Push now" is disabled,
  * with the reason, while nothing is assigned: there would be nothing to push. No menu at all
  * when only Open would be left: the name is the link.
  */
-export function ScreenRowMenu({ row, onAssign, onPush, onEditTags, onRevoke }: ScreenRowMenuProps) {
+export function ScreenRowMenu({
+  row,
+  onAssign,
+  onPush,
+  onEditTags,
+  onRevoke,
+  onDelete,
+}: ScreenRowMenuProps) {
   const { display } = row;
   const nothingAssigned = assignedContent(display) === null;
   const canRevoke = onRevoke !== undefined && row.paired;
-  if (onAssign === undefined && onPush === undefined && onEditTags === undefined && !canRevoke) {
+  if (
+    onAssign === undefined &&
+    onPush === undefined &&
+    onEditTags === undefined &&
+    !canRevoke &&
+    onDelete === undefined
+  ) {
     return null;
   }
   return (
@@ -73,19 +88,28 @@ export function ScreenRowMenu({ row, onAssign, onPush, onEditTags, onRevoke }: S
           Edit tags
         </MenuItem>
       )}
+      {(canRevoke || onDelete !== undefined) && <MenuSeparator />}
       {canRevoke && (
-        <>
-          <MenuSeparator />
-          <MenuItem
-            icon={Unlink}
-            tone="danger"
-            onSelect={() => {
-              onRevoke(display);
-            }}
-          >
-            Revoke player
-          </MenuItem>
-        </>
+        <MenuItem
+          icon={Unlink}
+          tone="danger"
+          onSelect={() => {
+            onRevoke(display);
+          }}
+        >
+          Revoke player
+        </MenuItem>
+      )}
+      {onDelete !== undefined && (
+        <MenuItem
+          icon={Trash}
+          tone="danger"
+          onSelect={() => {
+            onDelete(display);
+          }}
+        >
+          Delete
+        </MenuItem>
       )}
     </Menu>
   );

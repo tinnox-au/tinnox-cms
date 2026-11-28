@@ -1,4 +1,5 @@
 import {
+  ABSOLUTE,
   DELIVERY_SUMMARIES,
   PUSH_STATES,
   type DeliveryStatusView,
@@ -24,7 +25,7 @@ import {
   countByStatusFilter,
   formatStatusFilter,
   frameShape,
-  hasUnlistedScreen,
+  listOutOfDate,
   matchesStatusFilter,
   MIN_FRAME_SHARE,
   parseListView,
@@ -168,12 +169,37 @@ describe('buildScreenRows', () => {
   });
 });
 
-describe('hasUnlistedScreen', () => {
-  it('is true only when a status names a screen the list does not hold', () => {
+describe('listOutOfDate', () => {
+  it('is false when the list and the statuses name the same screens', () => {
     const displays = [display(1), display(2)];
-    expect(hasUnlistedScreen(displays, [view(ID(1)), view(ID(2).toUpperCase())])).toBe(false);
-    expect(hasUnlistedScreen(displays, [view(ID(1))])).toBe(false);
-    expect(hasUnlistedScreen(displays, [view(ID(3))])).toBe(true);
+    expect(listOutOfDate(displays, [view(ID(1)), view(ID(2).toUpperCase())])).toBe(false);
+    expect(listOutOfDate(displays, [view(ID(2)), view(ID(1))])).toBe(false);
+    expect(listOutOfDate([], [])).toBe(false);
+  });
+
+  it('is true when a status names a screen the list does not hold (added elsewhere)', () => {
+    const displays = [display(1), display(2)];
+    expect(listOutOfDate(displays, [view(ID(1)), view(ID(2)), view(ID(3))])).toBe(true);
+    expect(listOutOfDate([], [view(ID(3))])).toBe(true);
+  });
+
+  it('SDC-05: is true when a listed screen has no status (deleted elsewhere)', () => {
+    const displays = [display(1), display(2)];
+    expect(listOutOfDate(displays, [view(ID(1))])).toBe(true);
+    expect(listOutOfDate(displays, [])).toBe(true);
+  });
+
+  it('SDC-05: never reads a capped status answer as a delete', () => {
+    const capped = Array.from({ length: ABSOLUTE.maxListItems }, (_, index) => view(ID(index + 1)));
+    const listed = Array.from({ length: ABSOLUTE.maxListItems + 1 }, (_, index) =>
+      display(index + 1),
+    );
+    // The list holds one screen more than the statuses can name: not out of date.
+    expect(listOutOfDate(listed, capped)).toBe(false);
+    // One short of the cap, the same gap is a delete.
+    expect(listOutOfDate(listed.slice(0, -1), capped.slice(0, -1))).toBe(true);
+    // A capped answer that names an unlisted screen still is.
+    expect(listOutOfDate(listed.slice(1), capped)).toBe(true);
   });
 });
 

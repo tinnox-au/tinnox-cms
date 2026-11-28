@@ -2,7 +2,7 @@ import type { DeliveryStatusView, DisplayDto, SiteDto } from '@tinnox/contracts'
 import { useCallback, useEffect, useRef } from 'react';
 import { api } from '../../../api/index.ts';
 import { useLoad, type LoadState } from '../../../hooks/useLoad.ts';
-import { hasUnlistedScreen } from '../../../lib/screensList.ts';
+import { listOutOfDate } from '../../../lib/screensList.ts';
 
 /** How often the statuses are read again while the tab is visible (stage-a.md, 3.6). */
 export const STATUS_REFRESH_MS = 10_000;
@@ -34,7 +34,7 @@ export interface ScreensData {
  * The three reads behind the screens list. Each fails by itself: without the sites or the
  * statuses the screens are still listed, and the page says what is missing. The statuses are
  * read again every ten seconds; when they name a screen the list does not hold (one was
- * added somewhere else), the list is read again too.
+ * added somewhere else) or lack one it holds (one was deleted), the list is read again too.
  */
 export function useScreensData(): ScreensData {
   const displays = useLoad(loadDisplays);
@@ -52,7 +52,7 @@ export function useScreensData(): ScreensData {
     if (displaysState.status !== 'ready' || statusesState.status !== 'ready') return;
     const views = statusesState.data;
     if (askedFor.current === views) return;
-    if (hasUnlistedScreen(displaysState.data, views)) {
+    if (listOutOfDate(displaysState.data, views)) {
       askedFor.current = views;
       reloadDisplays();
     }

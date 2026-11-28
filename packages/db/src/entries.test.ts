@@ -104,6 +104,8 @@ describe('the entries of @tinnox/db (AG-1.10)', () => {
       'createPool',
       'databaseOn',
       'ensureAuditDebtGuard',
+      'heldOrgTx',
+      'heldTransactions',
       'inTx',
       'installAuditDebtGuard',
       'killBackend',

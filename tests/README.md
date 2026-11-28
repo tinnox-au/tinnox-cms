@@ -70,6 +70,17 @@ each of the four roles, against an oracle written in the test), `integration/rea
 from `integration/routes.ts`; `cross-org.test.ts` gained the people routes and the role refusal
 that is the same 403 for every id; `session-revoke-all.test.ts` gained the member cut-off.
 
+Deleting a screen (CMS-41) added `e2e/16-screen-delete.spec.ts` (a screen deleted from the
+Screens list's row menu, after which its paired player is refused and shows the unregistered
+screen; a screen deleted from its page's "More actions" menu, which opens the Screens list; two
+screens deleted at once from the list's selection bar, one `display.delete` audit row each; the
+deleted ids answer 404 and leave the lists, the statuses and the push plan; no CSP violation and
+no web storage), and `e2e/14-roles.spec.ts` checks that a Viewer gets no "Delete screen" and a
+403 from `DELETE /api/displays/:id`. `support/operator.ts` gains `OperatorApi.delete`. The API's
+own tests are `apps/api/test/display-delete.integration.test.ts`; `cross-org.test.ts`,
+`audit-failure.test.ts`, `roles-matrix.test.ts` and `pairing-and-credentials.test.ts` gained
+its cases, and the database's are `packages/db/test/migration-0017.integration.test.ts`.
+
 Component tests (`npm run test:component`, `apps/portal/src/**/*.test.tsx` in headless
 Chromium): every file first waits until the browser provider reaches its frame
 (`apps/portal/src/componentTests.setup.ts`, registered as `setupFiles` of the `component`

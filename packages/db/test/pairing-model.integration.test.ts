@@ -25,12 +25,12 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   deviceByTokenHash,
   errorField,
-  pairingCancelClaims,
   pairingClaim,
   pairingComplete,
   pairingCreate,
   pairingPoll,
   poolAsTx,
+  revokeDisplayPlayer,
   sessionRevokeMembership,
   type Autocommit,
   type OrgId,
@@ -227,15 +227,11 @@ class RealPairing {
         return 'completed';
       }
       case 'Revoke': {
-        // As POST /api/displays/:id/revoke-player: the claims first, then the registration.
+        // POST /api/displays/:id/revoke-player's own code: the claims, the row, the registration.
         const result = await withOrg(pool, this.#org, async (tx) => {
-          const cancelled = await pairingCancelClaims(tx, this.#display(c.d));
-          const revoked = await tx.query<{ id: string }>(
-            `UPDATE player_registration SET revoked_at = now(), revoked_reason = 'operator'
-             WHERE display_id = $1 AND org_id = app_org_id() AND revoked_at IS NULL RETURNING id`,
-            [this.#display(c.d)],
-          );
-          return { cancelled, revoked: revoked.rows[0]?.id ?? null };
+          const ended = await revokeDisplayPlayer(tx, this.#display(c.d));
+          if (ended === null) throw new Error('a display of the model is not live');
+          return { cancelled: ended.cancelledPairingIds, revoked: ended.revokedRegistrationId };
         });
         return `revoked=${this.#sessionOfRegistration(result.revoked)} cancelled=${this.#labels(result.cancelled)}`;
       }

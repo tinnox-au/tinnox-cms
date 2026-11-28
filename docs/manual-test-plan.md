@@ -1,6 +1,6 @@
 # TINNOX CMS manual test plan
 
-Version of the software: the e-mail alerts build (stage C, CMS-13 and CMS-15; migrations 0001 to 0014; player `player-web/0.5.0`). Written 2026-11-18; revised 2026-11-19 after the first manual run (`docs/reviews/2026-11-19-manual-user-test/`), 2026-11-20 for roles (section 18), and 2026-11-21 for e-mail alerts (section 19).
+Version of the software: the e-mail alerts build (stage C, CMS-13 and CMS-15; migrations 0001 to 0014; player `player-web/0.5.0`). Written 2026-11-18; revised 2026-11-19 after the first manual run (`docs/reviews/2026-11-19-manual-user-test/`), 2026-11-20 for roles (section 18), 2026-11-21 for e-mail alerts (section 19), and 2026-11-27 for deleting a screen (T15.4, CMS-41).
 
 This plan is for a person, not a script. You follow the steps in order, compare what you see with the **Expected** lines, and tick each box that matches. Anything that does not match goes into the issue log at the end (section 22). Nothing here is deployed anywhere: everything runs on your own computer with synthetic data.
 
@@ -523,7 +523,7 @@ Expected:
 
 ### T10.5 The More menu and status refresh
 
-- [ ] The screen page's **More** menu (next to Push to this screen) offers **Refresh status**, **Pair a different player** and **Revoke player**.
+- [ ] The screen page's **More** menu (next to Push to this screen) offers **Refresh status**, **Pair a different player**, **Revoke player** and **Delete screen**. Do not delete `Reception TV`: T15.4 deletes other screens.
 
 ---
 
@@ -689,7 +689,7 @@ Expected:
 
 ---
 
-## 15. Revoke, reset and pair again
+## 15. Revoke, reset, pair again and delete a screen
 
 ### T15.1 Revoke from the portal
 
@@ -716,6 +716,20 @@ Expected:
 
 - [ ] On the playing player press `d`. At the bottom, **Reset this player…** changes on the first click to **Confirm: remove registration and cached content**; the second click resets. The player shows a new code; the portal shows **Not paired** within about 15 seconds, and the audit log records "Player unpaired itself from screen".
 - [ ] Pair it again (Pairing tab → the new code → Pair player) and confirm it plays.
+
+### T15.4 Delete a screen
+
+1. **Screens**, row menu of `Tiny strip` (from T12.5) → **Delete**.
+2. **Screens → Add screen**: name `Spare screen`, Create screen, **Skip for now**, **Skip and finish**. On its page open the **More** menu → **Delete screen**, press **Cancel**, then open it again → **Delete screen** and confirm.
+3. Add two more screens the same way, `Spare one` and `Spare two`. On **Screens** search `Spare`, tick both rows, press **Delete** in the selection bar and confirm.
+
+Expected:
+
+- [ ] Step 1: the dialog "Delete Tiny strip?" says the screen is removed for good and its history stays in the activity log, and, since no player is paired with it, that any pairing code accepted for it that no player has collected yet stops working. (For a paired screen it says instead that the player loses access at once and shows "This player was unregistered" until it is reset there; open **Delete** on `Reception TV` to read it, then press **Cancel**.) **Cancel** has the focus; the red button reads **Delete screen**. Confirm: toast "Tiny strip deleted", the row is gone, and the dashboard's screen count and the push dialog no longer include it.
+- [ ] Step 2: **Cancel** keeps the screen. After the delete the Screens list opens with the toast "Spare screen deleted". Browser **Back** to its address shows **Screen not found**, which says it may have been deleted.
+- [ ] Step 3: the dialog "Delete 2 screens?" lists both names; the red button reads **Delete 2 screens**. Confirm: "Deleting 1 of 2" may show briefly, then the toast "2 screens deleted", both rows are gone and the selection bar closes.
+- [ ] A paired screen's player, when its screen is deleted, shows "This player was unregistered" as in T15.1 (the automated suite checks this; do not delete `Reception TV` here).
+- [ ] **Audit log**: "Screen deleted" four times, by **Dev Owner**.
 
 ---
 
@@ -762,7 +776,7 @@ Open **Media tags**.
 Open the account menu → **Audit log**.
 
 - [ ] The intro says records cannot be edited or deleted through the application. Columns: Time, Action, Result, Actor, Object, Detail. Newest first.
-- [ ] The log contains, in plain words, the journey you did: "Person signed in", "Screen added", "Pairing code accepted for screen", "Player paired with screen", "Media uploaded", "Media checked and ready", "Playlist created", "Pushed to screen", "Schedule created", "Layout created", "Player revoked on screen", "Player unpaired itself from screen". Actors read the person's name (**Dev Owner**) or **Player software**.
+- [ ] The log contains, in plain words, the journey you did: "Person signed in", "Screen added", "Pairing code accepted for screen", "Player paired with screen", "Media uploaded", "Media checked and ready", "Playlist created", "Pushed to screen", "Schedule created", "Layout created", "Player revoked on screen", "Player unpaired itself from screen", "Screen deleted". Actors read the person's name (**Dev Owner**) or **Player software**.
 - [ ] **Category → Pushes to screens** leaves only pushes. Then choose **Category → Pairing** and **Result → Refused**: the wrong pairing code from T8.2 is listed. Press **Clear filters**. The deletes refused in T6.6, T11.4 and T12.6 are not listed: a request that changes nothing writes no audit event.
 - [ ] Open a row's **Detail**: a dialog with Time, Exact time (UTC), Action, Result, Actor, Object and the recorded detail as text; no password, token or URL appears in any detail.
 - [ ] **Load older events** at the bottom ends with "This is the first recorded event."
@@ -776,9 +790,9 @@ Four people are seeded in "TINNOX Internal", one per role: `operator` (Owner, "D
 ### T18.1 Viewer (`viewer`)
 
 - [ ] The header shows no **Push to screens** button; while screens have changes waiting it shows a chip "N screens waiting" that leads to the dashboard. The dashboard has no **Get set up** card.
-- [ ] Media has no **Add media**; Playlists, Schedules, Layouts and Apps have no create button and no delete in their row menus; Screens has no **Add screen**, no row menu and no selection.
+- [ ] Media has no **Add media**; Playlists, Schedules, Layouts and Apps have no create button and no delete in their row menus; Screens has no **Add screen**, no row menu and no selection, so no **Delete** in a selection bar.
 - [ ] Opening a playlist shows "You can view this playlist. Editors make changes." with no Save; nothing on the page can be changed. A media file, an app, a schedule and a layout say the same for their kind.
-- [ ] On a screen's page there is no **Push to this screen** and no Pair or Revoke; the Canvas, Pairing, Tags, Working hours and Alerts tabs are read-only with a one-line note. Pressing Enter in the Canvas tab's Width changes nothing.
+- [ ] On a screen's page there is no **Push to this screen** and no Pair, Revoke or **Delete screen** (the **More** menu offers only **Refresh status**); the Canvas, Pairing, Tags, Working hours and Alerts tabs are read-only with a one-line note. Pressing Enter in the Canvas tab's Width changes nothing.
 - [ ] Opening http://localhost:5173/screens/new and http://localhost:5173/users shows **Your role doesn't allow this** with **Go to dashboard**. The account menu has no **Users**.
 - [ ] The audit log reads "Content and screen events in this organisation: who changed what, and when.", and its Category list has no "Sign-in and sign-out", "Security", "Invites" or "People".
 
@@ -897,7 +911,7 @@ With the mouse put aside, on the **Schedules** list:
 | 12 Layouts | | 19 | |
 | 13 Push dialog | | 8 | |
 | 14 Network loss | | 4 | |
-| 15 Revoke and reset | | 10 | |
+| 15 Revoke, reset, delete | | 15 | |
 | 16 Second organisation | | 5 | |
 | 17 Settings, tags, audit | | 11 | |
 | 18 Roles | | 21 | |

@@ -32,6 +32,12 @@ export {
 export { assertRuntimeRole, createDatabase, ping, type Database } from './database.ts';
 export { CommitOutcomeUnknownError, isCommitOutcomeUnknown } from './commit-outcome.ts';
 export {
+  revokeDisplayPlayer,
+  softDeleteDisplay,
+  type DeletedDisplay,
+  type RevokedPlayer,
+} from './display-player.ts';
+export {
   poolAsTx,
   readOrg,
   type Autocommit,

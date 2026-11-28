@@ -4,6 +4,7 @@ import { isApiRequestError } from '../../api/client.ts';
 import { api } from '../../api/index.ts';
 import { useLoad } from '../../hooks/useLoad.ts';
 import { mediaLoadProblem as detailLoadProblem } from '../../lib/mediaDetailState.ts';
+import { isScreenGone } from '../../lib/screensDelete.ts';
 import { EditorPage } from '../../shell/EditorPage.tsx';
 import { ArrowLeft, MonitorOff } from '../../ui/icons.ts';
 import { ButtonLink, Card, EmptyState, ErrorNotice } from '../../ui/index.ts';
@@ -40,8 +41,12 @@ export function DisplayDetailPage() {
       </EditorPage>
     );
   }
-  if (state.status === 'error') {
-    const refusal = isApiRequestError(state.error) ? state.error : null;
+  // A refresh that finds the screen gone (deleted, by an unconfirmed delete here or elsewhere) is
+  // as missing as a first load that does.
+  const gone = state.status === 'ready' && isScreenGone(state.refreshError);
+  if (state.status === 'error' || gone) {
+    const failure = state.status === 'error' ? state.error : state.refreshError;
+    const refusal = isApiRequestError(failure) ? failure : null;
     if (detailLoadProblem(refusal) === 'missing') {
       // A definite 404, or an address without a valid id: trying again cannot help, so the
       // page says so and leads back to the list, as the media details page does.
@@ -59,7 +64,8 @@ export function DisplayDetailPage() {
                 </ButtonLink>
               }
             >
-              It is not one of this organisation&rsquo;s screens. The address may be wrong.
+              It is not one of this organisation&rsquo;s screens. It may have been deleted, or the
+              address may be wrong.
             </EmptyState>
             {refusal !== null && (
               <p className="tx-screen-detail-missing__answer">
@@ -82,11 +88,7 @@ export function DisplayDetailPage() {
     return (
       <EditorPage title="Screen" back={BACK}>
         <div className="tx-screen-detail-failed" data-testid="screen-detail-load-error">
-          <ErrorNotice
-            error={state.error}
-            title="The screen could not be loaded"
-            onRetry={reload}
-          />
+          <ErrorNotice error={failure} title="The screen could not be loaded" onRetry={reload} />
         </div>
       </EditorPage>
     );

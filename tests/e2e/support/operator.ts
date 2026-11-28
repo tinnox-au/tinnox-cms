@@ -231,6 +231,10 @@ export class OperatorApi {
     });
   }
 
+  async delete(path: string): Promise<APIResponse> {
+    return this.#context.request.delete(`${PORTAL_URL}${path}`, { headers: await this.#headers() });
+  }
+
   /** The membership id of the person with this name (`GET /api/members`, needs `member.read`). */
   async memberIdByName(name: string): Promise<string> {
     const response = await this.get('/api/members');

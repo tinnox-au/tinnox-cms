@@ -61,7 +61,7 @@ All timestamps are `timestamptz` in UTC. The seeded site uses `Australia/Melbour
 
 Portal, cookie session plus CSRF:
 `GET /api/auth/login`, `GET /api/auth/callback`, `POST /api/auth/logout`, `GET /api/session`,
-`GET /api/sites`, `GET|POST /api/displays`, `GET|PATCH /api/displays/:id`, `POST /api/displays/:id/claim` (body: pairing code), `POST /api/displays/:id/revoke-player`,
+`GET /api/sites`, `GET|POST /api/displays`, `GET|PATCH /api/displays/:id` (and `DELETE` since 2026-11-27, CMS-41: the screen is kept as a deleted row and its player revoked), `POST /api/displays/:id/claim` (body: pairing code), `POST /api/displays/:id/revoke-player`,
 `GET /api/media`, `POST /api/media` (multipart, streamed with a byte limit), `GET /api/media/:id`, `GET /api/media/:id/preview`, `DELETE /api/media/:id`,
 `GET|POST /api/playlists`, `GET|PUT /api/playlists/:id` (full item list replace), `POST /api/playlists/:id/publish` (body: displayId; header `Idempotency-Key`),
 `GET /api/displays/:id/status`, `GET /api/audit`.

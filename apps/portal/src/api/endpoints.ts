@@ -116,6 +116,8 @@ export interface Endpoints {
   patchDisplay(id: string, patch: DisplayPatch): Promise<DisplayDto>;
   claimPairing(displayId: string, code: string): Promise<PairingClaimResponse>;
   revokePlayer(displayId: string): Promise<RevokePlayerResponse>;
+  /** Also revokes its player and cancels its pending pairing codes. */
+  deleteDisplay(id: string): Promise<void>;
   getDisplayStatus(displayId: string, signal?: AbortSignal): Promise<DeliveryStatusView>;
   /** The status of every display in one call, in the order of `listDisplays`. */
   listDisplayStatuses(signal?: AbortSignal): Promise<DeliveryStatusView[]>;
@@ -264,6 +266,9 @@ export function createEndpoints(client: ApiClient): Endpoints {
         { method: 'POST', path: ROUTES.displayRevokePlayer(displayId) },
         RevokePlayerResponseSchema,
       );
+    },
+    deleteDisplay(id) {
+      return client.requestNoContent({ method: 'DELETE', path: ROUTES.display(id) });
     },
     getDisplayStatus(displayId, signal) {
       return client.request(get(ROUTES.displayStatus(displayId), signal), DeliveryStatusViewSchema);

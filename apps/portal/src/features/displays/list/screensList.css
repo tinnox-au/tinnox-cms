@@ -200,3 +200,44 @@
 .tx-screens-grid > .tx-tile {
   align-content: start;
 }
+
+/* ---------- Bulk delete dialog (as the Playlists list's) ---------- */
+
+.tx-screens-delete__names {
+  position: relative;
+  display: grid;
+  gap: 0;
+  max-block-size: 240px;
+  margin: 0;
+  padding: 0 var(--s-3);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  overflow-y: auto;
+  list-style: none;
+}
+
+.tx-screens-delete__names > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 2px var(--s-3);
+  padding: 10px 0;
+}
+
+.tx-screens-delete__names > li + li {
+  border-block-start: 1px solid var(--line);
+}
+
+.tx-screens-delete__note {
+  color: var(--ink-2);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.tx-screens-delete__failures {
+  display: grid;
+  gap: var(--s-2);
+  margin: 0;
+  padding-inline-start: var(--s-5);
+}

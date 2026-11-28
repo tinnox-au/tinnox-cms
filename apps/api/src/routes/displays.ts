@@ -28,7 +28,8 @@ import {
   type WorkingHours,
 } from '@tinnox/contracts';
 import {
-  pairingCancelClaims,
+  revokeDisplayPlayer,
+  softDeleteDisplay,
   pairingClaim,
   readOrg,
   type AuditInput,
@@ -104,7 +105,7 @@ const DISPLAY_SELECT = `
   LEFT JOIN layout lay ON lay.id = d.assigned_layout_id AND lay.org_id = d.org_id
   LEFT JOIN layout_zone lz ON lz.layout_id = lay.id AND lz.org_id = lay.org_id AND lz.position = 0
   LEFT JOIN playlist lmp ON lmp.id = lz.playlist_id AND lmp.org_id = lz.org_id
-  WHERE d.org_id = app_org_id()`;
+  WHERE d.org_id = app_org_id() AND d.deleted_at IS NULL`;
 
 function toDisplayDto(row: DisplayRow): DisplayDto {
   return {
@@ -338,7 +339,8 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
                   d.default_fit, d.assigned_playlist_id, d.assigned_schedule_id,
                   d.assigned_layout_id, d.rotation, d.working_hours,
                   d.alert_offline_minutes, d.alert_back_online
-           FROM display d WHERE d.id = $1 AND d.org_id = app_org_id() FOR UPDATE`,
+           FROM display d
+           WHERE d.id = $1 AND d.org_id = app_org_id() AND d.deleted_at IS NULL FOR UPDATE`,
           [id],
         );
         const current = found(locked.rows[0], 'The screen');
@@ -456,6 +458,40 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
     );
   });
 
+  /**
+   * Deletes a screen (CMS-41). The row is kept with `deleted_at` (its publications are
+   * immutable and refer to it) and every later request for it answers 404. In the order of
+   * revoke-player: claims cancelled before the row is locked (SCX-01), then the active
+   * registration revoked, so the player answers to `device_revoked`; its tags and assignments
+   * are taken off, so tag counts and playlist, schedule and layout deletes no longer see it.
+   * Its open alert episode, if any, is closed by the next alert check (alerts.ts).
+   */
+  app.delete(ROUTES.displayPattern, async (request, reply) => {
+    const session = operatorOf(request);
+    const { id } = parseInput(IdParamSchema, request.params, 'address');
+    await changeAsOperator(ctx, request, async (tx) => {
+      const deleted = await softDeleteDisplay(tx, id);
+      if (deleted === null) throw notFound('The screen');
+      return {
+        value: undefined,
+        audit: {
+          actorType: 'operator',
+          actorId: session.membershipId,
+          action: 'display.delete',
+          objectType: 'display',
+          objectId: id,
+          result: 'success',
+          detail: {
+            revokedRegistrationId: deleted.revokedRegistrationId,
+            cancelledPairingIds: deleted.cancelledPairingIds,
+            tagCount: deleted.tagCount,
+          },
+        },
+      };
+    });
+    return reply.code(204).send();
+  });
+
   // D9: the operator claims a pairing code for one of the organisation's displays.
   app.post(
     ROUTES.displayClaimPattern,
@@ -556,24 +592,12 @@ export function registerDisplayRoutes(app: FastifyInstance, ctx: AppContext): vo
     const session = operatorOf(request);
     const { id } = parseInput(IdParamSchema, request.params, 'address');
     return changeAsOperator(ctx, request, async (tx) => {
-      // After the role check, the claims are cancelled first, before the display row is locked:
-      // claims of this screen that no player has collected yet can then not bring a player
-      // back after the revocation (round 3, SCX-01). Only this organisation's rows are touched, so an
-      // unknown or foreign id changes nothing and is answered with 404 below.
-      const cancelledPairingIds = await pairingCancelClaims(tx, id);
-      const display = await tx.query(
-        'SELECT 1 FROM display WHERE id = $1 AND org_id = app_org_id() FOR UPDATE',
-        [id],
-      );
-      if (display.rowCount !== 1) throw notFound('The screen');
-      const revoked = await tx.query<{ id: string }>(
-        `UPDATE player_registration
-         SET revoked_at = now(), revoked_reason = 'operator'
-         WHERE display_id = $1 AND org_id = app_org_id() AND revoked_at IS NULL
-         RETURNING id`,
-        [id],
-      );
-      const registrationId = revoked.rows[0]?.id ?? null;
+      // After the role check: the claims first, then the row, then the registration
+      // (revokeDisplayPlayer, SCX-01). An unknown, foreign or deleted id changes nothing: 404.
+      const revoked = await revokeDisplayPlayer(tx, id);
+      if (revoked === null) throw notFound('The screen');
+      const { cancelledPairingIds } = revoked;
+      const registrationId = revoked.revokedRegistrationId;
       return {
         value: {
           revokedRegistrationId: registrationId,
