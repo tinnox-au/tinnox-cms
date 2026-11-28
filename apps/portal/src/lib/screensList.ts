@@ -7,13 +7,14 @@
  * In code the object is a `display`, as in the API and the contracts; every string an
  * operator sees says "screen" (P2-03). Status wording comes from `screenStatus.ts` (P2-04).
  */
-import type {
-  DeliveryStatusView,
-  DisplayDto,
-  PushPlanResponse,
-  PushPlanRow,
-  PushState,
-  SiteDto,
+import {
+  ABSOLUTE,
+  type DeliveryStatusView,
+  type DisplayDto,
+  type PushPlanResponse,
+  type PushPlanRow,
+  type PushState,
+  type SiteDto,
 } from '@tinnox/contracts';
 import { assignedContent, planRowContent } from './assignedContent.ts';
 import { countOf } from './bulkOutcome.ts';
@@ -82,15 +83,21 @@ export function buildScreenRows(sources: ScreenRowSources): ScreenRow[] {
 }
 
 /**
- * True when the statuses name a screen the list does not hold: a screen was added somewhere
- * else since the list was read, so the list is worth reading again.
+ * True when the list and the statuses disagree on which screens there are, so the list is
+ * worth reading again: a status names a screen the list does not hold (added somewhere else),
+ * or a listed screen has no status (deleted somewhere else, SDC-05). The API answers at most
+ * `ABSOLUTE.maxListItems` statuses and does not cap the list, so a capped answer is never
+ * read as a delete.
  */
-export function hasUnlistedScreen(
+export function listOutOfDate(
   displays: readonly DisplayDto[],
   statuses: readonly DeliveryStatusView[],
 ): boolean {
   const listed = new Set(displays.map((display) => idKey(display.id)));
-  return statuses.some((view) => !listed.has(idKey(view.displayId)));
+  if (statuses.some((view) => !listed.has(idKey(view.displayId)))) return true;
+  if (statuses.length >= ABSOLUTE.maxListItems) return false;
+  const reported = new Set(statuses.map((view) => idKey(view.displayId)));
+  return displays.some((display) => !reported.has(idKey(display.id)));
 }
 
 /** "1920 × 1080 px", with the multiplication sign. */

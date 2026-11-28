@@ -178,6 +178,8 @@ async function claimTransitions(tx: OrgTx, deps: DisplayAlertDeps): Promise<Chan
   // Report times are read, compared and stored at millisecond precision, the precision of a
   // JavaScript Date, so the exact comparisons in the claims hold whoever wrote the time.
   // shortcut: every display of the organisation in one query; page it at thousands of screens.
+  // A deleted screen is still read, so its open episode closes: its registration was revoked,
+  // so it has no report and is no longer eligible.
   const { rows } = await tx.query<CandidateRow>(
     `SELECT d.id, d.name, s.name AS site_name, s.timezone, d.working_hours,
             d.alert_offline_minutes, d.alert_back_online,

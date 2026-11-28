@@ -89,11 +89,12 @@ Claiming a display that already has a player revokes the previous registration (
 
 ```
 (none) --pairing completed--> active --operator revoke--------> revoked (operator)
+                                 |-----screen deleted---------> revoked (operator)
                                  |-----new player paired------> revoked (replaced)
                                  |-----DELETE /player/registration--> revoked (player_reset)
 ```
 
-Revocation is permanent. A revoked or unknown device token gets `401 device_revoked` on every credentialed route; a missing or malformed header gets `401 unauthenticated`. Failed lookups are counted per client address: after 30 in 10 minutes, credentialed requests from that address get `429 rate_limited` (with `Retry-After`) without a database lookup, unless they carry a credential the server verified recently. Real players behind one address are therefore not blocked by an attacker sharing it, but a player paired during such a block must wait. Signed media URLs issued earlier stop working at the same moment (`401 device_revoked`), because the registration is looked up on every media request.
+Deleting a screen in the portal (`DELETE /api/displays/:id`, CMS-41) revokes its registration with reason `operator` and cancels its claimed pairings in the same transaction; to the player it is an operator revoke, and needs no change there. Revocation is permanent. A revoked or unknown device token gets `401 device_revoked` on every credentialed route; a missing or malformed header gets `401 unauthenticated`. Failed lookups are counted per client address: after 30 in 10 minutes, credentialed requests from that address get `429 rate_limited` (with `Retry-After`) without a database lookup, unless they carry a credential the server verified recently. Real players behind one address are therefore not blocked by an attacker sharing it, but a player paired during such a block must wait. Signed media URLs issued earlier stop working at the same moment (`401 device_revoked`), because the registration is looked up on every media request.
 
 Revocation stops **future** server access. It cannot erase a device that is offline; that device keeps playing what it has cached until it next contacts the server, sees `401`, and must then stop and clear its cache.
 

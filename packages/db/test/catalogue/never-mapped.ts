@@ -22,7 +22,7 @@ const ORG_ONLY =
 const ACTOR =
   'Points at a member: the acting member of the session, or the member provisioning names. Membership rows are never deleted (removal is a status, 0013; tinnox_app holds no DELETE on membership), so the row exists.';
 const DISPLAY =
-  'Points at a display that the same transaction has read or locked. Displays are never deleted: tinnox_app holds no DELETE on display (grants.json).';
+  'Points at a display that the same transaction has read or locked. Displays are never deleted: a deleted screen keeps its row (deleted_at, 0017), and tinnox_app holds no DELETE on display (grants.json).';
 const SITE =
   'Points at a site of the organisation, which the display was created under. Sites are never deleted: tinnox_app holds no DELETE on site (grants.json).';
 const PUBLICATION =
@@ -91,9 +91,9 @@ export const NEVER_MAPPED: Readonly<Record<string, string>> = {
   display_delivery_display_id_org_id_fkey: DISPLAY,
   heartbeat_log_display_id_org_id_fkey: DISPLAY,
   pairing_session_display_id_org_id_fkey:
-    'Written only by sec.pairing_claim, after it has found the display in the current organisation. Displays are never deleted.',
+    'Written only by sec.pairing_claim, after it has found the display in the current organisation. Displays are never deleted (a delete is deleted_at, 0017).',
   player_registration_display_id_org_id_fkey:
-    'Written only by sec.pairing_complete, for the display its claim named. Displays are never deleted.',
+    'Written only by sec.pairing_complete, for the display its claim named. Displays are never deleted (a delete is deleted_at, 0017).',
   publication_display_id_org_id_fkey: DISPLAY,
   display_site_id_org_id_fkey: SITE,
   display_delivery_active_publication_id_org_id_display_id_fkey: PUBLICATION,
@@ -173,6 +173,10 @@ export const NEVER_MAPPED: Readonly<Record<string, string>> = {
     'Written only by sec.pairing_create, which catches the unique violation and answers code_collision itself.',
   player_registration_one_active_per_display:
     'Written only by sec.pairing_complete, which revokes the active registration of the display (replaced) under the pairing lock of the display before it inserts the new one.',
+
+  // Named guards.
+  display_deleted_guard:
+    'Refuses any change to a deleted display (0017). Every write of the API locks the display with deleted_at IS NULL first and answers 404 when it is gone (routes/displays.ts, publishing.ts), so none reaches a deleted row.',
 };
 
 /**

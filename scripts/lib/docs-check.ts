@@ -539,6 +539,9 @@ function unpinnedIn(doc: Doc, localImages: ReadonlySet<string>): Unpinned[] {
     });
   } else if (isCompose(doc.path)) {
     for (const image of composeImages(lines)) {
+      // A whole reference that is one required variable, `${NAME:?}`, is set when the file is
+      // run (a deployed environment names the images it was given) and cannot be read here.
+      if (/^\$\{\w+:\?[^}]*\}$/.test(image.reference)) continue;
       if (image.built || DIGEST.test(image.reference)) continue;
       found.push({
         path: doc.path,

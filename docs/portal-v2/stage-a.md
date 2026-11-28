@@ -115,7 +115,7 @@ Two columns. Left: preview (image, or video with controls), then facts (kind, di
 
 ### 3.6 Screens
 
-- List columns: checkbox, name, Status (pill from the delivery summary, plus "last report 12 s ago"), Content (assigned playlist as a link, with a "Changes waiting" marker), Site, Canvas, Tags, actions. Filters: search, status chips, tag chips. Grid view shows a canvas-shaped tile with the status pill. Row menu: Open, Assign content, Push now, Revoke player. Bulk: Assign content, Add tags, Push.
+- List columns: checkbox, name, Status (pill from the delivery summary, plus "last report 12 s ago"), Content (assigned playlist as a link, with a "Changes waiting" marker), Site, Canvas, Tags, actions. Filters: search, status chips, tag chips. Grid view shows a canvas-shaped tile with the status pill. Row menu: Open, Assign content, Push now, Revoke player (Delete added on 2026-11-27, CMS-41). Bulk: Assign content, Add tags, Push (Delete added on 2026-11-27, CMS-41: one `DELETE` per screen, one after another; a screen already gone counts as deleted).
 - Status refreshes every 10 s through `GET /api/displays/status`.
 
 ### 3.7 Add screen wizard
@@ -124,7 +124,7 @@ Three steps with a progress header: **Details** (name, site, canvas presets and 
 
 ### 3.8 Screen details
 
-- Left card: a canvas-shaped preview frame showing the assigned playlist's first item (a mock of the content, clearly labelled "Assigned content preview", never presented as a screenshot of the screen), the status headline with its M0 test ids and data attributes, last report, and buttons **Push to this screen** and a menu (Revoke player).
+- Left card: a canvas-shaped preview frame showing the assigned playlist's first item (a mock of the content, clearly labelled "Assigned content preview", never presented as a screenshot of the screen), the status headline with its M0 test ids and data attributes, last report, and buttons **Push to this screen** and a menu (Revoke player; Delete screen added on 2026-11-27, CMS-41).
 - Right: Name, Description, Site (read-only), and **Content**: the assigned playlist with Change and "Open playlist", and the push state for this screen.
 - Tabs: **Overview** (the M0 live-status facts: desired, downloaded, active, player state, errors); **Canvas** (the M0 canvas, content rectangle and fit form); **Pairing** (pair, replace, revoke, as M0); **Tags**; **Planned** tabs shown disabled with a tooltip naming the stage: Working hours, Alerts, Advanced.
 - Status keeps polling every 5 s so the stale flag flips without a reload.
@@ -236,7 +236,7 @@ Written 2026-11-16 by the integration step. Section 3 is built as written except
 
 Known deviations, not fixed in stage A:
 
-- Screens cannot be deleted or archived in stage A (M0 had no delete either). Screens created by mistake stay in every list, counter and push plan. An archive with an audit entry is planned for a later stage.
+- Screens cannot be deleted or archived in stage A (M0 had no delete either). Screens created by mistake stay in every list, counter and push plan. An archive with an audit entry is planned for a later stage. Built on 2026-11-27 (CMS-41): Delete in the Screens list's row menu and selection bar and in the screen page's menu (`DELETE /api/displays/:id`, audit `display.delete`). The row is kept, marked deleted, and leaves every list, counter and push plan; the screen's player is revoked.
 
 Known performance items, not fixed in stage A:
 

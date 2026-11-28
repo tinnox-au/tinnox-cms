@@ -404,7 +404,7 @@ const SIGN_IN_UNAVAILABLE: Answer = {
 const MEMBER_LOCKED = ['auth.login:failure:member_locked unscoped'];
 
 /**
- * Every route that changes state, as registered: the 35 state-changing operator routes
+ * Every route that changes state, as registered: the 36 state-changing operator routes
  * (tests/integration/routes.ts lists the same ones, and session-csrf.test.ts holds that list to
  * the application), sign-in and sign-out, the public alert confirmation, and the player routes
  * that write or are POSTs.
@@ -427,6 +427,18 @@ const TABLE: Readonly<Record<string, Row | NoTransaction>> = {
     return change(
       () => send(owner, 'PATCH', `/api/displays/${display.id}`, { name: 'After the update' }),
       () => rowOf('display', display.id),
+    );
+  }),
+  // A paired screen, so the registration is revoked in the same change.
+  'DELETE /api/displays/:id': operator(async () => {
+    const display = await pairedDisplay('Deleted screen');
+    return change(
+      () => send(owner, 'DELETE', `/api/displays/${display.id}`),
+      () =>
+        Promise.all([
+          rowOf('display', display.id),
+          rowOf('player_registration', display.player.registrationId),
+        ]),
     );
   }),
   'POST /api/displays/:id/claim': operator(
@@ -1110,7 +1122,7 @@ afterAll(async () => {
 describe('the commit-outcome table has a row for every route that changes state (step 33)', () => {
   it('has a row for every state-changing route the application registers, and for no other', () => {
     const routes = registeredRoutes(t.app).filter(changesState);
-    // The API's two route tables were read: the 35 operator writes and the routes outside them.
+    // The API's two route tables were read: the 36 operator writes and the routes outside them.
     expect(routes.length).toBeGreaterThan(40);
     const missing = routes
       .filter((route) => !Object.hasOwn(TABLE, route))

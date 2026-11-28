@@ -704,6 +704,7 @@ describe('endpoints: changes', () => {
 
   it('sends each delete with DELETE and the CSRF token, and accepts an empty 204', async () => {
     const cases: [string, (api: Endpoints) => Promise<void>][] = [
+      [ROUTES.display(DISPLAY), (api) => api.deleteDisplay(DISPLAY)],
       [ROUTES.mediaItem(MEDIA), (api) => api.deleteMedia(MEDIA)],
       [ROUTES.tag(TAG), (api) => api.deleteTag(TAG)],
       [ROUTES.folder(FOLDER), (api) => api.deleteFolder(FOLDER)],

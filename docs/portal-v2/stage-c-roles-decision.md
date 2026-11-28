@@ -79,7 +79,7 @@ Y means allowed and N means refused. "D*n*" marks a cell that depends on a decis
 | Screens | Canvas, content area, fit, rotation | screen.setup | Y | Y | Y | N | Reaches the screen at the next push |
 | Screens | Working hours | screen.hours | Y | Y | Y | N | A setting of the screen made at install, like canvas and rotation |
 | Screens | Assign, change or remove a screen's content, including "Assign to screens" from a playlist | screen.assign | Y | Y | Y | N | Stored only; reaches the screen at the next push |
-| Screens | Delete a screen | screen.setup (reserved) | Y | Y | Y | N | No route today |
+| Screens | Delete a screen | screen.setup | Y | Y | Y | N | `DELETE /api/displays/:id`, since 2026-11-27 (CMS-41). It also revokes the screen's player and cancels its pending pairing codes; the row stays, marked deleted, for its history |
 | Sites | Manage sites and their time zone | site.manage (reserved) | Y | Y | Y | N | No route today. ISO-05's "site changes" step waits for it |
 | Pairing | Pair a player (enter the code shown on the screen), including replacing a paired player | screen.pair | Y | Y | Y | N | Replacing a player also revokes the old one; the same key covers both. The wrong-code budget counts per member, so each extra holder adds guesses |
 | Pairing | Revoke player | screen.pair | Y | Y | Y | N | The screen stops and clears its cache on its next contact. A player that stays offline keeps playing |
@@ -375,7 +375,7 @@ Each new route has its own entry in the route-to-key table.
 | How long a removed member's name is kept | Nothing purges audit rows today | Needs TINNOX input under DEC-18. `display_name` can be overwritten later |
 | Custom roles, groups, SSO, SCIM, IP allow-list, per-organisation session policy | The fixed nested roles cover the pilot | Nested roles map onto identity-provider groups |
 | User quotas per plan; locking users when a licence is suspended (Epic N) | Entitlements are not built; TINNOX can refuse invites beyond the plan | Check at invite time |
-| Routes for organisation rename and delete, screen delete, sites and rollback | No routes exist; the matrix already fixes who may use them | |
+| Routes for organisation rename and delete, sites and rollback | No routes exist; the matrix already fixes who may use them | Screen delete was built on 2026-11-27 (CMS-41) |
 | Retiring `POST /api/playlists/:id/publish` | It keeps an all-of entry (`push.publish` and `screen.assign`) | A cleanup card moves the test and script helpers to assign plus `POST /api/push` |
 | Renaming `actor_type 'operator'` | Cosmetic; the portal shows "Person" | A later migration |
 

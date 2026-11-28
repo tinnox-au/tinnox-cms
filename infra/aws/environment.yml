@@ -1,0 +1,812 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  TINNOX CMS, one environment: its own network, one server that runs the containers of
+  infra/deploy/compose.yml, the server's permissions, its log group, its daily disk
+  snapshots and the key for its secrets. No database and no sign-in here: those are
+  database.yml and identity.yml. See infra/aws/README.md.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Environment }
+        Parameters: [EnvironmentName, PortalHostName, PlayerHostName, HostedZoneId]
+      - Label: { default: Server }
+        Parameters:
+          - ImageId
+          - InstanceType
+          - TerminationProtection
+          - DataVolumeSizeGiB
+          - DataVolumeSnapshotId
+          - DataVolumeAttached
+      - Label: { default: Network and logs }
+        Parameters: [VpcCidr, LogRetentionDays]
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: test
+    AllowedPattern: '^[a-z][a-z0-9]{1,11}$'
+    ConstraintDescription: 2 to 12 lower-case letters and digits, starting with a letter.
+    Description: >-
+      Short name of this environment. It is part of every resource name and of the
+      Parameter Store path /tinnox-cms/<name>/. Never change it on an existing stack.
+  PortalHostName:
+    Type: String
+    Default: app.test.tinnox-one.com.au
+    AllowedPattern: '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
+    Description: Host name of the portal and the API. Used for DNS records and outputs only.
+  PlayerHostName:
+    Type: String
+    Default: player.test.tinnox-one.com.au
+    AllowedPattern: '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
+    Description: Host name of the player. Used for DNS records and outputs only.
+  HostedZoneId:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^Z[A-Z0-9]{1,31}$'
+    Description: >-
+      Route 53 hosted zone that contains both host names. Leave empty when DNS is kept
+      elsewhere, and create the two A records by hand from the ServerPublicIp output.
+  ImageId:
+    Type: AWS::EC2::Image::Id
+    Description: >-
+      An Amazon Linux 2023 arm64 image, as an explicit ami- id. Take the current value of
+      the public parameter /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64.
+      Changing it later replaces the server: follow "Replacing the server" in the README.
+  InstanceType:
+    Type: String
+    Default: t4g.small
+    AllowedValues: [t4g.small, t4g.medium, t4g.large]
+    Description: >-
+      Graviton (arm64) only: the server set-up installs arm64 software. A change stops
+      and starts the server.
+  DataVolumeSizeGiB:
+    Type: Number
+    Default: 30
+    MinValue: 20
+    MaxValue: 500
+    Description: >-
+      Size of the data disk, which holds Docker's images and volumes (media, job
+      exchange, certificates). It can grow later, never shrink.
+  DataVolumeSnapshotId:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^snap-[0-9a-f]{8,17}$'
+    Description: >-
+      Read only when the stack is created. Empty for a new, blank data disk; a
+      snapshot id of this environment's data disk creates the disk from it, to rebuild
+      an environment (DataVolumeSizeGiB must then be at least the snapshot's size).
+      Never change it on an existing stack: CloudFormation cannot change where a disk
+      came from, and the update fails. To go back to an earlier night, see the README.
+  DataVolumeAttached:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Must be true when the stack is created. Set to false, with the server stopped,
+      to detach the disk before the server is replaced; then true again in the update
+      that replaces it. See "Replacing the server" in the README.
+  TerminationProtection:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Refuse to terminate the server. Leave it false while the stack is created, so a
+      failed creation can be rolled back, and set it to true in an update once the
+      stack exists. Set it to false again before the stack is deleted or the server
+      replaced.
+  VpcCidr:
+    Type: String
+    Default: 10.64.0.0/16
+    AllowedPattern: '^10\.(\d{1,3})\.0\.0/16$'
+    Description: >-
+      A /16 inside 10.0.0.0/8 for this environment's own network. It must not overlap
+      the account's other networks (the default one is 172.31.0.0/16). Never change it
+      on an existing stack: every subnet, and with it the server, would be replaced.
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues: [7, 14, 30, 60, 90, 180, 365]
+    Description: How long container logs are kept in CloudWatch Logs.
+
+Rules:
+  AustraliaOnly:
+    Assertions:
+      - Assert: !Contains [[ap-southeast-2, ap-southeast-4], !Ref 'AWS::Region']
+        AssertDescription: >-
+          All data stays in Australia (DEC-13): this stack may only be created in
+          Sydney (ap-southeast-2) or Melbourne (ap-southeast-4).
+
+Conditions:
+  HasHostedZone: !Not [!Equals [!Ref HostedZoneId, '']]
+  FromSnapshot: !Not [!Equals [!Ref DataVolumeSnapshotId, '']]
+  AttachDataVolume: !Equals [!Ref DataVolumeAttached, 'true']
+
+Resources:
+  # ------------------------------------------------------------------ network
+  # The environment's own network, apart from the account's default one and from the
+  # other system that runs there. One public subnet for the server; two subnets with no
+  # route to the internet for the database (RDS needs two zones even for one instance).
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - { Key: Name, Value: !Sub 'tinnox-cms-${EnvironmentName}' }
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - { Key: Name, Value: !Sub 'tinnox-cms-${EnvironmentName}' }
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  ServerSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 16, 8]]
+      # The server needs an address during its first boot, before its fixed address
+      # (ServerAddress) is attached, to install its software.
+      MapPublicIpOnLaunch: true
+      Tags:
+        - { Key: Name, Value: !Sub 'tinnox-cms-${EnvironmentName}-server' }
+
+  DatabaseSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Select [8, !Cidr [!Ref VpcCidr, 16, 8]]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - { Key: Name, Value: !Sub 'tinnox-cms-${EnvironmentName}-database-a' }
+
+  DatabaseSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Select [9, !Cidr [!Ref VpcCidr, 16, 8]]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - { Key: Name, Value: !Sub 'tinnox-cms-${EnvironmentName}-database-b' }
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: Name, Value: !Sub 'tinnox-cms-${EnvironmentName}-public' }
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  ServerSubnetRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref ServerSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # No route but the local one: the database can neither be reached from the internet
+  # nor reach it.
+  DatabaseRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: Name, Value: !Sub 'tinnox-cms-${EnvironmentName}-database' }
+
+  DatabaseSubnetARoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DatabaseSubnetA
+      RouteTableId: !Ref DatabaseRouteTable
+
+  DatabaseSubnetBRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DatabaseSubnetB
+      RouteTableId: !Ref DatabaseRouteTable
+
+  # In from anywhere on 80 and 443 only: the certificate authority checks the server from
+  # addresses it does not publish, and players and operators are anywhere. No SSH: people
+  # reach the server through Systems Manager Session Manager.
+  ServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub 'TINNOX CMS ${EnvironmentName} server - web in, https and database out'
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - {
+            IpProtocol: tcp,
+            FromPort: 80,
+            ToPort: 80,
+            CidrIp: 0.0.0.0/0,
+            Description: http for certificate checks and the redirect to https,
+          }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: https }
+      # Stating egress removes the default "everything out". DNS, time and instance
+      # metadata are not filtered by security groups.
+      SecurityGroupEgress:
+        - {
+            IpProtocol: tcp,
+            FromPort: 443,
+            ToPort: 443,
+            CidrIp: 0.0.0.0/0,
+            Description: https to AWS services the image registry and the certificate authority,
+          }
+      Tags:
+        - { Key: Name, Value: !Sub 'tinnox-cms-${EnvironmentName}-server' }
+
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub 'TINNOX CMS ${EnvironmentName} database - PostgreSQL from the server only'
+      VpcId: !Ref Vpc
+      # Nothing out: the loopback rule only replaces the default "everything out".
+      SecurityGroupEgress:
+        - { IpProtocol: '-1', CidrIp: 127.0.0.1/32, Description: no outbound traffic }
+      Tags:
+        - { Key: Name, Value: !Sub 'tinnox-cms-${EnvironmentName}-database' }
+
+  # Separate resources: each group names the other, which the groups themselves cannot.
+  ServerToDatabase:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref ServerSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      DestinationSecurityGroupId: !Ref DatabaseSecurityGroup
+      Description: PostgreSQL to the database
+
+  DatabaseFromServer:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref DatabaseSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref ServerSecurityGroup
+      Description: PostgreSQL from the server
+
+  # ------------------------------------------------------------------ secrets
+  # The secrets themselves are SecureString parameters under /tinnox-cms/<environment>/,
+  # written by hand (CloudFormation cannot create SecureString parameters). They are
+  # encrypted with this key and not with the account's default one: the default key
+  # lets every principal in the account decrypt through Parameter Store, while this one
+  # needs a kms:Decrypt permission in the principal's own policy. That keeps out a role
+  # with narrow permissions, such as another system's server. It does not keep out an
+  # administrator or a role with kms:* on everything.
+  #
+  # Kept when the stack is deleted, because the parameters outlive the stack; removed
+  # when the stack's own creation is rolled back.
+  SecretsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub 'TINNOX CMS ${EnvironmentName} - Parameter Store secrets'
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          # Who may use the key is decided by IAM policies in this account.
+          - Sid: AccountAdministersThroughIam
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: kms:*
+            Resource: '*'
+
+  SecretsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/tinnox-cms-${EnvironmentName}-secrets'
+      TargetKeyId: !Ref SecretsKey
+
+  # ------------------------------------------------------------------ logs
+  # Docker on the server sends every container's output here (set in the server set-up).
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub '/tinnox-cms/${EnvironmentName}'
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ------------------------------------------------------------------ server permissions
+  # What the server itself may do. Containers cannot use this role: the metadata hop
+  # limit of 1 (see Server) keeps them away from its credentials.
+  ServerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: !Sub 'TINNOX CMS ${EnvironmentName} server'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Session Manager, Run Command and patching. It also allows reading every
+        # parameter in the account, which ParametersElsewhereDenied below takes away.
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore'
+      Policies:
+        - PolicyName: server
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ParametersOfThisEnvironment
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/tinnox-cms/${EnvironmentName}'
+                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/tinnox-cms/${EnvironmentName}/*'
+              - Sid: ParametersElsewhereDenied
+                Effect: Deny
+                Action: ssm:GetParameter*
+                NotResource:
+                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/tinnox-cms/${EnvironmentName}'
+                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/tinnox-cms/${EnvironmentName}/*'
+              - Sid: DecryptParametersOfThisEnvironment
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: !GetAtt SecretsKey.Arn
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub 'ssm.${AWS::Region}.amazonaws.com'
+                  StringLike:
+                    kms:EncryptionContext:PARAMETER_ARN: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/tinnox-cms/${EnvironmentName}/*'
+              - Sid: RegistrySignIn
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Sid: PullImages
+                Effect: Allow
+                Action:
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                Resource: !Sub 'arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/tinnox-cms/*'
+              - Sid: WriteContainerLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt LogGroup.Arn
+
+  ServerProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref ServerRole]
+
+  # ------------------------------------------------------------------ server
+  # Docker's images and volumes live here, not on the server's own disk, so the server
+  # can be replaced without losing media, the job exchange or certificates.
+  DataVolume:
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      AvailabilityZone: !GetAtt ServerSubnet.AvailabilityZone
+      Size: !Ref DataVolumeSizeGiB
+      SnapshotId: !If [FromSnapshot, !Ref DataVolumeSnapshotId, !Ref 'AWS::NoValue']
+      VolumeType: gp3
+      Encrypted: true
+      Tags:
+        - { Key: Name, Value: !Sub 'tinnox-cms-${EnvironmentName}-data' }
+        # DailySnapshots finds the volume by this tag and no other volume carries it.
+        - { Key: 'tinnox-cms:snapshots', Value: !Sub '${EnvironmentName}-daily' }
+
+  # The server set-up reports here when it has finished, so a stack whose server could
+  # not be set up fails instead of looking healthy.
+  BootstrapHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+
+  Server:
+    Type: AWS::EC2::Instance
+    DependsOn: [PublicDefaultRoute, ServerSubnetRoutes]
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref ServerProfile
+      SubnetId: !Ref ServerSubnet
+      SecurityGroupIds: [!Ref ServerSecurityGroup]
+      DisableApiTermination: !Ref TerminationProtection
+      Monitoring: false
+      # No surprise charge: when the CPU allowance is used up the server slows down
+      # instead of billing extra.
+      CreditSpecification:
+        CPUCredits: standard
+      # Session tokens are required for instance metadata, and the answer may travel one
+      # hop only: the server's own software reaches it, a container on a Docker network
+      # does not, so no container can take the server's AWS credentials.
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+        InstanceMetadataTags: disabled
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: 16
+            Encrypted: true
+            DeleteOnTermination: true
+      PropagateTagsToVolumeOnCreation: true
+      Tags:
+        - { Key: Name, Value: !Sub 'tinnox-cms-${EnvironmentName}-server' }
+      # Runs once, at the first boot of a new server. It only prepares the host: it
+      # starts no container and reads no secret. A change here stops and starts the
+      # server but does not run again; apply later host changes through Systems Manager.
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -Eeuo pipefail
+          exec > >(tee -a /var/log/tinnox-bootstrap.log) 2>&1
+
+          # CloudFormation is told once how the set-up ended, however it ended: the
+          # EXIT trap also covers an exit that raises no error trap, such as an unset
+          # variable.
+          HANDLE='${BootstrapHandle}'
+          finished=0
+          failed_line=unknown
+          signal() {
+            curl -sS -m 30 --retry 5 -X PUT -H 'Content-Type:' \
+              --data-binary "{\"Status\":\"$1\",\"Reason\":\"$2\",\"UniqueId\":\"bootstrap\",\"Data\":\"$1\"}" \
+              "$HANDLE" || true
+          }
+          trap 'failed_line=$LINENO' ERR
+          trap 'if [ "$finished" = 1 ]; then signal SUCCESS "server set-up finished"; else signal FAILURE "server set-up failed near line $failed_line: see /var/log/tinnox-bootstrap.log"; fi' EXIT
+
+          # The network may not be ready in the first seconds of the first boot.
+          retry() {
+            local n=0
+            until "$@"; do
+              n=$((n + 1))
+              [ "$n" -ge 20 ] && return 1
+              sleep 15
+            done
+          }
+
+          # Docker and the registry sign-in helper are Amazon Linux packages. Compose is
+          # not packaged, so one pinned release is installed and checked against its
+          # published SHA-256. To change the version, change both lines.
+          retry dnf -y install docker amazon-ecr-credential-helper
+          retry curl -fsSL -m 180 -o /tmp/docker-compose \
+            https://github.com/docker/compose/releases/download/v2.40.3/docker-compose-linux-aarch64
+          echo 'd26373b19e89160546d15407516cc59f453030d9bc5b43ba7faf16f7b4980137  /tmp/docker-compose' | sha256sum -c -
+          install -D -m 0755 /tmp/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+          rm -f /tmp/docker-compose
+
+          # The data disk is attached after the server exists, so wait for it. It is
+          # formatted only when it can be read and holds no file system at all (blkid
+          # exit status 2): a disk that already has data is never formatted.
+          DEVICE="/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_$(echo '${DataVolume}' | tr -d '-')"
+          n=0
+          until [ -b "$DEVICE" ]; do
+            n=$((n + 1))
+            if [ "$n" -ge 120 ]; then echo 'the data disk did not appear within 10 minutes'; false; fi
+            sleep 5
+          done
+          head -c 4096 "$DEVICE" > /dev/null
+          probe=0
+          blkid -p "$DEVICE" > /dev/null 2>&1 || probe=$?
+          case "$probe" in
+            0) echo 'the data disk already has a file system: kept as it is' ;;
+            2) mkfs.xfs -L tinnox-data "$DEVICE" ;;
+            *) echo "cannot read the data disk (blkid exit status $probe)"; false ;;
+          esac
+          UUID="$(blkid -s UUID -o value "$DEVICE")"
+          install -d -m 0755 /var/lib/tinnox
+          # nofail: a missing disk must not stop the boot, or nobody can sign in to repair
+          # it. Docker itself refuses to start without the disk (see the unit file below).
+          grep -q "UUID=$UUID " /etc/fstab ||
+            echo "UUID=$UUID /var/lib/tinnox xfs defaults,nofail,x-systemd.device-timeout=90s 0 2" >> /etc/fstab
+          mountpoint -q /var/lib/tinnox || mount /var/lib/tinnox
+
+          # Docker keeps images and volumes on the data disk and sends every container's
+          # output to CloudWatch Logs without blocking the container when the service
+          # cannot be reached. "docker logs" still shows the latest lines from a local copy.
+          install -d -m 0755 /etc/docker /etc/systemd/system/docker.service.d
+          cat > /etc/docker/daemon.json <<'JSON'
+          {
+            "data-root": "/var/lib/tinnox/docker",
+            "log-driver": "awslogs",
+            "log-opts": {
+              "awslogs-region": "${AWS::Region}",
+              "awslogs-group": "${LogGroup}",
+              "tag": "{{.Name}}",
+              "mode": "non-blocking",
+              "max-buffer-size": "4m"
+            }
+          }
+          JSON
+          cat > /etc/systemd/system/docker.service.d/10-tinnox-data.conf <<'UNIT'
+          [Unit]
+          RequiresMountsFor=/var/lib/tinnox
+          UNIT
+
+          # Image pulls from this account's registry sign in with the server's role.
+          install -d -m 0700 /root/.docker
+          cat > /root/.docker/config.json <<'JSON'
+          {
+            "credHelpers": {
+              "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com": "ecr-login"
+            }
+          }
+          JSON
+
+          # Where a deployment puts the compose file and the API's settings file.
+          install -d -m 0750 /etc/tinnox
+
+          # A small server: swap keeps the host itself alive if the containers fill memory.
+          if [ ! -f /swapfile ]; then
+            dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none
+            chmod 600 /swapfile
+            mkswap /swapfile > /dev/null
+            echo '/swapfile none swap sw 0 0' >> /etc/fstab
+          fi
+          swapon -a
+          echo 'vm.swappiness = 10' > /etc/sysctl.d/90-tinnox.conf
+          sysctl -q --system
+
+          systemctl daemon-reload
+          systemctl enable --now docker
+          docker compose version
+          test "$(docker info --format '{{.DockerRootDir}}')" = /var/lib/tinnox/docker
+
+          finished=1
+
+  # Conditional so the disk can be detached on purpose: CloudFormation creates a
+  # replacement server before it removes the old one, and a disk cannot be attached to both.
+  DataVolumeAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Condition: AttachDataVolume
+    Properties:
+      InstanceId: !Ref Server
+      VolumeId: !Ref DataVolume
+      Device: /dev/sdf
+
+  # A fixed public address, so DNS does not change when the server stops and starts.
+  ServerAddress:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - { Key: Name, Value: !Sub 'tinnox-cms-${EnvironmentName}-server' }
+
+  ServerAddressAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt ServerAddress.AllocationId
+      InstanceId: !Ref Server
+
+  BootstrapFinished:
+    Type: AWS::CloudFormation::WaitCondition
+    # The 30 minutes start when the fixed address is attached; the disk is attached at
+    # about the same time and the set-up waits for it.
+    DependsOn: ServerAddressAssociation
+    Properties:
+      Handle: !Ref BootstrapHandle
+      Timeout: '1800'
+      Count: 1
+
+  # ------------------------------------------------------------------ upkeep
+  # Operating system updates, once a week in the quiet hours (Saturday 18:30 UTC, which
+  # is Sunday 04:30 in Sydney and 05:30 in summer), with a restart when an update needs
+  # one. The containers come back by themselves (restart: unless-stopped).
+  WeeklyPatching:
+    Type: AWS::SSM::Association
+    DependsOn: BootstrapFinished
+    Properties:
+      AssociationName: !Sub 'tinnox-cms-${EnvironmentName}-weekly-patching'
+      Name: AWS-RunPatchBaseline
+      Targets:
+        - { Key: InstanceIds, Values: [!Ref Server] }
+      ScheduleExpression: cron(30 18 ? * SAT *)
+      ApplyOnlyAtCronInterval: true
+      Parameters:
+        Operation: [Install]
+        RebootOption: [RebootIfNeeded]
+
+  # A snapshot of the data disk every night (16:30 UTC, which is 02:30 in Sydney and
+  # 03:30 in summer), seven kept. The schedule below touches only the volume with this
+  # environment's tag. The role itself, with AWS's managed policy, could snapshot and
+  # delete snapshots of any volume in the account.
+  SnapshotRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: !Sub 'TINNOX CMS ${EnvironmentName} - daily snapshots of the data disk'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: dlm.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSDataLifecycleManagerServiceRole'
+
+  DailySnapshots:
+    Type: AWS::DLM::LifecyclePolicy
+    Properties:
+      Description: !Sub 'TINNOX CMS ${EnvironmentName} data disk daily'
+      State: ENABLED
+      ExecutionRoleArn: !GetAtt SnapshotRole.Arn
+      PolicyDetails:
+        PolicyType: EBS_SNAPSHOT_MANAGEMENT
+        ResourceTypes: [VOLUME]
+        TargetTags:
+          - { Key: 'tinnox-cms:snapshots', Value: !Sub '${EnvironmentName}-daily' }
+        Schedules:
+          - Name: daily
+            CopyTags: true
+            CreateRule:
+              Interval: 24
+              IntervalUnit: HOURS
+              Times: ['16:30']
+            RetainRule:
+              Count: 7
+
+  # ------------------------------------------------------------------ DNS (optional)
+  PortalRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: HasHostedZone
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub '${PortalHostName}.'
+      Type: A
+      TTL: '300'
+      ResourceRecords: [!GetAtt ServerAddress.PublicIp]
+
+  PlayerRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: HasHostedZone
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub '${PlayerHostName}.'
+      Type: A
+      TTL: '300'
+      ResourceRecords: [!GetAtt ServerAddress.PublicIp]
+
+  # Only Let's Encrypt, the authority Caddy uses, may issue certificates for the names.
+  PortalCertificateAuthority:
+    Type: AWS::Route53::RecordSet
+    Condition: HasHostedZone
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub '${PortalHostName}.'
+      Type: CAA
+      TTL: '3600'
+      ResourceRecords: ['0 issue "letsencrypt.org"']
+
+  PlayerCertificateAuthority:
+    Type: AWS::Route53::RecordSet
+    Condition: HasHostedZone
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub '${PlayerHostName}.'
+      Type: CAA
+      TTL: '3600'
+      ResourceRecords: ['0 issue "letsencrypt.org"']
+
+  # ------------------------------------------------------------------ releases
+  # The one thing the deploy workflow may run on the server (infra/aws/delivery.yml allows
+  # its role this document and no other). It takes a commit id and nothing else. It pulls
+  # that commit's release image, takes the compose file and the release script out of it
+  # and runs the script, which is infra/deploy/release.sh of that commit. So what a
+  # release does on the server is decided by the commit, and whoever may push images and
+  # start this document controls the server: see "Limits" in the README.
+  ReleaseDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub 'tinnox-cms-${EnvironmentName}-release'
+      DocumentType: Command
+      DocumentFormat: YAML
+      TargetType: /AWS::EC2::Instance
+      UpdateMethod: NewVersion
+      Content:
+        schemaVersion: '2.2'
+        description: !Sub 'TINNOX CMS ${EnvironmentName}: release one commit on the server.'
+        parameters:
+          Tag:
+            type: String
+            description: The full commit id whose images are released.
+            allowedPattern: '^[0-9a-f]{40}$'
+        mainSteps:
+          - action: aws:runShellScript
+            name: release
+            inputs:
+              timeoutSeconds: '1500'
+              runCommand:
+                - !Sub |
+                  #!/bin/bash
+                  set -Eeuo pipefail
+                  umask 077
+                  export HOME=/root
+                  TAG='{{ Tag }}'
+                  [[ $TAG =~ ^[0-9a-f]{40}$ ]] || { echo 'the tag is not a full commit id' >&2; exit 64; }
+                  exec 9>/run/tinnox-release.lock
+                  flock -n 9 || { echo 'another release is running' >&2; exit 75; }
+                  REGISTRY='${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com'
+                  IMAGE="$REGISTRY/tinnox-cms/release:$TAG"
+                  DIR="/var/lib/tinnox/releases/$TAG"
+                  docker pull --quiet "$IMAGE" >/dev/null
+                  rm -rf "$DIR.new"
+                  mkdir -p "$DIR.new"
+                  CONTAINER=$(docker create "$IMAGE")
+                  docker cp "$CONTAINER:/app/infra/deploy/." "$DIR.new/" || { docker rm "$CONTAINER" >/dev/null; exit 1; }
+                  docker rm "$CONTAINER" >/dev/null
+                  rm -rf "$DIR"
+                  mv "$DIR.new" "$DIR"
+                  export TINNOX_ENV='${EnvironmentName}'
+                  export TINNOX_REGION='${AWS::Region}'
+                  export TINNOX_REGISTRY="$REGISTRY"
+                  export TINNOX_TAG="$TAG"
+                  export PORTAL_HOST='${PortalHostName}'
+                  export PLAYER_HOST='${PlayerHostName}'
+                  exec bash "$DIR/release.sh"
+
+Outputs:
+  ReleaseDocumentName:
+    Description: The Systems Manager document that releases a commit on the server.
+    Value: !Ref ReleaseDocument
+  ServerPublicIp:
+    Description: The server's fixed public address. Both host names point here.
+    Value: !GetAtt ServerAddress.PublicIp
+  ServerInstanceId:
+    Description: The server, for Session Manager and Run Command.
+    Value: !Ref Server
+  PortalOrigin:
+    Description: PORTAL_ORIGIN and API_PUBLIC_ORIGIN of the API.
+    Value: !Sub 'https://${PortalHostName}'
+  PlayerOrigin:
+    Description: PLAYER_ORIGIN of the API.
+    Value: !Sub 'https://${PlayerHostName}'
+  ParameterPath:
+    Description: Parameter Store path of this environment's secrets and settings.
+    Value: !Sub '/tinnox-cms/${EnvironmentName}/'
+  SecretsKeyAlias:
+    Description: Key to name when writing a SecureString parameter under ParameterPath.
+    Value: !Ref SecretsKeyAlias
+  LogGroupName:
+    Description: CloudWatch Logs group with every container's output.
+    Value: !Ref LogGroup
+  DataVolumeId:
+    Description: The data disk.
+    Value: !Ref DataVolume
+  VpcId:
+    Description: The environment's network.
+    Value: !Ref Vpc
+    Export: { Name: !Sub '${AWS::StackName}-VpcId' }
+  ServerAvailabilityZone:
+    Description: The zone the server is in. A one-zone database goes into the same one.
+    Value: !GetAtt ServerSubnet.AvailabilityZone
+    Export: { Name: !Sub '${AWS::StackName}-ServerAvailabilityZone' }
+  DatabaseSubnetIds:
+    Description: The two subnets for the database, comma separated.
+    Value: !Join [',', [!Ref DatabaseSubnetA, !Ref DatabaseSubnetB]]
+    Export: { Name: !Sub '${AWS::StackName}-DatabaseSubnetIds' }
+  DatabaseSecurityGroupId:
+    Description: The security group for the database.
+    Value: !Ref DatabaseSecurityGroup
+    Export: { Name: !Sub '${AWS::StackName}-DatabaseSecurityGroupId' }

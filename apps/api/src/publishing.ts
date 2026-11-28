@@ -341,7 +341,8 @@ export async function changeOncePerKey<T>(
  * one display are made one after the other, and the canvas cannot change under
  * the plan. `FOR NO KEY UPDATE` is what a later UPDATE of the row needs, so
  * recording the assignment never has to upgrade the lock, and it does not hold
- * up rows that merely reference the display (heartbeats, registrations).
+ * up rows that merely reference the display (heartbeats, registrations). A deleted display is
+ * not found, also when the delete commits while this waits for the lock.
  */
 export async function lockDisplayForPublish(
   tx: OrgTx,
@@ -349,7 +350,7 @@ export async function lockDisplayForPublish(
 ): Promise<DisplayPlanRow | null> {
   const { rows } = await tx.query<DisplayPlanRow>(
     `SELECT ${DISPLAY_PLAN_COLUMNS} FROM display d
-     WHERE d.id = $1 AND d.org_id = app_org_id() FOR NO KEY UPDATE`,
+     WHERE d.id = $1 AND d.org_id = app_org_id() AND d.deleted_at IS NULL FOR NO KEY UPDATE`,
     [displayId],
   );
   return rows[0] ?? null;
@@ -877,7 +878,7 @@ export async function assessDisplays<T extends OrgReadTx>(
 export async function loadPushPlan(tx: OrgReadTx, ctx: AppContext): Promise<DisplayAssessment[]> {
   const { rows } = await tx.query<DisplayPlanRow>(
     `SELECT ${DISPLAY_PLAN_COLUMNS} FROM display d
-     WHERE d.org_id = app_org_id()
+     WHERE d.org_id = app_org_id() AND d.deleted_at IS NULL
      ORDER BY d.created_at, d.id
      LIMIT $1`,
     [ABSOLUTE.maxListItems],

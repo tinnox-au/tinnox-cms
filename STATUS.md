@@ -3,7 +3,7 @@ contract: status/v2
 repo: tinnox-au/tinnox-cms
 initiative: TINNOX CMS
 key: CMS
-next_id: 40
+next_id: 45
 phase: Not written yet: one sentence on what this project is and where it stands
 gate: -
 seeded: 17 Nov 2026 by status init
@@ -41,6 +41,9 @@ None.
 | CMS-36 | Decide two unaudited writes: an alert episode closed without an e-mail, and the expiry mark on a pairing session; audit or exempt them in D3 (poteto step 16) | proposed | - | 24 Nov |
 | CMS-38 | Player push channel for instant commands (reload, restart, screenshot): the player only polls today; add when a customer needs faster than the 15 s poll | proposed | - | 24 Nov |
 | CMS-39 | Compiled API image before stage 1 (first customer): add a build step and a CI job that tests the compiled build; stage 0 runs the API through tsx | proposed | - | 25 Nov |
+| CMS-40 | Sign-in that fails on a server error shows a raw JSON 500; redirect to the sign-in page with an error instead | proposed | - | 25 Nov |
+| CMS-42 | Native Linux player (Epic F): media on disk outside browser storage, boot start, crash recovery, read-only root, remote update, offline wipe on revoke | proposed | - | 26 Nov |
+| CMS-44 | Pi stays in standby after a power cut (CMS-4 R6 cut 3): find the cause, retest on CM5 with auto power-on | proposed | - | 29 Nov |
 
 ## To do
 
@@ -50,18 +53,21 @@ None.
 
 | Id | Card | Agreed | PR | Since |
 |---|---|---|---|---|
-| CMS-4 | Real-hardware check on Raspberry Pi 5 (8GB) under Linux: the browser player in Chromium kiosk mode on a monitor | Michael 23 Nov | - | 23 Nov |
 | CMS-32 | Poteto pyramid refactor, group D: verification (steps 29 to 37 of the adoption plan); Michael starts it | Michael 25 Nov | - | 25 Nov |
 | CMS-37 | Deploy the CMS to production: agree the deployment plan first (data stays in Australia, stability, scalability, security), then the first production release | Michael 25 Nov | - | 25 Nov |
 
 ## In review
 
-None.
+| Id | Card | Agreed | PR | Since |
+|---|---|---|---|---|
+| CMS-43 | Yodeck gap analysis: read-only walkthrough of the Unlimited trial vs TINNOX CMS, gaps by area and proposed work packages | Michael 28 Nov | #55 | 28 Nov |
 
 ## Done, last 14 days
 
 | Id | Date | Outcome | PR |
 |---|---|---|---|
+| CMS-41 | 28 Nov | Delete a screen from the Screens list (today a created screen can only be renamed or have its player revoked; Yodeck allows delete) | #54 |
+| CMS-4 | 28 Nov | Real-hardware check on Raspberry Pi 5 (8GB) under Linux: the browser player in Chromium kiosk mode on a monitor | - |
 | CMS-31 | 25 Nov | Poteto pyramid refactor, group C: errors and outcomes (steps 23 to 28 of the adoption plan); Michael starts it | #40 |
 | CMS-26 | 25 Nov | Ruleset on main: no force push or deletion, merge or squash only, pull requests and the three CI jobs required (poteto D12, D14); Michael creates it | - |
 | CMS-30 | 24 Nov | Poteto pyramid refactor, group B: the database API (steps 13 to 22 of the adoption plan), built locally first | #39 |
@@ -128,6 +134,9 @@ merged to main; CI green; full e2e suite (132 tests) passed on the merged tree
 - Power cut: resumes from cache without re-pairing; time to playback; clock with no RTC battery.
 - Storage persist answer; an update too big is refused, old content kept.
 - Record pass, fail or not run, with photos and OS, Chromium and build versions.
+
+**Evidence**
+Round 1 run 26-28 Nov on the stage 0 test site: setup, R1-R5, R7-R9 pass; R6 power cuts fail (2 of 5 needed a site visit). Report: https://claude.ai/artifact/JadWJ7VHzjPtu2vfVBDEUB
 
 ### CMS-5
 
@@ -318,9 +327,11 @@ from: CMS-30
 
 **Notes**
 - 24 Nov: Michael, 24 Nov: media is served direct from Sydney storage, no CDN, if possible. Michael is the incident owner for now. Native players: Linux only for now, Windows 11 set aside.
-- 25 Nov: Michael, 25 Nov: the product domain is tinnox-one.com.au, bought. Stage 0 keeps the API on tsx (compiled image is CMS-39).
-- 25 Nov: Michael, 25 Nov: hostnames are app. and player. under tinnox-one.com.au (app.test. and player.test. for stage 0); the bare domain carries no application and redirects to tinnox.com.au for now.
-- 25 Nov: Michael, 25 Nov: stage 0 goes in the existing AWS account Tinnox Production, not a new account. It already runs one server for another system; no RDS, no S3. The region lock needs the management account and is open.
+- 25 Nov: Michael, 25 Nov: the product domain is tinnox-one.com.au, bought; hostnames are app. and player. under it (app.test. and player.test. for stage 0). Stage 0 keeps the API on tsx (compiled image is CMS-39).
+- 25 Nov: Michael, 25 Nov: stage 0 goes in the existing AWS account Tinnox Production, not a new account.
+- 25 Nov: Michael activated AWS advanced features (cannot be undone). TINNOX now administers the organisation and its policies. The region policy still allows Sydney only.
+- 25 Nov: stacks created in Sydney (server, RDS PostgreSQL 17, Cognito, image delivery); billing has started. First release to test succeeded; TINNOX Internal created; sign-in and sign-out work. CloudTrail and a US$250 budget warning set.
+- 26 Nov: the edge did not forward /player to the API, so a player got no pairing code. Fixed and released (pull request 53); each release now checks both API prefixes from outside. Next: pair the Pi.
 
 ### CMS-38
 from: CMS-37
@@ -330,3 +341,27 @@ from: CMS-37
 
 **Notes**
 - 25 Nov: 25 Nov: the stage 0 image (pull request 42) runs the source on Node 24's type stripping: production dependencies only, no tsx. Left for this card: CI tests the API through tsx on Node 22, so before stage 1 CI tests the image as built or a compiled build replaces it.
+
+### CMS-40
+from: CMS-32
+
+### CMS-41
+
+**Evidence**
+Merged via #54 with CI and the manual e2e run green on the merged commit; Deploy to test submitted on 28 Nov, waiting for reviewer approval
+
+### CMS-42
+from: CMS-4
+
+**Notes**
+- 26 Nov: Plan: docs/implementation-backlog.md Epic F (F1-F7). Evidence, CMS-4 round 1, 26 Nov: on the Pi 5 the browser player's storage is not persistent (Chromium refused), so cached media can be evicted.
+- 26 Nov: Offline removal: a revoked or stolen offline device keeps its last content until it reconnects; consider encryption at rest and an optional max-days-offline rule.
+- 26 Nov: A player plan revision (DEC-36, PROPOSED 21 Nov) sits uncommitted in the main checkout on branch docs/player-runtime-plan.
+- 27 Nov: 27 Nov, CMS-4 R6: a power cut wiped the browser player's IndexedDB (pairing) and media cache; Chromium recreated an empty store, so the screen needed re-pairing. 2 of 5 cuts needed a site visit.
+
+### CMS-44
+from: CMS-4
+
+**Notes**
+- 29 Nov: 27 Nov, R6 cut 3: after replugging, steady red LED, no HDMI signal for 90 s+, until the power button was pressed; then normal boot. Bootloader config default; 5V rail 5.14 V; journal not kept across boots.
+- 29 Nov: Next: repeat 20+ cuts logging PSU model and replug timing; on CM5 hardware check the auto power-on option. Report: https://claude.ai/artifact/JadWJ7VHzjPtu2vfVBDEUB

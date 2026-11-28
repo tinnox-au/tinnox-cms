@@ -371,6 +371,24 @@ describe('pins', () => {
     ]);
   });
 
+  it('leaves a compose image that is one required variable, not one with a default or a tag', () => {
+    expect(
+      pins(
+        'infra/deploy/compose.yml',
+        'services:',
+        '  api:',
+        '    image: ${API_IMAGE:?}',
+        '  edge:',
+        '    image: ${WEB_IMAGE:-caddy:2}',
+        '  worker:',
+        '    image: ${REGISTRY:?}/worker:1',
+      ).map((line) => line.split(' is pinned')[0]),
+    ).toEqual([
+      'infra/deploy/compose.yml:5 image ${WEB_IMAGE:-caddy:2}',
+      'infra/deploy/compose.yml:7 image ${REGISTRY:?}/worker:1',
+    ]);
+  });
+
   it('wants every Dockerfile base pinned by digest, not an earlier stage', () => {
     expect(
       pins(

@@ -7,6 +7,12 @@
 # production dependencies. It contains no secret, no migration, no script and no
 # development tool: the migrator's credentials never reach it (AGENTS.md, section 1), and
 # every setting arrives through the environment at start.
+#
+# A second image is built from the same file, for a release on a server:
+#   docker build -f apps/api/Dockerfile --target release -t tinnox-cms-release .
+# It adds the migrations, the migration command, the server's compose file and the release
+# script to the same code, and runs the migrations when started. Only the release step
+# runs it, with the migrator's connection string and nothing else (infra/deploy/release.sh).
 # Node runs the TypeScript source directly, as the media worker's image does: the
 # repository allows only erasable syntax (tsconfig.base.json), so there is no build step.
 # Base: the same Node.js 24 (LTS) on Alpine 3.24 as the media worker, pinned by tag and digest.
@@ -32,14 +38,22 @@ RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
       --include-workspace-root=false \
  && rm -rf /root/.npm
 
-FROM node:24.22.3-alpine3.24@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5 AS runtime
+FROM node:24.22.3-alpine3.24@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5 AS base
 RUN addgroup -S -g 10002 api \
  && adduser -S -D -H -u 10002 -G api -s /sbin/nologin api \
  && rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
            /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /opt/yarn-* \
            /usr/local/bin/yarn /usr/local/bin/yarnpkg \
- && mkdir -p /data/media /data/jobs \
+ && mkdir -p /data/media /data/jobs /etc/ssl/rds \
  && chown 10002:10002 /data/media /data/jobs
+# The certificate authorities of Amazon RDS in Sydney, so a connection string can say
+# sslmode=verify-full&sslrootcert=/etc/ssl/rds/ap-southeast-2-bundle.pem. RDS refuses
+# connections without TLS, and Node does not trust these authorities by itself. The
+# checksum fails the build when AWS changes the bundle: read the new one, then update it.
+# The directory is made above: ADD would give a directory it creates the file's mode.
+ADD --chmod=0444 --checksum=sha256:d73890748b5a95551800df8a6f07c9c800e32ed34da7e6c9505918bf8ac2398b \
+    https://truststore.pki.rds.amazonaws.com/ap-southeast-2/ap-southeast-2-bundle.pem \
+    /etc/ssl/rds/ap-southeast-2-bundle.pem
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json ./
@@ -66,6 +80,26 @@ ENV NODE_ENV=production \
     MEDIA_JOBS_DIR=/data/jobs \
     HOME=/tmp
 USER 10002:10002
+
+# The release image: the same code with what a release needs beside it.
+FROM base AS release
+COPY db/migrations ./db/migrations
+COPY scripts/migrate.ts ./scripts/migrate.ts
+COPY scripts/lib/env.ts ./scripts/lib/env.ts
+COPY infra/deploy/compose.yml infra/deploy/release.sh ./infra/deploy/
+ENTRYPOINT ["node", "--disable-warning=ExperimentalWarning", "scripts/migrate.ts"]
+
+# The provisioning image: the same code with TINNOX's membership provisioning tool
+# (scripts/provision-member.ts). It is built where a person runs the tool
+# (infra/aws/provision.sh, in their CloudShell) and is pushed nowhere: no server has it.
+#   docker build -f apps/api/Dockerfile --target provision -t tinnox-cms-provision .
+FROM base AS provision
+COPY scripts/provision-member.ts ./scripts/provision-member.ts
+COPY scripts/lib/env.ts scripts/lib/idp.ts scripts/lib/provision.ts scripts/lib/sigv4.ts ./scripts/lib/
+ENTRYPOINT ["node", "--disable-warning=ExperimentalWarning", "scripts/provision-member.ts"]
+
+# The API image. It is the last stage, so a build without --target makes it.
+FROM base AS runtime
 EXPOSE 4000
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:'+(process.env.API_PORT||4000)+'/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]

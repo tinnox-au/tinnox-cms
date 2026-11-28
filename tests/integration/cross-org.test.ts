@@ -507,6 +507,7 @@ describe('organisation isolation through the API', () => {
         'revoke player',
         bob.fetch(`/api/displays/${a.displayId}/revoke-player`, { method: 'POST' }),
       ],
+      ['DELETE display', bob.fetch(`/api/displays/${a.displayId}`, { method: 'DELETE' })],
       ['DELETE media', bob.fetch(`/api/media/${a.mediaId}`, { method: 'DELETE' })],
       [
         'PUT playlist',
@@ -898,6 +899,9 @@ describe('organisation isolation through the API', () => {
           (x) => as('PATCH', `/api/displays/${b.displayId}`, { tagIds: [x.displayTagId] }),
           NOT_FOUND('The tag'),
         ),
+      ),
+      'DELETE /api/displays/:id': probes(
+        notFound((x) => as('DELETE', `/api/displays/${x.displayId}`), NOT_FOUND('The screen')),
       ),
       // A fresh code each time, so the display is what decides the answer.
       'POST /api/displays/:id/claim': probes(

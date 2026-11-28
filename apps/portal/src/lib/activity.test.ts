@@ -571,6 +571,7 @@ describe('describeActivity', () => {
 
   it('marks deletions, whose object can never be named', () => {
     for (const action of [
+      'display.delete',
       'media.delete',
       'tag.delete',
       'folder.delete',
@@ -581,6 +582,10 @@ describe('describeActivity', () => {
       expect(describeActivity(event({ action })).removesSubject, action).toBe(true);
       expect(describeActivity(event({ action, result: 'failure' })).removesSubject).toBe(false);
     }
+    expect(describeActivity(event({ action: 'display.delete' })).text).toBe('Screen deleted');
+    expect(describeActivity(event({ action: 'display.delete', result: 'denied' })).text).toBe(
+      'Screen deletion refused',
+    );
     expect(describeActivity(event({ action: 'playlist.update' })).removesSubject).toBe(false);
   });
 

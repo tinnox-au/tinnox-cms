@@ -1,6 +1,6 @@
 import type { DeliveryStatusView, DisplayDto, Rotation } from '@tinnox/contracts';
 import { useCallback, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../../../api/index.ts';
 import { useLoad } from '../../../hooks/useLoad.ts';
 import { displayFormFromDto, type DisplayFormValues } from '../../../lib/displayForm.ts';
@@ -22,9 +22,10 @@ import {
 import { canvasFormDirty } from '../../../lib/screenDetailCanvas.ts';
 import { useCanAtMount } from '../../../session/AuthenticatedSession.tsx';
 import { EditorPage } from '../../../shell/EditorPage.tsx';
-import { ConfirmDialog, ErrorNotice } from '../../../ui/index.ts';
+import { ConfirmDialog, ErrorNotice, useToast } from '../../../ui/index.ts';
 import { usePush } from '../../push/PushContext.tsx';
 import { useLeaveGuard, useTags } from '../../shared/index.ts';
+import { DeleteScreenDialog, type ScreenToDelete } from '../DeleteScreenDialog.tsx';
 import { ContentCard } from './ContentCard.tsx';
 import { DetailsCard } from './DetailsCard.tsx';
 import { ScreenTabs } from './ScreenTabs.tsx';
@@ -51,6 +52,8 @@ export interface ScreenDetailProps {
 export function ScreenDetail({ data, refreshError, back, onReload, onChanged }: ScreenDetailProps) {
   const { display, site } = data;
   const push = usePush();
+  const toast = useToast();
+  const navigate = useNavigate();
   const tags = useTags('display');
   const assigned = useAssignedPlaylist(display);
   const [params, setParams] = useSearchParams();
@@ -163,6 +166,8 @@ export function ScreenDetail({ data, refreshError, back, onReload, onChanged }: 
     setRevoke((current) => (current === null || current.busy ? current : null));
   };
 
+  const [deleting, setDeleting] = useState<ScreenToDelete | null>(null);
+
   return (
     <EditorPage
       title={display.name}
@@ -194,6 +199,12 @@ export function ScreenDetail({ data, refreshError, back, onReload, onChanged }: 
               }}
               onShowPairing={() => {
                 selectTab('pairing');
+              }}
+              onDelete={() => {
+                // As on the list, the 5 s status counts too (SDC-06): a player may have
+                // collected its credential since the screen was read.
+                const reported = status.state.status === 'ready' && status.state.data.paired;
+                setDeleting({ id: display.id, name: display.name, paired: paired || reported });
               }}
               canPair={!readOnly.pairing}
               revoke={revoke?.origin === 'summary' ? revoke : null}
@@ -284,6 +295,26 @@ export function ScreenDetail({ data, refreshError, back, onReload, onChanged }: 
           </p>
         )}
       </ConfirmDialog>
+
+      <DeleteScreenDialog
+        screen={deleting}
+        onClose={() => {
+          setDeleting(null);
+        }}
+        onDeleted={(screen, alreadyGone) => {
+          leaveGuard.release();
+          push.refresh();
+          void navigate('/screens');
+          if (alreadyGone) toast.info(`${screen.name} was already deleted`);
+          else toast.success(`${screen.name} deleted`);
+        }}
+        onUnsure={() => {
+          // The server may have deleted it: read the screen, its status and the push plan again.
+          afterPlayerChange();
+          push.refresh();
+        }}
+        rowFocus="opener"
+      />
 
       {leaveGuard.dialog}
     </EditorPage>

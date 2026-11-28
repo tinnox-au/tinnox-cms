@@ -245,6 +245,32 @@ describe('e-mail alerts for screens', () => {
     expect(update?.detail).toEqual({ fields: ['alertBackOnline', 'alertOfflineMinutes'] });
   });
 
+  it('closes the open episode of a deleted screen silently (CMS-41)', async () => {
+    const screen = await reportingScreen('Alert deleted');
+    await later(async () => {
+      await check();
+      expect(mailFor('Alert deleted')).toHaveLength(1);
+      expect(await openEpisodes(screen.id)).toBe(1);
+      const removed = await owner.fetch(`/api/displays/${screen.id}`, { method: 'DELETE' });
+      expect(removed.status).toBe(204);
+      await check();
+    });
+    expect(mailFor('Alert deleted')).toHaveLength(1);
+    expect(await openEpisodes(screen.id)).toBe(0);
+    // However long it stays silent, nothing more is sent.
+    t.advanceClock(2 * DELAY_MS);
+    try {
+      await check();
+    } finally {
+      t.advanceClock(-2 * DELAY_MS);
+    }
+    expect(mailFor('Alert deleted')).toHaveLength(1);
+    const audit = (await auditEvents(owner, '&category=display')).filter(
+      (e) => e.objectId === screen.id && e.action !== 'display.create',
+    );
+    expect(audit.map((e) => e.action)).toEqual(['display.delete', 'display.offline_alert']);
+  });
+
   it('refuses an offline delay outside 30 minutes to 48 hours in half hours', async () => {
     const display = await createDisplay(owner, org, 'Alert bounds');
     for (const minutes of [0, 15, 45, 2910]) {

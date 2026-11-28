@@ -257,6 +257,13 @@ test('a Viewer sees no control that changes anything, and the API refuses their 
   await expect(page.getByTestId('screens-add')).toHaveCount(0);
   await expect(screenRow.getByTestId('screens-row-menu')).toHaveCount(0);
 
+  // The screen's page: its menu offers no Delete screen (CMS-41).
+  await openScreenPage(page, waitingScreenId);
+  await page.getByTestId('screen-detail-menu').click();
+  await expect(page.getByRole('menuitem', { name: 'Refresh status' })).toBeVisible();
+  await expect(page.getByRole('menuitem', { name: 'Delete screen' })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+
   // A playlist opens read-only: the note, no save bar, no library, no "Push now".
   await page.goto(`${PORTAL_URL}/playlists/${viewPlaylistId}`);
   await expect(page.getByTestId('playlist-editor')).toBeVisible();
@@ -317,6 +324,10 @@ test('a Viewer sees no control that changes anything, and the API refuses their 
     'PATCH /api/displays/:id',
   );
   await expectRefusedByRole(
+    await viewer.api.delete(`/api/displays/${waitingScreenId}`),
+    'DELETE /api/displays/:id',
+  );
+  await expectRefusedByRole(
     await viewer.api.post(
       '/api/push',
       { displayIds: [waitingScreenId] },
@@ -339,6 +350,7 @@ test('a Viewer sees no control that changes anything, and the API refuses their 
   };
   expect(kept.name).toBe(viewPlaylistName);
   expect(kept.items).toHaveLength(1);
+  expect((await viewer.api.get(`/api/displays/${waitingScreenId}`)).status()).toBe(200);
 
   // The refusal is in the Owner's full log, and never in the Viewer's activity.
   const ownLog = (await (await viewer.api.get('/api/audit?category=security')).json()) as {

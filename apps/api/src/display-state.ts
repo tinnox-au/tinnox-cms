@@ -121,7 +121,8 @@ export async function loadStatusViews(
      LEFT JOIN player_registration pr
        ON pr.display_id = d.id AND pr.org_id = d.org_id AND pr.revoked_at IS NULL
      LEFT JOIN display_delivery dd ON dd.display_id = d.id AND dd.org_id = d.org_id
-     WHERE d.org_id = app_org_id() AND ($1::uuid IS NULL OR d.id = $1::uuid)
+     WHERE d.org_id = app_org_id() AND d.deleted_at IS NULL
+       AND ($1::uuid IS NULL OR d.id = $1::uuid)
      ORDER BY d.created_at, d.id
      LIMIT $2`,
     [displayId, ABSOLUTE.maxListItems],

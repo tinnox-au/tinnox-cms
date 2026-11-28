@@ -1,0 +1,76 @@
+# Edge for a deployed environment (docs/deployment-plan-2026-11-24.md, section 3.2).
+# Two public origins: the portal, which also carries the API (under /api, so the session
+# cookie is same-origin, and under /player for the players), and the player
+# (prototype-m0.md D7, D17).
+# Caddy obtains and renews the certificates itself. For a name ending in .localhost it
+# signs them with its own local authority, which is how this file is tried on a laptop.
+{
+	# The container runs without root; compose maps 80 and 443 to these.
+	http_port 8080
+	https_port 8443
+	admin off
+	# Nothing is reported to a third party (D18).
+	ocsp_stapling off
+}
+
+# Sent with every page and file. The same five the Vite preview servers send
+# (apps/portal/vite.config.ts, apps/player-web/build/shell-plugin.mjs).
+# frame-ancestors cannot be set from the pages' <meta> policy, so the header carries only
+# that directive and never loosens the meta policy. The API sets its own headers and these
+# are not added to its answers.
+(page_headers) {
+	header {
+		Content-Security-Policy "frame-ancestors 'none'"
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		Cross-Origin-Opener-Policy "same-origin"
+	}
+}
+
+(every_answer) {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+}
+
+# A built single-page app. Hashed files under /assets never change, and a missing one is
+# a 404, not the page: a stale page must not get HTML where it asked for a script.
+# Everything else (index.html, the player's sw.js) is checked on every load, so a new
+# release is seen at once, and an unknown path gets the page, which routes it.
+(static_app) {
+	root * {args[0]}
+	encode zstd gzip
+	import page_headers
+	handle /assets/* {
+		header Cache-Control "public, max-age=31536000, immutable"
+		file_server
+	}
+	handle {
+		header Cache-Control "no-cache"
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+{$PORTAL_HOST} {
+	import every_answer
+	# The API has two public prefixes (packages/contracts/src/routes.ts): /api for the
+	# portal, and /player, which the player calls from its own origin with a device token
+	# (the player is built with this host as its API origin; the API allows exactly the
+	# player origin there, D7). Nothing else reaches the API: /healthz and /readyz stay
+	# inside the server. The portal has no page under either prefix.
+	@api path /api/* /player/*
+	handle @api {
+		reverse_proxy api:4000
+	}
+	handle {
+		import static_app /srv/portal
+	}
+}
+
+{$PLAYER_HOST} {
+	import every_answer
+	import static_app /srv/player
+}

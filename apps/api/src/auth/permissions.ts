@@ -90,8 +90,8 @@ const write = (keys: KeyRule, ...actions: [AuditAction, ...AuditAction[]]): Rout
   Object.freeze({ ...keys, audit: audits(...actions) });
 
 /**
- * Every operator route, the keys it needs (section 6.1) and what it audits (D3): 62 entries, 27
- * GET and 35 writes. Keyed by `${METHOD} ${pattern}` with the contract constants, so a renamed
+ * Every operator route, the keys it needs (section 6.1) and what it audits (D3): 63 entries, 27
+ * GET and 36 writes. Keyed by `${METHOD} ${pattern}` with the contract constants, so a renamed
  * path breaks the build. HEAD is read as GET (`routeKey`). A row is made with read() or
  * write(), so a route cannot be added without saying what it audits.
  */
@@ -112,6 +112,7 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteRule>> = Object.fre
     ),
     'display.update',
   ),
+  [`DELETE ${ROUTES.displayPattern}`]: write(all('screen.setup'), 'display.delete'),
   [`POST ${ROUTES.displayClaimPattern}`]: write(
     all('screen.pair'),
     'pairing.claim',
@@ -331,7 +332,7 @@ export function createRouteCheck(): {
 } {
   const registered = new Set<string>();
   return {
-    // Called once per method: the 62 routes and the HEAD twin of every GET.
+    // Called once per method: the 63 routes and the HEAD twin of every GET.
     onRoute: (route) => {
       const methods = Array.isArray(route.method) ? route.method : [route.method];
       for (const method of methods) registered.add(`${String(method)} ${route.url}`);

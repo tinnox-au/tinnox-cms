@@ -138,6 +138,7 @@ export const ROUTE_RESPONSE_SCHEMAS: Readonly<Record<string, ResponseContract>> 
   [`GET ${ROUTES.displaysStatus}`]: json(DeliveryStatusListResponseSchema),
   [`GET ${ROUTES.displayPattern}`]: json(DisplayDtoSchema),
   [`PATCH ${ROUTES.displayPattern}`]: json(DisplayDtoSchema),
+  [`DELETE ${ROUTES.displayPattern}`]: noContent,
   [`POST ${ROUTES.displayClaimPattern}`]: json(PairingClaimResponseSchema),
   [`POST ${ROUTES.displayRevokePlayerPattern}`]: json(RevokePlayerResponseSchema),
   [`GET ${ROUTES.displayStatusPattern}`]: json(DeliveryStatusViewSchema),

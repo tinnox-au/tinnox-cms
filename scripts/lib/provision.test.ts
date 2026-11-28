@@ -209,6 +209,37 @@ describe('provision-member arguments', () => {
   });
 });
 
+describe('a username that is an e-mail address', () => {
+  // Against a Cognito user pool the username is the person's address (scripts/lib/idp.ts).
+  const mfaReset = (username: string) =>
+    parseInvocation([
+      'mfa-reset',
+      '--username',
+      username,
+      '--request-ref',
+      'R-1',
+      '--executed-by',
+      'sam',
+    ]);
+
+  it('is accepted in the forms an invite can carry', () => {
+    for (const address of [
+      'alex@example.com',
+      "o'brien@firm.example",
+      '_ops@firm.example',
+      'a&b+tag@sub.firm.example',
+    ]) {
+      expect(() => mfaReset(address)).not.toThrow();
+    }
+  });
+
+  it('is refused with a space, a control character or an "="', () => {
+    for (const address of ['a b@firm.example', 'a\u0007b@firm.example', 'a=b@firm.example']) {
+      expect(() => mfaReset(address)).toThrow(UsageError);
+    }
+  });
+});
+
 describe('the identity-provider reader', () => {
   const options = { clientId: 'tinnox-provisioning', clientSecret: 'reader-secret' };
 

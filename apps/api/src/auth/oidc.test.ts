@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { LOGOUT_REDIRECT_MAX_LENGTH } from '@tinnox/contracts';
 import * as oidc from 'openid-client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -88,6 +90,71 @@ describe('endSessionUrl', () => {
     expect(
       await providerWith({ end_session_endpoint: endpoint }).endSessionUrl('id.tok'),
     ).toBeNull();
+  });
+
+  // Cognito's /logout answers "Invalid request" to the standard parameters (seen on the first
+  // deployed sign-out, 25 November 2026): it takes client_id and logout_uri.
+  describe('against a Cognito user pool', () => {
+    const POOL = 'https://cognito-idp.ap-southeast-2.amazonaws.com/ap-southeast-2_Example01';
+    const LOGOUT = 'https://tinnox-example.auth.ap-southeast-2.amazoncognito.com/logout';
+    const cognito = (overrides: Partial<AppConfig['oidc']> = {}) => {
+      const settings = {
+        oidc: {
+          ...config.oidc,
+          issuer: POOL,
+          clientId: 'example-client-id',
+          postLogoutRedirectUri: 'https://app.signage.example/',
+          ...overrides,
+        },
+      } as unknown as AppConfig;
+      vi.mocked(oidc.discovery).mockResolvedValue(
+        new oidc.Configuration(
+          { issuer: POOL, end_session_endpoint: LOGOUT },
+          settings.oidc.clientId,
+        ),
+      );
+      return createIdentityProvider(settings);
+    };
+
+    it('sends client_id and logout_uri, and none of the standard parameters', async () => {
+      const url = new URL((await cognito().endSessionUrl('id.tok')) ?? '');
+      expect(`${url.origin}${url.pathname}`).toBe(LOGOUT);
+      expect([...url.searchParams.keys()].sort()).toEqual(['client_id', 'logout_uri']);
+      expect(url.searchParams.get('client_id')).toBe('example-client-id');
+      // The marker is in the address Cognito returns to, which is registered with the client.
+      expect(url.searchParams.get('logout_uri')).toBe(
+        'https://app.signage.example/?state=signed_out',
+      );
+    });
+
+    it('asks for the very address the app client template registers', async () => {
+      // Nothing else ties the two: a drift would pass every other test and fail in the browser.
+      const template = readFileSync(
+        join(import.meta.dirname, '../../../../infra/aws/identity.yml'),
+        'utf8',
+      );
+      expect(template).toContain("- !Sub '${PortalOrigin}/?state=signed_out'");
+      const asked = new URL((await cognito().endSessionUrl(null)) ?? '').searchParams.get(
+        'logout_uri',
+      );
+      expect(asked).toBe(
+        '${PortalOrigin}/?state=signed_out'.replace(
+          '${PortalOrigin}',
+          'https://app.signage.example',
+        ),
+      );
+    });
+
+    it('is the same with and without an ID token, which Cognito does not use', async () => {
+      const provider = cognito();
+      expect(await provider.endSessionUrl(null)).toBe(await provider.endSessionUrl('id.tok'));
+      expect(await provider.endSessionUrl('x'.repeat(5000))).not.toBeNull();
+    });
+
+    it('answers null when the URL is past the portal limit', async () => {
+      const long = `https://app.signage.example/${'p'.repeat(LOGOUT_REDIRECT_MAX_LENGTH)}`;
+      expect(await cognito({ postLogoutRedirectUri: long }).endSessionUrl('id.tok')).toBeNull();
+    });
   });
 
   it('answers null when the provider has no end-session endpoint', async () => {

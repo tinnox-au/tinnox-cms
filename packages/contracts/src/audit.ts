@@ -18,6 +18,7 @@ export const AUDIT_ACTIONS = [
   'auth.logout',
   'display.create',
   'display.update',
+  'display.delete',
   'display.offline_alert',
   'display.online_alert',
   'pairing.create',
@@ -243,6 +244,21 @@ export interface AuditEventShapes {
       readonly assignedPlaylistId?: string | null;
       readonly assignedScheduleId?: string | null;
       readonly assignedLayoutId?: string | null;
+    };
+  };
+  /**
+   * A screen deleted by an operator (CMS-41): the row is kept with `deleted_at`. Its active
+   * registration, if any, is revoked and its claimed pairings cancelled in the same change,
+   * so the player answers to `device_revoked` like a revoked one. `tagCount` is the number of
+   * tags taken off it.
+   */
+  'display.delete': {
+    readonly actorType: 'operator';
+    readonly objectType: 'display';
+    readonly detail: {
+      readonly revokedRegistrationId: string | null;
+      readonly cancelledPairingIds: readonly string[];
+      readonly tagCount: number;
     };
   };
   'display.offline_alert': {

@@ -2,7 +2,7 @@ import type { DeliveryStatusView, DisplayDto } from '@tinnox/contracts';
 import type { LoadState } from '../../../hooks/useLoad.ts';
 import { STATUS_DISCLAIMER } from '../../../lib/screenDetail.ts';
 import { useCan } from '../../../session/AuthenticatedSession.tsx';
-import { Ellipsis, KeyRound, RefreshCw, Send, Unlink } from '../../../ui/icons.ts';
+import { Ellipsis, KeyRound, RefreshCw, Send, Trash, Unlink } from '../../../ui/icons.ts';
 import {
   Banner,
   Button,
@@ -29,6 +29,7 @@ export interface SummaryCardProps {
   readonly onPush: () => void;
   readonly onRevoke: () => void;
   readonly onShowPairing: () => void;
+  readonly onDelete: () => void;
   /**
    * The role may pair and revoke (`screen.pair`), decided when the page opened, like the
    * Pairing tab that "Pair player" opens.
@@ -42,7 +43,8 @@ export interface SummaryCardProps {
 /**
  * The left card: what is assigned, drawn in the shape of the canvas; what the player last
  * reported; and the two actions that act on the screen as a whole. "Push to this screen" needs
- * `push.publish`, pairing and revoking `screen.pair`; "Refresh status" is for everyone.
+ * `push.publish`, pairing and revoking `screen.pair`, deleting `screen.setup`; "Refresh status"
+ * is for everyone.
  */
 export function SummaryCard({
   display,
@@ -52,12 +54,14 @@ export function SummaryCard({
   onPush,
   onRevoke,
   onShowPairing,
+  onDelete,
   canPair,
   revoke,
   onDismissRevoke,
 }: SummaryCardProps) {
   const paired = display.player !== null;
   const canPush = useCan('push.publish');
+  const canDelete = useCan('screen.setup');
   return (
     <Card
       as="section"
@@ -102,21 +106,26 @@ export function SummaryCard({
                 Refresh status
               </MenuItem>
               {canPair && (
-                <>
-                  <MenuItem icon={KeyRound} onSelect={onShowPairing}>
-                    {paired ? 'Pair a different player' : 'Pair player'}
-                  </MenuItem>
-                  <MenuSeparator />
-                  <MenuItem
-                    icon={Unlink}
-                    tone="danger"
-                    disabled={!paired}
-                    hint={paired ? undefined : 'Not paired'}
-                    onSelect={onRevoke}
-                  >
-                    Revoke player
-                  </MenuItem>
-                </>
+                <MenuItem icon={KeyRound} onSelect={onShowPairing}>
+                  {paired ? 'Pair a different player' : 'Pair player'}
+                </MenuItem>
+              )}
+              {(canPair || canDelete) && <MenuSeparator />}
+              {canPair && (
+                <MenuItem
+                  icon={Unlink}
+                  tone="danger"
+                  disabled={!paired}
+                  hint={paired ? undefined : 'Not paired'}
+                  onSelect={onRevoke}
+                >
+                  Revoke player
+                </MenuItem>
+              )}
+              {canDelete && (
+                <MenuItem icon={Trash} tone="danger" onSelect={onDelete}>
+                  Delete screen
+                </MenuItem>
               )}
             </Menu>
           </div>
