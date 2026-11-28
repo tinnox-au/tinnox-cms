@@ -269,6 +269,9 @@ const ROWS: readonly {
     forbidden: [
       ['@tinnox/api/src/app.ts', APP],
       ['@tinnox/api', APP],
+      // The portal's one entry for tests is its route manifest (step 35); the rest stays closed.
+      ['@tinnox/portal', APP],
+      ['@tinnox/portal/src/App.tsx', APP],
       ['@tinnox/delivery', /tests may import only @tinnox\/contracts, @tinnox\/db/],
       ['../../apps/api/src/auth/oidc.ts', RELATIVE],
       ['../../apps/api/test/support.ts', RELATIVE],
@@ -278,6 +281,8 @@ const ROWS: readonly {
       '@tinnox/api/test-support',
       // The light entry of the API's names (CHK-9): a subpath of the harness's own entry.
       '@tinnox/api/test-support/runtime-env',
+      // The portal's JSX-free route table, which the accessibility spec keys its scans by.
+      '@tinnox/portal/routes-manifest',
       '@tinnox/db',
       '@tinnox/app-render',
       'pg',

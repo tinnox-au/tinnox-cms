@@ -61,8 +61,12 @@ listens on 127.0.0.1 only and proxies `/api` to the API, so the session cookie i
 ## Source layout
 
 ```
-src/App.tsx     session gate and route table (docs/portal-v2/stage-a.md, section 1); each
-                page module is loaded on first visit and is its own bundle
+src/App.tsx     session gate and router (docs/portal-v2/stage-a.md, section 1), built from
+                src/routes.manifest.ts; each page module is loaded on first visit and is
+                its own bundle
+src/routes.manifest.ts
+                the route table as data, no JSX: paths in router order, guards, per-object
+                pages; the accessibility spec keys its scans by its PagePath
 src/api         client (CSRF, 401, errors), typed endpoints, XHR upload
 src/hooks       useLoad: loading, polling while the tab is visible, keeping data on refresh errors
 src/session     session state; useCan and useCanAtMount (AuthenticatedSession.tsx)

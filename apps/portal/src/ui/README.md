@@ -999,14 +999,14 @@ push.refresh();
 | `Screens.tsx` | Screens without the shell: `SignInScreen`, `SessionCheckingScreen`, `SessionErrorScreen`, `RouteError` (the router's error element), and `RouteLoading` (the placeholder while a page's code loads on first visit) |
 | `NotFoundPage.tsx` | The page for an unknown address |
 | `ForbiddenPage.tsx` | "Your role doesn't allow this": a page inside the shell, in place of one the member's role does not open, with "Go to dashboard" |
-| `RequirePermission.tsx` | `RequirePermission({ permission, children })`: the page with the key, `ForbiddenPage` without it. Guards `/users` (`member.read`) and `/screens/new` (`screen.setup`). `App.tsx` exports `routes`, so `RequirePermission.test.tsx` renders the guarded routes from the real route table. A refusal by role from the API is recognised with `isRoleRefusal` (`api/client.ts`) |
+| `RequirePermission.tsx` | `RequirePermission({ permission, children })`: the page with the key, `ForbiddenPage` without it. Guards `/users` (`member.read`), `/screens/new` (`screen.setup`) and `/settings/alerts` (`alerts.manage`), as `routes.manifest.ts` says. `App.tsx` exports `routes`, so `RequirePermission.test.tsx` renders the manifest's guarded routes from the real route table. A refusal by role from the API is recognised with `isRoleRefusal` (`api/client.ts`) |
 | `Wordmark.tsx` | The text brand mark; `compact` shows the square "T" |
 | `ShellContext.ts` | `useShell()`: `drawerMode`, `navOpen`, `openNav`, `signOut`, `announcePage`. For the shell's own components |
 | `useDocumentTitle.ts`, `useMediaQuery.ts` | Small hooks used by the frames and the shell |
 
 ### Feature modules and routes
 
-Routes are declared in `App.tsx` with the `page(path, load, render)` helper: each feature module is loaded on first visit and becomes its own bundle, so a page's CSS file can be imported from the page itself. Keep each file path and named export; replace only the inside.
+Routes are listed in `src/routes.manifest.ts`, which has no JSX: each path in the router's order, the permission its guard asks for (`RequirePermission`) and, for a page that shows one object, the kind of object whose id is `:id` (the page is mounted afresh for each id, `PerObject`). `App.tsx` gives each path its element in `ELEMENTS`, with the `lazyPage(load, render)` helper for a page: each feature module is loaded on first visit and becomes its own bundle, so a page's CSS file can be imported from the page itself. A page added to the manifest (`kind: 'page'`) needs its element in `App.tsx` and its scan in `tests/e2e/11-accessibility.spec.ts`; a redirect (`kind: 'redirect'`) needs only its element, which must be an eager one (`{ element }`, not `lazyPage`), and an address in `App.test.tsx`. `npm run typecheck` fails until each exists. Keep each file path and named export; replace only the inside.
 
 | Path | Module | Export |
 |---|---|---|
