@@ -3,7 +3,7 @@ contract: status/v2
 repo: tinnox-au/tinnox-cms
 initiative: TINNOX CMS
 key: CMS
-next_id: 43
+next_id: 44
 phase: Not written yet: one sentence on what this project is and where it stands
 gate: -
 seeded: 17 Nov 2026 by status init
@@ -55,6 +55,7 @@ None.
 | CMS-4 | Real-hardware check on Raspberry Pi 5 (8GB) under Linux: the browser player in Chromium kiosk mode on a monitor | Michael 23 Nov | - | 23 Nov |
 | CMS-32 | Poteto pyramid refactor, group D: verification (steps 29 to 37 of the adoption plan); Michael starts it | Michael 25 Nov | - | 25 Nov |
 | CMS-37 | Deploy the CMS to production: agree the deployment plan first (data stays in Australia, stability, scalability, security), then the first production release | Michael 25 Nov | - | 25 Nov |
+| CMS-43 | Yodeck gap analysis: read-only walkthrough of the Unlimited trial vs TINNOX CMS, gaps by area and proposed work packages | Michael 28 Nov | - | 28 Nov |
 
 ## In review
 
